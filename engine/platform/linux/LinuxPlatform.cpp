@@ -113,6 +113,12 @@ std::string audio_device_name() { return {}; }
 
 #include <unistd.h>
 
+// xdg-shell types (xdg_toplevel, xdg_toplevel_set_title, etc.) are
+// declared in the wayland-scanner-generated header. The
+// engine/platform/linux/CMakeLists adds the generated dir
+// (${CMAKE_CURRENT_BINARY_DIR}/generated/xdg-shell) to the include path.
+#include "xdg-shell-client-protocol.h"
+
 namespace {
 
 // ─── Wayland graphical window ─────────────────────────────────────────────

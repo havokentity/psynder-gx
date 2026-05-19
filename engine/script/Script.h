@@ -7,6 +7,7 @@
 #include "core/Types.h"
 
 #include <span>
+#include <string>      // std::string — used by execute_repl's out param
 #include <string_view>
 
 namespace psynder::script {

@@ -59,7 +59,7 @@ struct EvdevReader {
     // Accumulated mouse delta (reset by evdev_poll_mouse each call).
     std::int32_t acc_dx       = 0;
     std::int32_t acc_dy       = 0;
-    std::int32_t acc_scroll_v = 0;
+    std::int32_t acc_wheel = 0;
 };
 
 // ─── Public: evdev_open ───────────────────────────────────────────────────
@@ -165,8 +165,8 @@ RawMouseDelta evdev_poll_mouse(EvdevReader* reader)
         // Flush any previously accumulated delta.
         out.dx       = reader->acc_dx;
         out.dy       = reader->acc_dy;
-        out.scroll_v = reader->acc_scroll_v;
-        reader->acc_dx = reader->acc_dy = reader->acc_scroll_v = 0;
+        out.wheel = reader->acc_wheel;
+        reader->acc_dx = reader->acc_dy = reader->acc_wheel = 0;
         return out;
     }
 
@@ -185,7 +185,7 @@ RawMouseDelta evdev_poll_mouse(EvdevReader* reader)
                     switch (e.code) {
                     case REL_X:     reader->acc_dx       += e.value; break;
                     case REL_Y:     reader->acc_dy       += e.value; break;
-                    case REL_WHEEL: reader->acc_scroll_v += e.value; break;
+                    case REL_WHEEL: reader->acc_wheel += e.value; break;
                     default: break;
                     }
                     break;
@@ -211,8 +211,8 @@ RawMouseDelta evdev_poll_mouse(EvdevReader* reader)
 
     out.dx       = reader->acc_dx;
     out.dy       = reader->acc_dy;
-    out.scroll_v = reader->acc_scroll_v;
-    reader->acc_dx = reader->acc_dy = reader->acc_scroll_v = 0;
+    out.wheel = reader->acc_wheel;
+    reader->acc_dx = reader->acc_dy = reader->acc_wheel = 0;
     return out;
 }
 

@@ -127,7 +127,7 @@ void         evdev_close(EvdevReader* reader);
 struct RawMouseDelta {
     std::int32_t dx = 0;
     std::int32_t dy = 0;
-    std::int32_t scroll_v = 0; // REL_WHEEL ticks
+    std::int32_t wheel = 0; // REL_WHEEL ticks
 };
 
 /// Poll all open evdev devices and accumulate deltas since last call.
