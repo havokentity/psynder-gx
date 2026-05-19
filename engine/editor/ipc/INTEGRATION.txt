@@ -1,0 +1,117 @@
+editor-ipc — WebSocket runtime integration notes
+==================================================
+
+This document describes the runtime behaviour of `psynder::editor::ipc::Server`
+as implemented in `Server.cpp`. The public surface in `Ipc.h` is frozen; this
+note is for downstream lanes (editor/core, console queue, React panels) that
+plug into the server.
+
+
+Wire protocol
+-------------
+
+  • Transport: TCP on 127.0.0.1:<port> (default 7654). Loopback bind only —
+    the `ServerDesc::bind_host` field is honoured for non-127.0.0.1 loopback
+    aliases (e.g. ::1 / 127.0.0.2) but the server is dev-only and MUST NOT
+    be exposed to a public interface. RFC 6455 WebSocket upgrade with the
+    standard sha1+base64 handshake.
+
+  • Frame opcode: outbound (server→panel) frames are opcode 0x2 (binary).
+    Inbound frames may be 0x1 (text) or 0x2 (binary); both are surfaced as
+    raw bytes — this lane never interprets them.
+
+  • Inbound channel framing: the React panel sends a single WebSocket frame
+    per RPC message. The payload bytes are msgpack-encoded `[channel,
+    args...]` (the IDL stub generator decides the layout). This lane just
+    moves bytes.
+
+  • Outbound channel framing: `Server::broadcast(channel, msgpack_payload)`
+    prepends one byte = channel-name length, then the channel bytes, then
+    the msgpack payload. The panel splits these in JS. Channel names must
+    be ≤ 255 bytes (asserted via early-return).
+
+
+Session token
+-------------
+
+On `start()` the server generates a 128-bit hex session token (32 ASCII
+chars). When `ServerDesc::require_session_token` is true (the default), the
+client must include `?token=<token>` in the GET request line; mismatches
+get HTTP 401. The token is exposed via `Server::session_token()` so the
+host process can hand it to the spawned Chrome panel via the URL.
+
+To bypass for `nc` / Python smokes, set `require_session_token = false`.
+
+
+Threading
+---------
+
+  • One I/O thread runs `select()` over the listen socket + all client
+    sockets, with a 50ms timeout (bounds shutdown latency).
+
+  • `broadcast()` is callable from any thread. It enqueues behind
+    `broadcast_mutex`; the I/O thread fans the frame out to every
+    authenticated client.
+
+  • `pump()` MUST be called on the engine thread once per frame. It drains
+    the inbound queue and invokes the on_message callback registered via
+    `detail::set_on_message`. The callback runs on the engine thread, so it
+    is safe to forward into the console queue without further sync.
+
+
+on_message hook
+---------------
+
+`Ipc.h` does not expose a setter for the inbound callback because the
+public contract is "the engine pump dispatches incoming RPCs onto the
+console queue." The console-queue wiring lives in lane editor/core, not
+here. As a private extension point for tests + the eventual core
+integration, the TU exposes:
+
+    namespace psynder::editor::ipc::detail {
+    void set_on_message(std::function<void(std::span<const u8>)> cb);
+    }
+
+Forward-declare and call from `engine/editor/core/` once the console queue
+is in place. The hook is `detail::`-namespaced precisely so it's not part
+of the lane's public ABI.
+
+
+Smoke test recipe
+-----------------
+
+The CMake target `psynder_editor_ipc` is a static library — no exe to run
+yet. For a manual smoke once the editor host binary lands, the following
+Python one-liner connects, sends a msgpack `[1, "hello"]`, and reads any
+broadcast back:
+
+    python3 - <<'PY'
+    import asyncio, websockets, msgpack
+    async def main():
+        async with websockets.connect("ws://127.0.0.1:7654?token=<TOKEN>") as ws:
+            await ws.send(msgpack.packb([1, "hello"]))
+            print(await ws.recv())
+    asyncio.run(main())
+    PY
+
+Set `require_session_token = false` in the host to drop the `?token=` query
+for ad-hoc tests.
+
+
+Dependencies
+------------
+
+  • No FetchContent / vcpkg. RFC 6455 framing + sha1 + base64 are all in
+    this TU (≈ 500 LoC including comments). Self-contained avoids the
+    libuv / Boost / asio install footprint that uWebSockets / WebSocket++
+    require.
+
+  • Posix: POSIX sockets only. macOS + Linux are identical.
+
+  • Win32: links `Ws2_32.lib` via `#pragma comment(lib, ...)`. The lane
+    CMakeLists.txt also adds it explicitly to `target_link_libraries` so
+    MinGW + clang-cl builds don't depend on the pragma.
+
+  • msgpack codec is NOT in this lane — payloads are opaque bytes here.
+    The encoder/decoder lives wherever the channel handlers do (probably
+    editor/core or scripting).
