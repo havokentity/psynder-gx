@@ -28,5 +28,18 @@ if(PSYNDER_GX_PLATFORM_WIN32 OR PSYNDER_PLATFORM_WIN32)
     target_link_libraries(psynder_net PUBLIC ws2_32)
 endif()
 
+# Lockstep determinism (DESIGN-PSYNDER-GX.md §14): net TUs must NOT use fast-
+# math or fused multiply-add so that floating-point results are bit-identical
+# across platforms and compiler versions.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(psynder_net PRIVATE
+        -fno-fast-math
+        -ffp-contract=off
+    )
+elseif(MSVC)
+    # /fp:strict disables fused-mac and assumes IEEE 754 semantics.
+    target_compile_options(psynder_net PRIVATE /fp:strict)
+endif()
+
 # Voice subdir = lane 19.
 add_subdirectory(voice)
