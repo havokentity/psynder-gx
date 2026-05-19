@@ -24,6 +24,12 @@
 #include <cstddef>
 #include <cstdint>
 
+// PipelineHandle (lane 08) — opaque, but we name it in our signatures so
+// render lanes can bind a compiled pipeline through the gpu encoder API.
+// Pulled in directly here (rather than forward-declared) because the
+// public surface takes it by value — definition must be visible.
+#include "shader/PublicShader.h"
+
 namespace psynder::gpu {
 
 // ─── Forward decls / opaque handles ─────────────────────────────────────
@@ -167,5 +173,109 @@ struct BlasDesc; struct TlasDesc;
 Handle<AccelerationStructure> create_blas(Device*, const BlasDesc&);
 Handle<AccelerationStructure> create_tlas(Device*, const TlasDesc&);
 void refit_tlas(Device*, AccelerationStructure*);
+
+// ─── Render-encoder API surface (lane09-001 / M1+ work) ─────────────────
+//
+// New surface added to unblock lane 09 / 11 / 21. The EXISTING per-frame
+// entry points (begin_frame / cmd_open / cmd_submit / end_frame) are
+// preserved — render lanes that don't use the encoder API still see the
+// default backend behavior (animated clear color from cmd_submit).
+//
+// Usage shape inside a frame:
+//
+//   begin_frame(dev);
+//   CmdBuffer* cb = cmd_open(dev);
+//   begin_render(cb, pass);     // suppresses default auto-clear
+//   set_viewport(cb, ...);
+//   set_scissor(cb, ...);
+//   bind_pipeline(cb, pipe);
+//   bind_vertex_buffer(cb, 0, vb);
+//   bind_index_buffer (cb, ib, IndexType::U16);
+//   push_constants(cb, &uniforms, sizeof(uniforms), 1 | 2);
+//   draw_indexed(cb, index_count);
+//   end_render(cb);
+//   cmd_submit(dev, cb);
+//   end_frame(dev);
+//
+// If a frame opens a CmdBuffer and submits WITHOUT calling begin_render,
+// the backend's auto-clear path runs (preserves M0 sample_00_clear).
+
+// ─── Render pass attachment + viewport ─────────────────────────────────
+enum class LoadOp  : std::uint8_t { Load, Clear, DontCare };
+enum class StoreOp : std::uint8_t { Store, DontCare };
+
+struct ColorAttachment {
+    Texture*   target = nullptr;        // nullptr = use current swapchain image
+    LoadOp     load   = LoadOp::Clear;
+    StoreOp    store  = StoreOp::Store;
+    float      clear_rgba[4] = {0, 0, 0, 1};
+};
+struct DepthAttachment {
+    Texture* target = nullptr;
+    LoadOp   load   = LoadOp::Clear;
+    StoreOp  store  = StoreOp::DontCare;
+    float    clear_depth = 1.0f;
+    std::uint8_t clear_stencil = 0;
+};
+struct Viewport { float x, y, w, h, min_depth, max_depth; };
+struct Scissor  { std::int32_t x, y; std::uint32_t w, h; };
+
+struct RenderPassDesc {
+    std::uint32_t  color_count = 1;
+    ColorAttachment colors[8];
+    DepthAttachment depth;       // target==nullptr disables depth attachment
+    bool           swapchain    = true; // true = render to swapchain image
+};
+
+// ─── Index type + shader stage bits ────────────────────────────────────
+enum class IndexType : std::uint8_t { U16, U32 };
+
+// Shader stage bits used by push_constants. The values intentionally match
+// the comment in the lane09-001 spec (1=vs 2=fs 4=cs 8=mesh) and a subset
+// of VK_SHADER_STAGE_*_BIT values (so they pass straight through on the
+// Vulkan side without a translation step).
+namespace ShaderStage {
+    constexpr std::uint32_t Vertex   = 1u; // VK_SHADER_STAGE_VERTEX_BIT
+    constexpr std::uint32_t Fragment = 2u; // VK_SHADER_STAGE_FRAGMENT_BIT
+    constexpr std::uint32_t Compute  = 4u; // a stand-in; VK_SHADER_STAGE_COMPUTE_BIT=0x20
+    constexpr std::uint32_t Mesh     = 8u; // a stand-in for VK_SHADER_STAGE_MESH_BIT_EXT
+    constexpr std::uint32_t AllGfx   = Vertex | Fragment;
+} // namespace ShaderStage
+
+// Max inline push-constant size. Matches Vulkan's guaranteed minimum and
+// fits comfortably inside Metal's setVertexBytes / setFragmentBytes
+// constant-data path (4 KiB ceiling).
+constexpr std::uint32_t kMaxPushConstantBytes = 128;
+
+// ─── Render-pass scope ─────────────────────────────────────────────────
+void begin_render(CmdBuffer*, const RenderPassDesc&);
+void end_render  (CmdBuffer*);
+
+// ─── Inside a render pass ──────────────────────────────────────────────
+void set_viewport(CmdBuffer*, const Viewport&);
+void set_scissor (CmdBuffer*, const Scissor&);
+
+void bind_pipeline(CmdBuffer*, ::psynder::shader::PipelineHandle);
+void bind_vertex_buffer(CmdBuffer*, std::uint32_t binding, Buffer*, std::uint64_t offset = 0);
+void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t offset = 0);
+
+// Inline push constants (Vulkan vkCmdPushConstants /
+// Metal setVertexBytes:atIndex: + setFragmentBytes:atIndex:).
+// Max size: 128 bytes (matches Vulkan minimum guaranteed).
+void push_constants(CmdBuffer*, const void* data, std::uint32_t size,
+                    std::uint32_t stage_mask /*see ShaderStage::*/);
+
+void draw         (CmdBuffer*, std::uint32_t vertex_count,
+                              std::uint32_t instance_count = 1,
+                              std::uint32_t first_vertex   = 0,
+                              std::uint32_t first_instance = 0);
+void draw_indexed (CmdBuffer*, std::uint32_t index_count,
+                              std::uint32_t instance_count = 1,
+                              std::uint32_t first_index    = 0,
+                              std::int32_t  vertex_offset  = 0,
+                              std::uint32_t first_instance = 0);
+
+// ─── Compute (outside any render pass) ─────────────────────────────────
+void dispatch(CmdBuffer*, std::uint32_t gx, std::uint32_t gy, std::uint32_t gz);
 
 } // namespace psynder::gpu

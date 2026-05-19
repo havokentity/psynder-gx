@@ -139,6 +139,19 @@ public:
     void*    buffer_map  (Buffer* b) override;
     void     buffer_unmap(Buffer* b) override;
 
+    // Render-encoder API (lane09-001 unblock).
+    void begin_render(CmdBuffer*, const RenderPassDesc&) override;
+    void end_render  (CmdBuffer*) override;
+    void set_viewport(CmdBuffer*, const Viewport&) override;
+    void set_scissor (CmdBuffer*, const Scissor&)  override;
+    void bind_pipeline     (CmdBuffer*, ::psynder::shader::PipelineHandle) override;
+    void bind_vertex_buffer(CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) override;
+    void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t) override;
+    void push_constants    (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) override;
+    void draw        (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override;
+    void draw_indexed(CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) override;
+    void dispatch    (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t) override;
+
     void destroy_resource(RefCountedBase* res) override;
 
 private:
@@ -747,6 +760,322 @@ void     VulkanBackend::buffer_unmap(Buffer*) {}
 
 void VulkanBackend::destroy_resource(RefCountedBase* res) {
     delete res;
+}
+
+// ─── Render-encoder API (lane09-001 unblock) ────────────────────────────
+//
+// Cross-lane handshake: lane 08's PipelineHandle is a uint32_t id; the
+// VkPipeline + VkPipelineLayout objects live in lane 08's registry (once
+// it ships PSO creation). Until then, lane 07 keeps a small shim
+// registry that lane 08 populates via psynder_gx_vk_register_pipeline().
+// bind_pipeline against an un-registered handle logs once and renders
+// nothing (no crash) — matching the Metal behavior.
+
+namespace vk_pipeline_shim {
+
+constexpr std::uint32_t kMaxPipelines = 64;
+
+struct Entry {
+    std::uint32_t         id          = 0;
+    VkPipeline            pipeline    = VK_NULL_HANDLE;
+    VkPipelineLayout      layout      = VK_NULL_HANDLE;
+    VkPipelineBindPoint   bind_point  = VK_PIPELINE_BIND_POINT_GRAPHICS;
+};
+
+static Entry        g_entries[kMaxPipelines] = {};
+static std::uint32_t g_count = 0;
+
+static Entry* find(std::uint32_t id) {
+    for (std::uint32_t i = 0; i < g_count; ++i) {
+        if (g_entries[i].id == id) return &g_entries[i];
+    }
+    return nullptr;
+}
+
+} // namespace vk_pipeline_shim
+
+} // namespace vk_be
+
+// Public-but-lane-internal hooks lane 08 will call once it ships Vulkan
+// pipeline-state emission. `extern "C"` so lane 08 can forward-declare
+// the prototypes without including Vulkan headers.
+extern "C" {
+
+void psynder_gx_vk_register_pipeline(std::uint32_t id,
+                                     void*         vk_pipeline,
+                                     void*         vk_pipeline_layout,
+                                     std::uint32_t bind_point /*0=gfx 1=compute*/) {
+    namespace s = psynder::gpu::vk_be::vk_pipeline_shim;
+    auto& cnt = s::g_count;
+    VkPipelineBindPoint bp = (bind_point == 1)
+        ? VK_PIPELINE_BIND_POINT_COMPUTE
+        : VK_PIPELINE_BIND_POINT_GRAPHICS;
+    // VkPipeline / VkPipelineLayout are non-dispatchable handles. On 64-bit
+    // platforms (the supported targets — Win64, Linux x86_64) they are
+    // pointer-sized; reinterpret_cast<VkPipeline>(void*) compiles cleanly
+    // under VK_DEFINE_NON_DISPATCHABLE_HANDLE's default pointer form.
+    VkPipeline       pso    = reinterpret_cast<VkPipeline>(vk_pipeline);
+    VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(vk_pipeline_layout);
+    if (auto* e = s::find(id)) {
+        e->pipeline   = pso;
+        e->layout     = layout;
+        e->bind_point = bp;
+        return;
+    }
+    if (cnt >= s::kMaxPipelines) {
+        std::fputs("[psy::gpu::vk] pipeline_shim: too many registrations\n", stderr);
+        return;
+    }
+    s::g_entries[cnt].id         = id;
+    s::g_entries[cnt].pipeline   = pso;
+    s::g_entries[cnt].layout     = layout;
+    s::g_entries[cnt].bind_point = bp;
+    ++cnt;
+}
+
+} // extern "C"
+
+namespace vk_be {
+
+namespace {
+
+VkAttachmentLoadOp to_vk_load(LoadOp op) {
+    switch (op) {
+        case LoadOp::Load:     return VK_ATTACHMENT_LOAD_OP_LOAD;
+        case LoadOp::Clear:    return VK_ATTACHMENT_LOAD_OP_CLEAR;
+        case LoadOp::DontCare: return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    }
+    return VK_ATTACHMENT_LOAD_OP_CLEAR;
+}
+
+VkAttachmentStoreOp to_vk_store(StoreOp op) {
+    switch (op) {
+        case StoreOp::Store:    return VK_ATTACHMENT_STORE_OP_STORE;
+        case StoreOp::DontCare: return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    }
+    return VK_ATTACHMENT_STORE_OP_STORE;
+}
+
+} // anonymous
+
+void VulkanBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb) return;
+
+    // Map the user's color attachments to VkRenderingAttachmentInfo. For
+    // the M0 swapchain path we also reuse the existing barrier helpers so
+    // the image lands in COLOR_ATTACHMENT_OPTIMAL before the dynamic-render
+    // begin call.
+    const std::uint32_t color_count = desc.color_count > 8 ? 8u : desc.color_count;
+    VkRenderingAttachmentInfo color_infos[8] = {};
+    bool                       to_swapchain_image = false;
+    VkImage                    sc_image = VK_NULL_HANDLE;
+    VkExtent2D                 extent = sc_extent_;
+
+    for (std::uint32_t i = 0; i < color_count; ++i) {
+        const ColorAttachment& a = desc.colors[i];
+
+        VkImageView view = VK_NULL_HANDLE;
+        if (desc.swapchain || a.target == nullptr) {
+            // First color = swapchain; remaining swapchain attachments
+            // unsupported (driver expects matching extents anyway).
+            if (i == 0 && swapchain_ready_) {
+                view              = sc_views_[image_index_];
+                sc_image          = sc_images_[image_index_];
+                to_swapchain_image = true;
+            }
+        } else {
+            view = static_cast<VkTextureRes*>(a.target)->view;
+        }
+        if (view == VK_NULL_HANDLE) continue;
+
+        color_infos[i].sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color_infos[i].imageView   = view;
+        color_infos[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_infos[i].loadOp      = to_vk_load (a.load);
+        color_infos[i].storeOp     = to_vk_store(a.store);
+        color_infos[i].clearValue.color = {{
+            a.clear_rgba[0], a.clear_rgba[1],
+            a.clear_rgba[2], a.clear_rgba[3]
+        }};
+    }
+
+    VkRenderingAttachmentInfo depth_info = {};
+    bool                      has_depth = false;
+    if (desc.depth.target) {
+        auto* dt = static_cast<VkTextureRes*>(desc.depth.target);
+        if (dt->view != VK_NULL_HANDLE) {
+            depth_info.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depth_info.imageView   = dt->view;
+            depth_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            depth_info.loadOp      = to_vk_load (desc.depth.load);
+            depth_info.storeOp     = to_vk_store(desc.depth.store);
+            depth_info.clearValue.depthStencil.depth   = desc.depth.clear_depth;
+            depth_info.clearValue.depthStencil.stencil = desc.depth.clear_stencil;
+            has_depth = true;
+        }
+    }
+
+    // Swapchain image needs layout transition before we render into it.
+    if (to_swapchain_image && sc_image != VK_NULL_HANDLE) {
+        barrier_to_color_attachment(w->cb, sc_image);
+    }
+
+    VkRenderingInfo ri{};
+    ri.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    ri.renderArea.offset    = {0, 0};
+    ri.renderArea.extent    = extent;
+    ri.layerCount           = 1;
+    ri.colorAttachmentCount = color_count;
+    ri.pColorAttachments    = color_count > 0 ? color_infos : nullptr;
+    ri.pDepthAttachment     = has_depth ? &depth_info : nullptr;
+
+    vkCmdBeginRendering(w->cb, &ri);
+
+    w->in_render_pass            = true;
+    w->render_pass_to_swapchain  = to_swapchain_image;
+    w->swapchain_image_for_pass  = sc_image;
+    w->encoded_clear             = true; // suppress the M0 auto-clear path
+}
+
+void VulkanBackend::end_render(CmdBuffer* cmd) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb || !w->in_render_pass) return;
+    vkCmdEndRendering(w->cb);
+    if (w->render_pass_to_swapchain && w->swapchain_image_for_pass != VK_NULL_HANDLE) {
+        barrier_to_present(w->cb, w->swapchain_image_for_pass);
+    }
+    w->in_render_pass            = false;
+    w->render_pass_to_swapchain  = false;
+    w->swapchain_image_for_pass  = VK_NULL_HANDLE;
+}
+
+void VulkanBackend::set_viewport(CmdBuffer* cmd, const Viewport& vp) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb) return;
+    VkViewport v{};
+    v.x        = vp.x;
+    v.y        = vp.y;
+    v.width    = vp.w;
+    v.height   = vp.h;
+    v.minDepth = vp.min_depth;
+    v.maxDepth = vp.max_depth;
+    vkCmdSetViewport(w->cb, 0, 1, &v);
+}
+
+void VulkanBackend::set_scissor(CmdBuffer* cmd, const Scissor& sc) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb) return;
+    VkRect2D r{};
+    r.offset.x = sc.x;
+    r.offset.y = sc.y;
+    r.extent.width  = sc.w;
+    r.extent.height = sc.h;
+    vkCmdSetScissor(w->cb, 0, 1, &r);
+}
+
+void VulkanBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHandle h) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb) return;
+    if (!h.valid()) {
+        w->bound_pipeline        = VK_NULL_HANDLE;
+        w->bound_pipeline_layout = VK_NULL_HANDLE;
+        return;
+    }
+    auto* e = vk_pipeline_shim::find(h.id);
+    if (!e || e->pipeline == VK_NULL_HANDLE) {
+        // Lane 08 hasn't published a VkPipeline for this handle yet.
+        static std::uint32_t s_last_warned_id = 0;
+        if (h.id != s_last_warned_id) {
+            std::fprintf(stderr,
+                "[psy::gpu::vk] bind_pipeline: PipelineHandle id=%u not registered "
+                "(lane 08 owes psynder_gx_vk_register_pipeline); draws will no-op\n",
+                h.id);
+            s_last_warned_id = h.id;
+        }
+        w->bound_pipeline        = VK_NULL_HANDLE;
+        w->bound_pipeline_layout = VK_NULL_HANDLE;
+        return;
+    }
+    w->bound_pipeline        = e->pipeline;
+    w->bound_pipeline_layout = e->layout;
+    w->bound_bind_point      = e->bind_point;
+    vkCmdBindPipeline(w->cb, e->bind_point, e->pipeline);
+}
+
+void VulkanBackend::bind_vertex_buffer(CmdBuffer* cmd, std::uint32_t binding,
+                                       Buffer* buf, std::uint64_t offset) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb || !buf) return;
+    VkBuffer h = static_cast<VkBufferRes*>(buf)->handle;
+    if (h == VK_NULL_HANDLE) return;
+    VkDeviceSize off = offset;
+    vkCmdBindVertexBuffers(w->cb, binding, 1, &h, &off);
+}
+
+void VulkanBackend::bind_index_buffer(CmdBuffer* cmd, Buffer* buf,
+                                      IndexType type, std::uint64_t offset) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb || !buf) return;
+    VkBuffer h = static_cast<VkBufferRes*>(buf)->handle;
+    if (h == VK_NULL_HANDLE) return;
+    VkIndexType it = (type == IndexType::U32) ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    vkCmdBindIndexBuffer(w->cb, h, (VkDeviceSize)offset, it);
+}
+
+void VulkanBackend::push_constants(CmdBuffer* cmd, const void* data,
+                                   std::uint32_t size, std::uint32_t stage_mask) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb || !data || size == 0) return;
+    if (w->bound_pipeline_layout == VK_NULL_HANDLE) {
+        // No layout bound — can't issue push constants. Drop the call;
+        // a warning is already emitted by bind_pipeline when the handle
+        // is unknown so we don't double-log here.
+        return;
+    }
+    VkShaderStageFlags vk_stages = 0;
+    if (stage_mask & 1u /*Vertex*/)   vk_stages |= VK_SHADER_STAGE_VERTEX_BIT;
+    if (stage_mask & 2u /*Fragment*/) vk_stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (stage_mask & 4u /*Compute*/)  vk_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
+    if (stage_mask & 8u /*Mesh*/)     vk_stages |= VK_SHADER_STAGE_MESH_BIT_EXT;
+    if (vk_stages == 0) {
+        // Caller passed an unknown mask — default to ALL_GRAPHICS so the
+        // user sees their data go somewhere.
+        vk_stages = VK_SHADER_STAGE_ALL_GRAPHICS;
+    }
+    vkCmdPushConstants(w->cb, w->bound_pipeline_layout, vk_stages, 0, size, data);
+}
+
+void VulkanBackend::draw(CmdBuffer* cmd, std::uint32_t vc, std::uint32_t ic,
+                         std::uint32_t fv, std::uint32_t fi) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb) return;
+    if (w->bound_pipeline == VK_NULL_HANDLE) return;
+    vkCmdDraw(w->cb, vc, ic ? ic : 1u, fv, fi);
+}
+
+void VulkanBackend::draw_indexed(CmdBuffer* cmd, std::uint32_t ic, std::uint32_t inst,
+                                 std::uint32_t fi, std::int32_t vo, std::uint32_t fii) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb) return;
+    if (w->bound_pipeline == VK_NULL_HANDLE) return;
+    vkCmdDrawIndexed(w->cb, ic, inst ? inst : 1u, fi, vo, fii);
+}
+
+void VulkanBackend::dispatch(CmdBuffer* cmd, std::uint32_t gx,
+                             std::uint32_t gy, std::uint32_t gz) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb) return;
+    if (w->in_render_pass) {
+        std::fputs("[psy::gpu::vk] dispatch called inside a render pass; ignored\n", stderr);
+        return;
+    }
+    if (w->bound_pipeline == VK_NULL_HANDLE ||
+        w->bound_bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) {
+        return;
+    }
+    vkCmdDispatch(w->cb, gx ? gx : 1u, gy ? gy : 1u, gz ? gz : 1u);
+    w->encoded_clear = true; // suppress auto-clear if the only work was compute
 }
 
 } // namespace vk_be
