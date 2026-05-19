@@ -24,3 +24,15 @@ endif()
 # engine/audio/builtin/short_room.bin is a stable relative location.
 target_compile_definitions(psynder_audio PRIVATE
     PSY_AUDIO_RIR_RELATIVE_PATH="engine/audio/builtin/short_room.bin")
+
+# Copy short_room.bin into the build tree at <BUILD>/engine/audio/builtin/
+# so runtime loaders using PSY_AUDIO_RIR_RELATIVE_PATH (resolved relative to
+# the running binary's working directory) actually find it.  Without this
+# step the file is only present in the source tree, and any test/sample
+# launched with CWD=<BUILD> would silently fall back to the synthetic IR
+# (caught by Copilot's PR #9 review).  Using `configure_file` keeps the
+# step idempotent and rebuilds it whenever the source asset changes.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/builtin/short_room.bin"
+    "${CMAKE_BINARY_DIR}/engine/audio/builtin/short_room.bin"
+    COPYONLY)

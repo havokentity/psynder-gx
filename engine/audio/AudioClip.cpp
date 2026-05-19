@@ -163,6 +163,25 @@ bool load_wav_memory(const void* data, std::size_t bytes,
         --data_chunk_bytes;
     }
 
+    // Stereo (and higher) clips must end on a whole frame boundary or the
+    // mixer's interleaved indexing would slice between an L and an R
+    // sample.  block_align = channels * 2 (we already verified bits=16).
+    const std::size_t block_align =
+        static_cast<std::size_t>(channels) * sizeof(std::int16_t);
+    if (data_chunk_bytes % block_align != 0u) {
+        PSY_LOG_WARN("[audio] load_wav_memory: data chunk %zu B is not a "
+                     "multiple of block_align %zu (channels=%u); trimming "
+                     "trailing partial frame.",
+                     data_chunk_bytes, block_align,
+                     static_cast<unsigned>(channels));
+        data_chunk_bytes -= (data_chunk_bytes % block_align);
+        if (data_chunk_bytes == 0u) {
+            PSY_LOG_WARN("[audio] load_wav_memory: nothing left after "
+                         "trimming partial frame; rejecting clip.");
+            return false;
+        }
+    }
+
     const std::size_t n_samples = data_chunk_bytes / sizeof(std::int16_t);
     out_clip.samples.resize(n_samples);
     // Memcpy is portable: host is LE (all our targets), and the source is LE.

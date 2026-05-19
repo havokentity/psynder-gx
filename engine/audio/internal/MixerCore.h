@@ -261,11 +261,21 @@ inline void itd_to_delays_2d(f32 azimuth_rad, f32 elevation_rad,
 // pure spherical-head model is broken by these elevation-dependent peaks
 // and notches.
 //
-// Returns 5-tap pinna gains for one ear given source elevation. The taps
+// Pinna-comb FIR length: must be wide enough that both the concha (t1)
+// and helix (t2) reflections land *inside* the kernel across all supported
+// sample rates and elevations.  At 48 kHz the helix tap can sit as late as
+// round(360 µs * 48000) = 17 samples; at 96 kHz that doubles to ~35.  We
+// size for 96 kHz worst case so the helix component is never silently
+// truncated.  Earlier revisions used 5 taps, which made the helix tap miss
+// the kernel entirely and reduced the concha to a narrow elevation band —
+// caught by Copilot's PR #9 review.
+constexpr u32 kPinnaTaps = 40;
+
+// Returns 40-tap pinna gains for one ear given source elevation. The taps
 // model two pinna reflections (concha + helix) whose delays vary with
 // elevation between ~0.1 ms (low) and ~0.6 ms (high).
 PSY_FORCEINLINE void pinna_taps(f32 elevation_rad, u32 sample_rate,
-                                std::array<f32, 5>& out_taps) noexcept {
+                                std::array<f32, kPinnaTaps>& out_taps) noexcept {
     // Brown-Duda picks pinna reflection delays from a piecewise-linear table.
     // We approximate that with a smooth function of elevation:
     //   tap_delay_us = base_us + slope_us * sin(elevation)
@@ -294,9 +304,13 @@ PSY_FORCEINLINE void pinna_taps(f32 elevation_rad, u32 sample_rate,
 PSY_FORCEINLINE f32 shadow_alpha(f32 contralateral_angle_rad) noexcept {
     // angle 0 = source pointing right at the contralateral ear (no shadow)
     // angle π = source pointing away from the contralateral ear (max shadow)
+    // α range: 0.1 ≤ α ≤ 0.5; smaller α = more head shadow (more low-pass).
+    // Earlier (PR #9) the sign was flipped — `0.3 - 0.2*cos` yielded α=0.1
+    // at no-shadow (max low-pass on the bright ear) and α=0.5 at full
+    // shadow (no low-pass on the muffled ear), i.e. the opposite of the
+    // documented intent. Inverting the sign restores the spec.
     const f32 c = std::cos(contralateral_angle_rad);
-    // 0.1 ≤ α ≤ 0.5; smaller α = more head shadow (more low-pass)
-    return 0.3f - 0.2f * c;
+    return 0.3f + 0.2f * c;
 }
 
 // Synthesise a 2-D angular HRIR (mono → stereo IR pair) for the given
@@ -331,7 +345,7 @@ inline StereoHrir make_hrir_2d(f32 azimuth_rad, f32 elevation_rad,
     // Pinna combs per ear. Per-ear pinna *delay* differs because the
     // pinna geometry is asymmetric — for the contralateral side we damp
     // the comb a touch since head-shadow already nuked the highs.
-    std::array<f32, 5> pinna_l{}, pinna_r{};
+    std::array<f32, kPinnaTaps> pinna_l{}, pinna_r{};
     pinna_taps(elevation_rad, sample_rate, pinna_l);
     pinna_taps(elevation_rad, sample_rate, pinna_r);
 
@@ -347,7 +361,7 @@ inline StereoHrir make_hrir_2d(f32 azimuth_rad, f32 elevation_rad,
     // Two-stage build per ear: convolve base impulse with pinna comb,
     // then 1-pole low-pass the contralateral channel.
     auto build_ear = [&](std::array<f32, kHrirLength>& out,
-                         const std::array<f32, 5>&     pinna,
+                         const std::array<f32, kPinnaTaps>& pinna,
                          f32 pan_gain,
                          bool is_contralateral) {
         out.fill(0.0f);
