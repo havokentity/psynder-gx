@@ -10,7 +10,7 @@
 // glyph atlas upload; it is safe to pass nullptr during the first frame (the
 // submit will be a no-op until the device is available).
 //
-// render/Framebuffer.h is NOT included here.
+// render() takes psy::gpu::CmdBuffer* + Device* + viewport dims.
 
 #pragma once
 

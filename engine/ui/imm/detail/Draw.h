@@ -10,7 +10,7 @@
 // retained for geometry fidelity but their output is GPU triangles, not
 // individual pixels.
 //
-// render/Framebuffer.h is NOT included here.
+// Output is GPU triangles via GpuBatch, not individual pixels.
 
 #pragma once
 

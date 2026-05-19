@@ -7,7 +7,7 @@
 // GX change from Psynder Wave-A: all functions that previously took a
 // `render::Framebuffer&` now operate on the implicit GpuBatch that was
 // opened by `imm::begin_frame()`.  The framebuffer parameter is gone.
-// render/Framebuffer.h is NOT included here.
+// All functions operate on the GpuBatch opened by imm::begin_frame().
 
 #pragma once
 

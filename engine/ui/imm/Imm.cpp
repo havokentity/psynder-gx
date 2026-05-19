@@ -10,7 +10,7 @@
 // begin_frame signature now takes a CmdBuffer + pipeline + pre-allocated
 // HostVisible vertex/index buffers + viewport dimensions.
 //
-// Removed: #include "render/Framebuffer.h" and #include "render/raster/Raster.h"
+// GX Wave-B: CPU framebuffer removed; all drawing via psy::gpu::CmdBuffer.
 
 #include "Imm.h"
 #include "Overlay.h"

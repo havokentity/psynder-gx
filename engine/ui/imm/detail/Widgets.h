@@ -7,7 +7,7 @@
 // GX change from Psynder Wave-A: the `render::Framebuffer& fb` parameter
 // has been removed from all draw helpers — drawing now goes through the
 // GpuBatch.  `draw_button` no longer takes a framebuffer argument.
-// render/Framebuffer.h is NOT included here.
+// Drawing routes through GpuBatch; no CPU framebuffer reference.
 
 #pragma once
 

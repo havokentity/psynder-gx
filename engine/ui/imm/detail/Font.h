@@ -6,7 +6,6 @@
 //
 // GX change from Psynder Wave-A: glyph rendering now pushes 1×1 quads into
 // GpuBatch instead of writing pixels into a CPU framebuffer.
-// render/Framebuffer.h is NOT included here.
 //
 // The glyph data is unchanged — same ASCII 0x20..0x7E coverage, same
 // 6×8 cell size.  FreeType-backed atlas rendering for player HUDs is in
