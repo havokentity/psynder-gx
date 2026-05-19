@@ -946,7 +946,19 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
         delete tex;
         return nullptr;
     }
-    vkBindBufferMemory(device_, staging_buf, sb_mem, 0);
+    if (vkBindBufferMemory(device_, staging_buf, sb_mem, 0) != VK_SUCCESS) {
+        // Without a bound buffer, vkMapMemory below would map fresh
+        // allocator-owned bytes that the buffer can't reach — the GPU
+        // copy would then read uninitialised contents.  Clean up and
+        // bail out.  Copilot PR #15 review caught the missing check.
+        std::fputs("[psy::gpu::vk] create_texture: vkBindBufferMemory(staging) failed\n", stderr);
+        vkDestroyBuffer(device_, staging_buf, nullptr);
+        vkFreeMemory(device_, sb_mem, nullptr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
 
     void* mapped = nullptr;
     if (vkMapMemory(device_, sb_mem, 0, sb_req.size, 0, &mapped) != VK_SUCCESS || !mapped) {
@@ -1029,7 +1041,13 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
     vkCmdCopyBufferToImage(xfer_cb, staging_buf, image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    // TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+    // TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL.  Widen dstStage
+    // to include all shader stages (vertex / fragment / compute) so
+    // a texture used by any subsequent pass sees the transfer writes.
+    // Earlier this barrier used only FRAGMENT_SHADER_BIT, which would
+    // have silently produced a hazard for compute / vertex consumers
+    // (Copilot PR #15 review).  ALL_GRAPHICS covers VS/TCS/TES/GS/FS
+    // in one bit; add COMPUTE_SHADER_BIT for explicit clarity.
     {
         VkImageMemoryBarrier b{};
         b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1043,7 +1061,8 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         vkCmdPipelineBarrier(xfer_cb,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 0, nullptr, 1, &b);
     }
 
@@ -1193,7 +1212,14 @@ bool VulkanBackend::texture_readback_mip0(Texture* base_tex,
         }
         VkFenceCreateInfo fci{};
         fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        vkCreateFence(device_, &fci, nullptr, &fence);
+        if (vkCreateFence(device_, &fci, nullptr, &fence) != VK_SUCCESS) {
+            // Without a valid fence we can't safely vkWaitForFences after
+            // submit — fall back to teardown rather than feeding
+            // VK_NULL_HANDLE into wait (validation error / crash).
+            // Copilot PR #15 review caught the missing check.
+            teardown();
+            return false;
+        }
     }
 
     VkCommandBufferBeginInfo bi{};
@@ -1201,7 +1227,12 @@ bool VulkanBackend::texture_readback_mip0(Texture* base_tex,
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cb, &bi);
 
-    // SHADER_READ_ONLY → TRANSFER_SRC_OPTIMAL
+    // SHADER_READ_ONLY → TRANSFER_SRC_OPTIMAL — match the producer-side
+    // barrier's stage breadth (all shader stages) since the prior
+    // upload path may have left the texture readable from compute /
+    // vertex / fragment.  Use ALL_GRAPHICS to cover all of them in one
+    // mask plus VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT for compute pass
+    // consumers.  Copilot PR #15 review caught the narrow mask.
     {
         VkImageMemoryBarrier b{};
         b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1214,7 +1245,8 @@ bool VulkanBackend::texture_readback_mip0(Texture* base_tex,
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         vkCmdPipelineBarrier(cb,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
             0, 0, nullptr, 0, nullptr, 1, &b);
     }
@@ -1229,7 +1261,8 @@ bool VulkanBackend::texture_readback_mip0(Texture* base_tex,
     vkCmdCopyImageToBuffer(cb, tex->handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            staging_buf, 1, &r);
 
-    // TRANSFER_SRC_OPTIMAL → SHADER_READ_ONLY_OPTIMAL (restore)
+    // TRANSFER_SRC_OPTIMAL → SHADER_READ_ONLY_OPTIMAL (restore).  Same
+    // widened dstStage as the upload path — see comment above.
     {
         VkImageMemoryBarrier b{};
         b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1243,7 +1276,8 @@ bool VulkanBackend::texture_readback_mip0(Texture* base_tex,
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         vkCmdPipelineBarrier(cb,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 0, nullptr, 1, &b);
     }
 

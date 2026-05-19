@@ -45,7 +45,8 @@ namespace psynder::gpu {
 //
 // ARC is OFF for this TU (-fno-objc-arc). Any id<T> we hold must be
 // released when the wrapper is destroyed. The destructors below are
-// invoked via the virtual ~RefCountedBase chain from delete_resource().
+// invoked via the virtual ~RefCountedBase chain from `destroy_resource()`
+// (the Backend method that calls `delete` on the resource pointer).
 struct MtlBuffer  : Buffer  { id<MTLBuffer>       handle = nil; void* mapped = nullptr; };
 struct MtlTexture : Texture {
     id<MTLTexture> handle = nil;

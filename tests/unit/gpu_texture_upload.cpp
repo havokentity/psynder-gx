@@ -227,9 +227,11 @@ TEST_CASE("gpu: texture create with unsupported format + initial_data rejects",
         return;
     }
 
-    // 16x16 RGBA16F = 16 bytes/pixel — buffer sized correctly for the
-    // format BUT the M1 upload path doesn't list Rgba16Float as a
-    // supported format. Must reject before validating size.
+    // 16x16 RGBA16F = 8 bytes/pixel (4 × FP16 = 8 B) — buffer sized
+    // correctly for the format BUT the M1 upload path doesn't list
+    // Rgba16Float as a supported format. Must reject before validating
+    // size.  Earlier comment claimed 16 B/pixel; that was wrong
+    // (Copilot PR #15 review).
     std::vector<std::uint8_t> src(16u * 16u * 8u, 0xAAu);
     TextureDesc td{};
     td.width             = 16;
