@@ -107,20 +107,35 @@ if(PSYNDER_GX_PLATFORM_MACOS)
 elseif(PSYNDER_GX_PLATFORM_WIN32 OR PSYNDER_GX_PLATFORM_LINUX)
     target_compile_definitions(psynder_gpu PUBLIC PSYNDER_GX_BACKEND_VULKAN=1)
 
-    # volk loader + Vulkan headers. Prefer vcpkg, fall back to a system
-    # find_package, finally to a "build broken until SDK is installed"
-    # informative warning. The CI box has the SDK; local dev boxes may
-    # not.
-    find_package(Vulkan QUIET)
-    find_package(volk   QUIET CONFIG)
+    # Vulkan headers must come from the LunarG SDK. Required — no fallback
+    # would let the VulkanBackend.h #include <vulkan/vulkan.h> work.
+    find_package(Vulkan REQUIRED)
+    target_link_libraries(psynder_gpu PUBLIC Vulkan::Headers)
+
+    # volk loader — prefer vcpkg/system install; FetchContent fallback so
+    # the build works on a fresh box that only has the Vulkan SDK + no
+    # vcpkg toolchain wired in. VulkanBackend.h #include <volk.h> is
+    # unconditional, so we MUST have volk available somewhere.
+    find_package(volk QUIET CONFIG)
     if(volk_FOUND)
         target_link_libraries(psynder_gpu PUBLIC volk::volk)
-    elseif(Vulkan_FOUND)
-        target_link_libraries(psynder_gpu PUBLIC Vulkan::Vulkan)
-        message(STATUS "[gpu] using Vulkan::Vulkan without volk loader (link-time loader)")
+        message(STATUS "[gpu] volk: found via find_package (vcpkg or system)")
     else()
-        message(WARNING "[gpu] Vulkan SDK + volk not found — psynder_gpu Vulkan backend disabled")
-        target_compile_definitions(psynder_gpu PUBLIC PSYNDER_GX_BACKEND_VULKAN=0)
+        include(FetchContent)
+        message(STATUS "[gpu] volk: not found, fetching from upstream")
+        # volk needs Vulkan-Headers on its include path BEFORE its own
+        # configure runs. Vulkan::Headers from find_package above provides
+        # the include dir; expose it to volk via VULKAN_HEADERS_INSTALL_DIR.
+        get_target_property(_vk_inc Vulkan::Headers INTERFACE_INCLUDE_DIRECTORIES)
+        set(VOLK_PULL_IN_VULKAN ON CACHE BOOL "" FORCE)
+        set(VOLK_HEADERS_ONLY OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(volk
+            GIT_REPOSITORY https://github.com/zeux/volk.git
+            GIT_TAG        1.4.304
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(volk)
+        target_link_libraries(psynder_gpu PUBLIC volk)
     endif()
 
     if(PSYNDER_GX_PLATFORM_LINUX)

@@ -59,10 +59,15 @@ public:
     // already inside a PSYNDER_PLATFORM_WIN32 guard.
     HWND hwnd() const noexcept { return hwnd_; }
 
-private:
-    // The class-shared WndProc dispatches into Win32Window::wnd_proc().
+    // The class-shared WndProc — must be public so Win32Window.cpp's
+    // anonymous-namespace `register_window_class()` helper can register it
+    // with `RegisterClassExW`. clang-cl + /permissive- is strict about
+    // taking the address of a private static member from outside the class
+    // (MSVC's permissive mode lets it slide). Dispatches into wnd_proc().
     static LRESULT CALLBACK static_wnd_proc(
         HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+
+private:
     LRESULT wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam);
 
     // Raw-input registration — one mouse device with RIDEV_NOLEGACY off

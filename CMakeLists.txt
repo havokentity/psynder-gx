@@ -106,6 +106,13 @@ message(STATUS "Psynder-GX dedicated server: ${PSYNDER_GX_DEDICATED_SERVER}")
 message(STATUS "Psynder-GX hardware RT:      ${PSYNDER_GX_ENABLE_RT}")
 message(STATUS "Psynder-GX mesh shaders:     ${PSYNDER_GX_ENABLE_MESH_SHADERS}")
 
+# ─── Project identity flag (CMake-side) ───────────────────────────────────
+# Some lane CMakeLists vendored from sister Psynder branch on `if(PSYNDER_GX)`
+# to gate the GPU-engine path (Vulkan / Metal) vs Psynder's CPU path.
+# PSYNDER_GX=1 the compile-time define above is the runtime gate; this
+# variable is the CMake-time gate that those lane scripts expect.
+set(PSYNDER_GX TRUE)
+
 # ─── psynder_common interface target — propagates settings to every lib ──
 add_library(psynder_common INTERFACE)
 target_compile_features(psynder_common INTERFACE cxx_std_23)
