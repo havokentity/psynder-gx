@@ -33,11 +33,12 @@ captures/
 *.tracy
 *.rdc
 
-# Logs / cores
+# Logs / cores  (anchor to repo root so we don't ignore engine/core/)
 *.log
 console_history.txt
-core
-core.*
+/core
+/core.*
+core.[0-9]*
 
 # Local cfg overrides
 local.cfg
