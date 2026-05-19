@@ -107,36 +107,29 @@ if(PSYNDER_GX_PLATFORM_MACOS)
 elseif(PSYNDER_GX_PLATFORM_WIN32 OR PSYNDER_GX_PLATFORM_LINUX)
     target_compile_definitions(psynder_gpu PUBLIC PSYNDER_GX_BACKEND_VULKAN=1)
 
-    # Vulkan headers must come from the LunarG SDK. Required — no fallback
-    # would let the VulkanBackend.h #include <vulkan/vulkan.h> work.
+    # Vulkan headers — required. Comes from LunarG SDK on Win/Linux. Lets
+    # VulkanBackend.h #include <vulkan/vulkan.h> resolve.
     find_package(Vulkan REQUIRED)
     target_link_libraries(psynder_gpu PUBLIC Vulkan::Headers)
 
-    # volk loader — prefer vcpkg/system install; FetchContent fallback so
-    # the build works on a fresh box that only has the Vulkan SDK + no
-    # vcpkg toolchain wired in. VulkanBackend.h #include <volk.h> is
-    # unconditional, so we MUST have volk available somewhere.
-    find_package(volk QUIET CONFIG)
-    if(volk_FOUND)
-        target_link_libraries(psynder_gpu PUBLIC volk::volk)
-        message(STATUS "[gpu] volk: found via find_package (vcpkg or system)")
-    else()
-        include(FetchContent)
-        message(STATUS "[gpu] volk: not found, fetching from upstream")
-        # volk needs Vulkan-Headers on its include path BEFORE its own
-        # configure runs. Vulkan::Headers from find_package above provides
-        # the include dir; expose it to volk via VULKAN_HEADERS_INSTALL_DIR.
-        get_target_property(_vk_inc Vulkan::Headers INTERFACE_INCLUDE_DIRECTORIES)
-        set(VOLK_PULL_IN_VULKAN ON CACHE BOOL "" FORCE)
-        set(VOLK_HEADERS_ONLY OFF CACHE BOOL "" FORCE)
-        FetchContent_Declare(volk
-            GIT_REPOSITORY https://github.com/zeux/volk.git
-            GIT_TAG        1.4.304
-            GIT_SHALLOW    TRUE
-        )
-        FetchContent_MakeAvailable(volk)
-        target_link_libraries(psynder_gpu PUBLIC volk)
-    endif()
+    # volk loader — always FetchContent. Why not find_package first:
+    # find_package(volk) on some Linux distros finds a different target
+    # name than `volk::volk` (or no alias at all), and we end up linking
+    # against a nonexistent target. FetchContent is fast (~1500 LOC of C),
+    # idempotent across configure runs (cached after first fetch), and
+    # gives us a known target name. The user can pre-populate the source
+    # by symlinking ./build/<preset>/_deps/volk-src/ to a system clone if
+    # they want offline builds.
+    include(FetchContent)
+    FetchContent_Declare(volk
+        GIT_REPOSITORY https://github.com/zeux/volk.git
+        GIT_TAG        1.4.304
+        GIT_SHALLOW    TRUE
+    )
+    # volk needs Vulkan-Headers on its include path before its configure
+    # runs. Vulkan::Headers above already provides them.
+    FetchContent_MakeAvailable(volk)
+    target_link_libraries(psynder_gpu PUBLIC volk)
 
     if(PSYNDER_GX_PLATFORM_LINUX)
         # Wayland is the primary path per DESIGN §11; XCB fallback.

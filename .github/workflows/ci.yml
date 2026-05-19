@@ -10,6 +10,20 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Bootstrap-phase CI flags. The vendored Psynder test suite tested CPU
+# rasterizer + CPU raytracer APIs that don't exist in GX. Tests are
+# disabled across the matrix until the test suite is rebuilt against the
+# GX public-header contracts (M1+ follow-up). Editor builds are also
+# skipped because the editor pulls Node/pnpm and adds CI minutes without
+# proving anything for the engine libs themselves at M0 — re-enabled when
+# lane 22 lands a real React build pipeline.
+env:
+  PSY_CMAKE_FLAGS: >-
+    -DPSYNDER_GX_BUILD_TESTS=OFF
+    -DPSYNDER_GX_BUILD_TOOLS=OFF
+    -DPSYNDER_GX_EDITOR=OFF
+    -DPSYNDER_GX_BUILD_SAMPLES=ON
+
 jobs:
   mac:
     name: macOS · Metal · arm64
@@ -21,26 +35,20 @@ jobs:
           submodules: recursive
       - name: Install Ninja
         run: brew install ninja
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/build/mac-release/vcpkg_installed
-            ~/.cache/vcpkg
-          key: vcpkg-mac-${{ hashFiles('vcpkg.json') }}
       - name: Configure
-        run: cmake --preset mac-release
+        run: cmake --preset mac-release $PSY_CMAKE_FLAGS
       - name: Build
         run: cmake --build --preset mac-release
-      - name: Test
-        run: ctest --preset mac-release --output-on-failure || true
-      - name: Smoke (clear color)
+      - name: Smoke (animated clear color)
         run: |
           LOCK=/tmp/psynder_gx_smoke.lockdir
           while ! mkdir "$LOCK" 2>/dev/null; do sleep 0.5; done
           trap 'rmdir "$LOCK"' EXIT
           if [ -x build/mac-release/bin/sample_00_clear ]; then
-            build/mac-release/bin/sample_00_clear --smoke-frames=10 || echo "smoke wip"
+            build/mac-release/bin/sample_00_clear --smoke-frames=10
+          else
+            echo "::warning::sample_00_clear binary missing — build skipped target"
+            exit 1
           fi
 
   linux:
@@ -58,25 +66,17 @@ jobs:
             libwayland-dev wayland-protocols libx11-dev libxkbcommon-dev \
             libxcb1-dev libxcb-randr0-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxi-dev libgl1-mesa-dev libpipewire-0.3-dev \
-            libpulse-dev libasound2-dev libudev-dev libevdev-dev
+            libpulse-dev libasound2-dev libudev-dev libevdev-dev \
+            libxcb-icccm4-dev libxcb-keysyms1-dev libxcb-xfixes0-dev
           # Vulkan SDK from LunarG
           wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
           sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/build/linux-release/vcpkg_installed
-            ~/.cache/vcpkg
-          key: vcpkg-linux-${{ hashFiles('vcpkg.json') }}
       - name: Configure
-        run: cmake --preset linux-release
+        run: cmake --preset linux-release $PSY_CMAKE_FLAGS
       - name: Build
         run: cmake --build --preset linux-release
-      - name: Test
-        run: ctest --preset linux-release --output-on-failure || true
 
   linux-dedicated:
     name: Linux · Dedicated Server · headless
@@ -90,15 +90,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-17 ninja-build pkg-config
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/build/linux-dedicated-release/vcpkg_installed
-            ~/.cache/vcpkg
-          key: vcpkg-linux-dedicated-${{ hashFiles('vcpkg.json') }}
       - name: Configure
-        run: cmake --preset linux-dedicated-release
+        # Dedicated-server preset strips graphics + audio + editor; samples
+        # are pointless headless, so disable here too.
+        run: >-
+          cmake --preset linux-dedicated-release
+          -DPSYNDER_GX_BUILD_TESTS=OFF
+          -DPSYNDER_GX_BUILD_TOOLS=OFF
+          -DPSYNDER_GX_BUILD_SAMPLES=OFF
       - name: Build
         run: cmake --build --preset linux-dedicated-release
 
@@ -121,20 +120,12 @@ jobs:
         with:
           version: 1.3.290.0
           cache: true
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/build/win-clang-release/vcpkg_installed
-            ${{ github.workspace }}/vcpkg
-          key: vcpkg-win-${{ hashFiles('vcpkg.json') }}
       - name: Configure
-        run: cmake --preset win-clang-release
+        shell: cmd
+        run: cmake --preset win-clang-release %PSY_CMAKE_FLAGS%
       - name: Build
+        shell: cmd
         run: cmake --build --preset win-clang-release
-      - name: Test
-        run: ctest --preset win-release --output-on-failure || true
-        continue-on-error: true
 
   format:
     name: clang-format check
@@ -146,6 +137,6 @@ jobs:
         run: sudo apt-get install -y clang-format-17
       - name: Check formatting
         run: |
-          # Soft check during bootstrap; will be made strict before v0.2
+          # Soft check during bootstrap; made strict before v0.2.
           git ls-files '*.h' '*.hpp' '*.cpp' '*.mm' \
             | xargs clang-format-17 --dry-run --Werror || echo "formatting drift — fix before merge"
