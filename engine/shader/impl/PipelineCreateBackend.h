@@ -37,21 +37,20 @@
 
 namespace psynder::shader::impl {
 
-// ─── M1 default vertex layout (lane09-004 follow-up) ─────────────────────
-// PublicShader.h's GraphicsPipelineDesc cannot grow vertex-layout fields
-// without breaking the frozen ABI contract. For M1 we hard-code an
-// interleaved layout that matches what lane 09's forward.slang and the
-// passthrough.slang built-in expect:
+// ─── M1 default vertex layout ────────────────────────────────────────────
+// Sentinel layout used when GraphicsPipelineDesc::vertex_input is left
+// empty (attr_count == 0). The flexible variant — VertexInputDesc on
+// GraphicsPipelineDesc — lives in PublicShader.h and was added by
+// lane 09 (closes sample01-003).
 //
 //   binding 0, stride 32 bytes:
 //     +0  : float3 position
 //     +12 : float3 normal
 //     +24 : float2 uv
 //
-// Lane 09 + lane 12 publish meshes already laid out this way. The proper
-// flexible variant lives behind a new opaque vertex-layout struct that
-// PublicShader.h will gain a setter for in a follow-up (Issue lane09-004
-// already filed against the orchestrator).
+// Lane 09 + lane 12 publish meshes already laid out this way. Any caller
+// that already drives create_graphics through the default path keeps
+// rendering with the same layout — no source edits required.
 struct DefaultVertexLayout {
     static constexpr std::uint32_t kStrideBytes = 32;
     static constexpr std::uint32_t kAttribCount = 3;
@@ -72,6 +71,12 @@ struct DefaultVertexLayout {
 // gpu::bind_pipeline(PipelineHandle{handle_id}) resolves to a real
 // VkPipeline / MTLRenderPipelineState.
 //
+// `vertex_input`: caller-supplied vertex layout (from the public
+// GraphicsPipelineDesc::vertex_input field). When attr_count == 0 the
+// backend builders fall back to DefaultVertexLayout above; when
+// attr_count > 0 the backend builds a backend-native vertex descriptor
+// from the supplied attributes + bindings.
+//
 // On failure: logs to stderr, returns false. The handle id stays
 // "unregistered" so lane 07's bind_pipeline path falls back to the
 // already-implemented "not registered, draws no-op" behavior — no crash.
@@ -80,7 +85,8 @@ bool create_and_register_graphics_pso(
     const std::vector<std::uint8_t>&  vs_blob,
     const std::vector<std::uint8_t>&  fs_blob,
     const char*                       vs_entry,
-    const char*                       fs_entry);
+    const char*                       fs_entry,
+    const VertexInputDesc&            vertex_input);
 
 bool create_and_register_compute_pso(
     std::uint32_t                     handle_id,
