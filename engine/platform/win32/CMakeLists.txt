@@ -26,12 +26,14 @@ if(PSYNDER_PLATFORM_WIN32)
 
     if(PSYNDER_GX)
         # ── Psynder-GX: Vulkan surface creation ───────────────────────────
-        # find_package(Vulkan) is expected to succeed because the root
-        # CMakeLists.txt requires Vulkan as part of GX dependencies.
-        # Lane 07 (gpu) does the heavy lifting; we only need the headers and
-        # the loader import lib to resolve vkGetInstanceProcAddr at link time.
+        # Lane 23 only needs Vulkan HEADERS — Win32VulkanSurface.cpp resolves
+        # vkCreateWin32SurfaceKHR at runtime via vkGetInstanceProcAddr,
+        # NOT through a link-time import lib. Lane 07 (gpu) owns the volk
+        # loader; linking Vulkan::Vulkan here would duplicate every vk*
+        # symbol against volk's TU at the sample's final link step and
+        # produce "lld-link: error: duplicate symbol vkCreateInstance".
         find_package(Vulkan REQUIRED)
-        target_link_libraries(psynder_platform_win32 PUBLIC Vulkan::Vulkan)
+        target_link_libraries(psynder_platform_win32 PUBLIC Vulkan::Headers)
 
         target_sources(psynder_platform_win32 PRIVATE
             Win32VulkanSurface.h
