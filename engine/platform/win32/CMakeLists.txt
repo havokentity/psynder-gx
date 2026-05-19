@@ -24,6 +24,13 @@ if(PSYNDER_PLATFORM_WIN32)
         xinput
     )
 
+    # ── Lane-14 audio query helpers (both Psynder and GX) ────────────────
+    target_sources(psynder_platform_win32 PRIVATE
+        PublicPlatformWin32.h
+        Win32AudioQuery.cpp
+    )
+    target_link_libraries(psynder_platform_win32 PUBLIC Propsys)
+
     if(PSYNDER_GX)
         # ── Psynder-GX: Vulkan surface creation ───────────────────────────
         # Lane 23 only needs Vulkan HEADERS — Win32VulkanSurface.cpp resolves
