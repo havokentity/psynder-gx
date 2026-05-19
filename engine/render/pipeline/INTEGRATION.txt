@@ -1,0 +1,198 @@
+Lane 09 — render-pipeline — cross-lane integration notes
+=========================================================
+
+Wave B (M1+M2 scaffold) delivered. Files inside engine/render/pipeline/ only:
+
+  * PublicRenderPipeline.h    — FROZEN contract (untouched; Wave 0)
+  * Pipeline_internal.h       — lane-private types; gives Pipeline/View bodies
+  * Pipeline.cpp              — public create / render / destroy entry points
+  * Resources.cpp             — M1 triangle VB/IB creation via psy::gpu;
+                                Slang path resolver for shaders/ leaves
+  * Extract.cpp               — per-frame ECS extract; M1 hardcoded triangle,
+                                M2+ scaffold for lane 06 World query
+  * LightCluster.cpp          — forward+ cluster init + build-pass scaffold
+                                (3D grid sized from PipelineDesc)
+  * Hiz.cpp                   — depth pre-pass + HiZ pyramid mip-count math
+                                + downsample compute pipeline create
+  * GpuCull.cpp               — GPU cull buffer allocations + cull compute
+                                pipeline create (instance desc + visible +
+                                indirect-draw buffers)
+  * OpaquePass.cpp            — opaque forward+ pipeline objects:
+                                m1_passthrough (built from lane 08's
+                                builtin/passthrough.slang),
+                                m2_forward (built from
+                                shaders/forward.slang in this lane)
+  * shaders/forward.slang     — PBR metallic-roughness (Cook-Torrance + Smith
+                                GGX + Schlick Fresnel). Vertex POSITION/
+                                NORMAL/UV/COLOR matching Pipeline_internal::
+                                Vertex. M2 target.
+  * shaders/light_cluster_build.slang — cluster-vs-light intersection cs (scaffold)
+  * shaders/hiz_build.slang   — 2x2 max downsample cs (scaffold)
+  * shaders/gpu_cull.slang    — per-instance frustum + HiZ cull cs (scaffold)
+  * PipelineSmoke.cpp         — opt-in standalone smoke binary that exercises
+                                the public API headless (no device hook)
+  * CMakeLists.txt            — psynder_render_pipeline lane + smoke gate
+
+Lane-local verification (no other lanes required beyond the orchestrator-
+already-merged Wave A + lane 07/08/25):
+
+  # Configure
+  cmake -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+    -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+    -DPSYNDER_GX_BUILD_TOOLS=OFF -DPSYNDER_GX_BUILD_TESTS=OFF \
+    -DPSYNDER_GX_EDITOR=OFF \
+    -DPSYNDER_GX_RENDER_PIPELINE_BUILD_SMOKE=ON
+
+  # Build the lane lib + smoke
+  cmake --build build/mac -j 8 --target psynder_render_pipeline
+  cmake --build build/mac -j 8 --target sample_render_pipeline_smoke
+
+  # Run smoke (honour the mac lockdir per AGENTS.md)
+  LOCK=/tmp/psynder_gx_smoke.lockdir
+  until mkdir "$LOCK" 2>/dev/null; do sleep 0.5; done
+  trap 'rmdir "$LOCK"' EXIT
+  ./build/mac/bin/sample_render_pipeline_smoke --smoke-frames=4
+
+Sample smoke output (Wave B):
+
+  [psy::render::pipeline] create: no device hook set; running headless
+  [psy::render::pipeline] create: M1 triangle upload failed
+  [render-pipeline-smoke] begin (headless, no device hook)
+  [psy::render::pipeline] light_cluster: 16x9x24 = 3456 clusters  aabb=110592 bytes  lights=248832 bytes  max_lights=256  pipeline=ok
+  [psy::render::pipeline] hiz: depth=1280x720  pyramid_mips=11  pipeline=ok
+  [psy::render::pipeline] gpu_cull: max_instances=65536  inst_buf=8388608 bytes  vis_buf=262160 bytes  indir_buf=2097152 bytes  pipeline=ok
+  [psy::render::pipeline] opaque_pass: m1_passthrough=ok  m2_forward=ok
+  [psy::render::pipeline] created: 1280x720  clusters=16x9x24  rt=0  mesh=0
+  [render-pipeline-smoke] ran 4 render() ticks; OK
+
+The four `pipeline=ok` lines confirm that lane 08's slangc invocation
+worked end-to-end against forward.slang / light_cluster_build.slang /
+hiz_build.slang / gpu_cull.slang (and against lane 08's own
+builtin/passthrough.slang). The headless mode skipping the M1 triangle
+VB/IB upload is expected — sub-pass init still ran because each sub-pass
+checks for `p->device == nullptr` and falls through to shader compile +
+size-math only.
+
+After lane 25 + lane 07 (already on main as of e0e35d1), the sample
+sample_00_clear builds and runs the M0 animated clear correctly (verified
+on Apple M4 Max). The render-pipeline scaffold compiles cleanly and links
+into the larger build without breaking M0.
+
+═══════════════════════════════════════════════════════════════════════
+CROSS-LANE GAPS / ISSUES TO FILE
+═══════════════════════════════════════════════════════════════════════
+
+Issue lane09-001 — Against lane 07 (gpu)
+  Title: PublicGpu.h lacks cmd encoder APIs needed by render-pipeline
+  Body : PublicRenderPipeline::render() needs the following primitives
+         to encode real draws (M2 forward+ ship target):
+           - cmd_begin_render(cmd, colour_targets[], depth_target)
+           - cmd_end_render(cmd)
+           - cmd_bind_pipeline(cmd, shader::PipelineHandle)
+           - cmd_bind_vertex_buffer(cmd, slot, buffer, offset)
+           - cmd_bind_index_buffer(cmd, buffer, format, offset)
+           - cmd_bind_storage_buffer(cmd, set, slot, buffer)
+           - cmd_bind_uniform_buffer(cmd, set, slot, buffer)
+           - cmd_bind_texture(cmd, set, slot, texture, sampler)
+           - cmd_set_viewport(cmd, x, y, w, h)
+           - cmd_set_scissor(cmd, x, y, w, h)
+           - cmd_draw_indexed(cmd, index_count, instance_count, first_index,
+                              vertex_offset, first_instance)
+           - cmd_draw_indexed_indirect(cmd, indirect_buffer, offset,
+                                       draw_count, stride)
+           - cmd_dispatch(cmd, gx, gy, gz)
+           - cmd_pipeline_barrier(cmd, src_stage, dst_stage, ...)
+         Without these, every encode_*() in lane 09 is a diagnostic-only
+         stub and the lane 07 Metal backend's default cmd_submit
+         (animated clear) is what the user sees on screen — M0 behaviour
+         only. We are blocked on this contract before M1/M2 ship.
+
+Issue lane09-002 — Against lane 07 (gpu)
+  Title: Pass psy::gpu::Device* through render::pipeline::PipelineDesc
+  Body : The PublicRenderPipeline.h contract is frozen and does NOT
+         carry a Device pointer. Lane 09 currently uses a process-wide
+         `set_device_hook(Device*)` shim (not part of the public surface)
+         set by the orchestrator before pipeline::create(). The proper
+         fix is to extend PipelineDesc { gpu::Device* device; } in a
+         coordinated cross-lane change. Requires:
+           - PublicGpu.h forward decl visibility (already there)
+           - PublicRenderPipeline.h amended (frozen contract change,
+             orchestrator must coordinate the cascade to any dependent
+             lane — currently none).
+
+Issue lane09-003 — Against lane 06 (scene)
+  Title: Publish canonical render-side component schema in GxComponents.h
+  Body : Extract.cpp expects a TransformWS + MeshRef + MaterialRef
+         schema to walk the World for renderables. Until lane 06 ships
+         engine/scene/GxComponents.h (referenced in the orchestrator
+         briefing for this lane but not yet present in main), the M2+
+         ECS extract is commented-out pseudocode. Lane 09 falls back to
+         the M1 hardcoded triangle which is fine for M1 acceptance but
+         blocks M2 (PBR sphere with multiple instances).
+
+Issue lane09-004 — Against lane 08 (shader)
+  Title: GraphicsPipelineDesc lacks vertex-layout descriptor
+  Body : PublicShader.h::GraphicsPipelineDesc has a comment "// Vertex
+         layout supplied via a separate descriptor (TBD by lane 09)" but
+         no field. Lane 09 needs to declare its Vertex format
+         (POSITION/NORMAL/UV/COLOR) to lane 08's pipeline factory so the
+         right input-assembly state is set. Suggest:
+           struct VertexInputAttr { uint location; uint binding;
+                                    uint8_t format; uint32_t offset; };
+           struct VertexInputBinding { uint binding; uint stride; };
+           uint32_t vertex_binding_count;
+           VertexInputBinding vertex_bindings[8];
+           uint32_t vertex_attribute_count;
+           VertexInputAttr vertex_attributes[16];
+         Aligns with both vkPipelineVertexInputStateCreateInfo and
+         MTLVertexDescriptor.
+
+Issue lane09-005 — Against lane 11 (render-post)
+  Title: Coordinate HDR colour attachment ownership
+  Body : The opaque pass at M2 wants to write into an HDR R16G16B16A16
+         (or Rgba16Float) colour attachment that lane 11's bloom + tonemap
+         pass then reads. Right now OpaquePass.cpp targets the swapchain
+         (Bgra8Srgb) directly; the right path is:
+           lane 11 owns the HDR attachment lifecycle (it's the consumer)
+           lane 09 writes into it with a format that lane 11 declares
+         Need to align on whose Public*.h declares the HDR target +
+         the format. Tracking for M2 ship.
+
+═══════════════════════════════════════════════════════════════════════
+WHAT THIS LANE DOES NOT TOUCH (per AGENTS.md ownership)
+═══════════════════════════════════════════════════════════════════════
+
+  * PublicRenderPipeline.h is FROZEN; edits would cascade across the
+    dependent lanes per AGENTS.md §"Public-header contracts". File an
+    Issue against the orchestrator instead.
+  * engine/render/CMakeLists.txt (orchestrator-owned aggregator) —
+    untouched.
+  * engine/gpu/, engine/shader/, engine/scene/ — read-only deps via
+    Public*.h.
+  * samples/00_clear/main.cpp — orchestrator-owned. The sample's M0
+    smoke does not reference psy::render::pipeline yet; that's a
+    Wave-C integration step the orchestrator schedules once the cmd
+    encoder APIs (Issue lane09-001) land.
+
+═══════════════════════════════════════════════════════════════════════
+LIMITATIONS / DEFERRED TO M3+
+═══════════════════════════════════════════════════════════════════════
+
+  * Mesh-shader path (Turing+, RDNA2+, M3+) — deferred to M9 per the
+    briefing; legacy vertex/index pipeline is what M2 ships.
+  * Reverse-Z depth convention — current scaffold uses standard 0=near
+    / 1=far. Reverse-Z (1=near / 0=far) lands with M3 precision pass.
+  * Frames-in-flight > 1 — lane 07 M0 is single-buffered; this lane's
+    per-frame state is single-buffered to match. M3 work in lane 07.
+  * Indirect-draw count (vkCmdDrawIndexedIndirectCount /
+    MTLIndirectCommandBuffer) — placeholder in gpu_cull.slang writes
+    one record per visible instance; the real count-driven draw lands
+    when lane 07 ships the indirect APIs (Issue lane09-001 covers this).
+  * Cluster light culling currently writes zero counts (scaffold) —
+    the cluster AABB build pass + per-cluster sphere-vs-AABB test is
+    M2 ship work that depends on Issue lane09-001 for the dispatch
+    encode and on the orchestrator landing a real light source via
+    lane 06 ECS query (Issue lane09-003).
+  * Material system — fragment shader compiles with a single material
+    block. Per-instance material lookup table is M3 work.
