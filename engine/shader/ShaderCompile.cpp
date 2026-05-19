@@ -17,6 +17,7 @@
 
 #include "shader/PublicShader.h"
 #include <utility>
+#include "shader/impl/PipelineCreateBackend.h"
 #include "shader/impl/ShaderImpl.h"
 
 #include <array>
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -221,6 +223,48 @@ bool compile_to_metal_ir(
 
 } // namespace impl
 
+// ─── Backend-specific stage-blob compile ─────────────────────────────────
+//
+// On PSYNDER_GX_BACKEND_VULKAN builds: compile to SPIR-V via slangc.
+// On PSYNDER_GX_BACKEND_METAL builds:  compile to Metal IR via slangc +
+//                                      xcrun metal + xcrun metallib.
+// On builds with neither define: only SPIR-V (host-tools / asset cook only).
+//
+// The compiled bytes are stored unchanged in CachedPipeline::spirv_*; the
+// member is misnamed for historical reasons but holds whichever blob
+// format the active backend consumes.
+namespace {
+
+bool compile_stage_for_active_backend(
+    const char*               slang_path,
+    const char*               entry,
+    Stage                     stage,
+    std::vector<std::uint8_t>& out_blob,
+    std::string*              out_log)
+{
+#if defined(PSYNDER_GX_BACKEND_METAL)
+    return psynder::shader::impl::compile_to_metal_ir(
+        slang_path, entry, stage, out_blob, out_log);
+#else
+    // Vulkan build (or no-backend test build) — SPIR-V.
+    return psynder::shader::impl::compile_to_spirv(
+        slang_path, entry, stage, out_blob, out_log);
+#endif
+}
+
+// Register the watch path for hot-reload polling. Caller must hold reg.mu.
+void touch_watch_locked(impl::PipelineRegistry& reg,
+                        const char*             path,
+                        std::int64_t            mtime)
+{
+    for (auto& w : reg.watch_list) {
+        if (w.path == path) return;
+    }
+    reg.watch_list.push_back({path, mtime});
+}
+
+} // anonymous namespace
+
 // ─── Public API implementations ──────────────────────────────────────────
 
 PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
@@ -238,10 +282,10 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
     entry.entry_fs   = fs_ep;
 
     std::string log_vs, log_fs;
-    bool vs_ok = impl::compile_to_spirv(desc.slang_path, vs_ep, Stage::Vertex,
-                                        entry.spirv_vs, &log_vs);
-    bool fs_ok = impl::compile_to_spirv(desc.slang_path, fs_ep, Stage::Fragment,
-                                        entry.spirv_fs, &log_fs);
+    bool vs_ok = compile_stage_for_active_backend(
+        desc.slang_path, vs_ep, Stage::Vertex, entry.spirv_vs, &log_vs);
+    bool fs_ok = compile_stage_for_active_backend(
+        desc.slang_path, fs_ep, Stage::Fragment, entry.spirv_fs, &log_fs);
 
     if (!vs_ok || !fs_ok) {
         // Diagnostics surfaced to the engine console (lane 01 wires this up).
@@ -253,22 +297,35 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
         return PipelineHandle{};
     }
 
-    entry.id = reg.next_id++;
+    // Atomically allocate the handle id so concurrent callers from
+    // different worker threads don't collide (M1+ multi-threaded init).
+    entry.id           = reg.allocate_id();
     entry.source_mtime = impl::file_mtime(desc.slang_path);
 
-    // Register for hot-reload watching
-    {
-        bool already_watched = false;
-        for (auto& w : reg.watch_list) {
-            if (w.path == desc.slang_path) { already_watched = true; break; }
-        }
-        if (!already_watched) {
-            reg.watch_list.push_back({desc.slang_path, entry.source_mtime});
-        }
+    // Construct the API-native PSO + register with lane 07. The call must
+    // happen OUTSIDE reg.mu because the backend implementations grab their
+    // own mutex (e.g. Vulkan's g_ctx_mu) and we never want nested locking.
+    const bool pso_ok = impl::create_and_register_graphics_pso(
+        entry.id, entry.spirv_vs, entry.spirv_fs, vs_ep, fs_ep);
+    entry.pso_registered = pso_ok;
+    if (!pso_ok) {
+        // The handle id is still valid; lane 07's bind_pipeline path will
+        // emit its "not registered" log + render-blank fallback. We don't
+        // want to fail the create_graphics call here because the caller
+        // (render lane) may want to keep the handle around to retry on
+        // hot reload.
+        ::fprintf(stderr,
+            "[shader] graphics PSO creation failed for id=%u (path=%s) — "
+            "lane 07 bind_pipeline will report 'not registered'\n",
+            entry.id, desc.slang_path);
     }
 
     const auto id = entry.id;
-    reg.pipelines.emplace(id, std::move(entry));
+    {
+        std::lock_guard<std::mutex> lock(reg.mu);
+        touch_watch_locked(reg, desc.slang_path, entry.source_mtime);
+        reg.pipelines.emplace(id, std::move(entry));
+    }
     return PipelineHandle{id};
 }
 
@@ -285,27 +342,33 @@ PipelineHandle create_compute(const ComputePipelineDesc& desc)
     entry.entry_cs   = cs_ep;
 
     std::string log_cs;
-    bool ok = impl::compile_to_spirv(desc.slang_path, cs_ep, Stage::Compute,
-                                     entry.spirv_cs, &log_cs);
+    bool ok = compile_stage_for_active_backend(
+        desc.slang_path, cs_ep, Stage::Compute, entry.spirv_cs, &log_cs);
     if (!ok) {
         ::fprintf(stderr, "[shader] CS compile failed: %s\n  %s\n",
                   desc.slang_path, log_cs.c_str());
         return PipelineHandle{};
     }
 
-    entry.id = reg.next_id++;
+    entry.id           = reg.allocate_id();
     entry.source_mtime = impl::file_mtime(desc.slang_path);
 
-    {
-        bool already = false;
-        for (auto& w : reg.watch_list)
-            if (w.path == desc.slang_path) { already = true; break; }
-        if (!already)
-            reg.watch_list.push_back({desc.slang_path, entry.source_mtime});
+    const bool pso_ok = impl::create_and_register_compute_pso(
+        entry.id, entry.spirv_cs, cs_ep);
+    entry.pso_registered = pso_ok;
+    if (!pso_ok) {
+        ::fprintf(stderr,
+            "[shader] compute PSO creation failed for id=%u (path=%s) — "
+            "lane 07 dispatch will report 'not registered'\n",
+            entry.id, desc.slang_path);
     }
 
     const auto id = entry.id;
-    reg.pipelines.emplace(id, std::move(entry));
+    {
+        std::lock_guard<std::mutex> lock(reg.mu);
+        touch_watch_locked(reg, desc.slang_path, entry.source_mtime);
+        reg.pipelines.emplace(id, std::move(entry));
+    }
     return PipelineHandle{id};
 }
 
@@ -322,7 +385,14 @@ void destroy_pipeline(PipelineHandle h)
 {
     if (!h.valid()) return;
     auto& reg = impl::PipelineRegistry::get();
-    reg.pipelines.erase(h.id);
+    {
+        std::lock_guard<std::mutex> lock(reg.mu);
+        reg.pipelines.erase(h.id);
+    }
+    // M1: API resources (VkPipeline / MTLRenderPipelineState) are leaked
+    // by design — see PipelineCreateBackend.h. Real retire-with-
+    // frames-in-flight integrates with lane 07's reaper in M2.
+    impl::release_registered_pso(h.id);
 }
 
 void hot_reload_changed()
@@ -331,7 +401,10 @@ void hot_reload_changed()
     // Iterate the watch list; recompile anything whose mtime has advanced.
     // The atomic pipeline swap (old handle remains valid for in-flight frames)
     // is deferred to M2 when lane 09 provides the pipeline-swap protocol.
-    // For now we just recompile and update the cached blobs in-place.
+    // For now we recompile the blobs in-place AND rebuild the API-native
+    // PSO so lane 07's bind_pipeline picks up the new shader code on the
+    // next bind. The previous PSO is leaked (M1) — M2 wires in the
+    // frames-in-flight reaper.
     //
     // M2 upgrade path: replace this function body with a platform-native
     // file-watcher subscription (kqueue on macOS, inotify on Linux,
@@ -339,42 +412,100 @@ void hot_reload_changed()
 
     auto& reg = impl::PipelineRegistry::get();
 
-    for (auto& w : reg.watch_list) {
+    // Snapshot the watch list under lock so we can iterate without holding
+    // reg.mu through compile (compile_to_* spawns slangc, which is slow).
+    struct WatchSnapshot { std::string path; std::int64_t prev_mtime; };
+    std::vector<WatchSnapshot> snap;
+    {
+        std::lock_guard<std::mutex> lock(reg.mu);
+        snap.reserve(reg.watch_list.size());
+        for (auto& w : reg.watch_list) snap.push_back({w.path, w.last_mtime});
+    }
+
+    for (auto& w : snap) {
         const std::int64_t cur_mtime = impl::file_mtime(w.path.c_str());
-        if (cur_mtime <= 0 || cur_mtime <= w.last_mtime) continue;
-        w.last_mtime = cur_mtime;
+        if (cur_mtime <= 0 || cur_mtime <= w.prev_mtime) continue;
 
-        // Find all pipelines that reference this source file and recompile.
-        for (auto& [id, cached] : reg.pipelines) {
-            if (cached.slang_path != w.path) continue;
+        // Update the watch mtime under lock.
+        {
+            std::lock_guard<std::mutex> lock(reg.mu);
+            for (auto& wl : reg.watch_list) {
+                if (wl.path == w.path) { wl.last_mtime = cur_mtime; break; }
+            }
+        }
 
+        // Collect the pipeline ids that reference this source file. We
+        // snapshot ids + entries under the lock, recompile outside, then
+        // re-publish blobs back into the map under the lock.
+        struct PipeSnap {
+            std::uint32_t id;
+            std::string   entry_vs, entry_fs, entry_cs;
+        };
+        std::vector<PipeSnap> targets;
+        {
+            std::lock_guard<std::mutex> lock(reg.mu);
+            for (auto& [id, cached] : reg.pipelines) {
+                if (cached.slang_path != w.path) continue;
+                targets.push_back({id, cached.entry_vs, cached.entry_fs, cached.entry_cs});
+            }
+        }
+
+        for (auto& t : targets) {
             std::string log;
-            if (!cached.entry_vs.empty()) {
-                std::vector<uint8_t> new_spirv;
-                if (impl::compile_to_spirv(w.path.c_str(), cached.entry_vs.c_str(),
-                                           Stage::Vertex, new_spirv, &log))
-                    cached.spirv_vs = std::move(new_spirv);
-                else
+            std::vector<std::uint8_t> new_vs, new_fs, new_cs;
+            bool any_gfx = false, gfx_ok = true;
+
+            if (!t.entry_vs.empty()) {
+                any_gfx = true;
+                if (!compile_stage_for_active_backend(
+                        w.path.c_str(), t.entry_vs.c_str(),
+                        Stage::Vertex, new_vs, &log)) {
                     ::fprintf(stderr, "[shader] hot-reload VS failed: %s\n", log.c_str());
+                    gfx_ok = false;
+                }
             }
-            if (!cached.entry_fs.empty()) {
-                std::vector<uint8_t> new_spirv;
-                if (impl::compile_to_spirv(w.path.c_str(), cached.entry_fs.c_str(),
-                                           Stage::Fragment, new_spirv, &log))
-                    cached.spirv_fs = std::move(new_spirv);
-                else
+            if (!t.entry_fs.empty()) {
+                any_gfx = true;
+                if (!compile_stage_for_active_backend(
+                        w.path.c_str(), t.entry_fs.c_str(),
+                        Stage::Fragment, new_fs, &log)) {
                     ::fprintf(stderr, "[shader] hot-reload FS failed: %s\n", log.c_str());
+                    gfx_ok = false;
+                }
             }
-            if (!cached.entry_cs.empty()) {
-                std::vector<uint8_t> new_spirv;
-                if (impl::compile_to_spirv(w.path.c_str(), cached.entry_cs.c_str(),
-                                           Stage::Compute, new_spirv, &log))
-                    cached.spirv_cs = std::move(new_spirv);
-                else
+            if (!t.entry_cs.empty()) {
+                if (!compile_stage_for_active_backend(
+                        w.path.c_str(), t.entry_cs.c_str(),
+                        Stage::Compute, new_cs, &log)) {
                     ::fprintf(stderr, "[shader] hot-reload CS failed: %s\n", log.c_str());
+                }
             }
 
-            cached.source_mtime = cur_mtime;
+            // Re-register PSO with lane 07 (overwrites the existing entry
+            // in the registration shim's table — see vk_pipeline_shim::find
+            // and pipeline_shim::find which both overwrite on duplicate id).
+            // We pass the freshly-compiled blobs; the older PSO leaks as
+            // documented above.
+            if (any_gfx && gfx_ok) {
+                impl::create_and_register_graphics_pso(
+                    t.id, new_vs, new_fs,
+                    t.entry_vs.c_str(), t.entry_fs.c_str());
+            }
+            if (!t.entry_cs.empty() && !new_cs.empty()) {
+                impl::create_and_register_compute_pso(
+                    t.id, new_cs, t.entry_cs.c_str());
+            }
+
+            // Publish the new blobs back to the cache.
+            {
+                std::lock_guard<std::mutex> lock(reg.mu);
+                auto it = reg.pipelines.find(t.id);
+                if (it == reg.pipelines.end()) continue;
+                if (!new_vs.empty()) it->second.spirv_vs = std::move(new_vs);
+                if (!new_fs.empty()) it->second.spirv_fs = std::move(new_fs);
+                if (!new_cs.empty()) it->second.spirv_cs = std::move(new_cs);
+                it->second.source_mtime = cur_mtime;
+            }
         }
     }
 }
