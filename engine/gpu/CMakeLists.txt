@@ -107,15 +107,18 @@ if(PSYNDER_GX_PLATFORM_MACOS)
 elseif(PSYNDER_GX_PLATFORM_WIN32 OR PSYNDER_GX_PLATFORM_LINUX)
     target_compile_definitions(psynder_gpu PUBLIC PSYNDER_GX_BACKEND_VULKAN=1)
 
-    # Vulkan WSI platform protos are gated behind VK_USE_PLATFORM_*_KHR
-    # in vulkan/vulkan.h. Without these, symbols like
-    # vkCreateWin32SurfaceKHR / vkCreateWaylandSurfaceKHR are not declared
-    # and the surface creation in lane 07/23/24 fails to compile.
+    # Vulkan WSI platform protos are gated behind VK_USE_PLATFORM_*_KHR in
+    # vulkan/vulkan.h. Set them with `add_compile_definitions()` at
+    # directory scope — this propagates to FetchContent_MakeAvailable
+    # subprojects (notably volk.c, which must define its own
+    # vkCreateWin32SurfaceKHR function-pointer table entry to satisfy
+    # lane 07's direct call). target_compile_definitions on psynder_gpu
+    # alone would NOT reach volk's TUs.
     if(PSYNDER_GX_PLATFORM_WIN32)
-        target_compile_definitions(psynder_gpu PUBLIC VK_USE_PLATFORM_WIN32_KHR=1)
+        add_compile_definitions(VK_USE_PLATFORM_WIN32_KHR=1)
     elseif(PSYNDER_GX_PLATFORM_LINUX)
         # Both because the runtime picks Wayland-vs-X11 dynamically.
-        target_compile_definitions(psynder_gpu PUBLIC
+        add_compile_definitions(
             VK_USE_PLATFORM_WAYLAND_KHR=1
             VK_USE_PLATFORM_XCB_KHR=1
             VK_USE_PLATFORM_XLIB_KHR=1
