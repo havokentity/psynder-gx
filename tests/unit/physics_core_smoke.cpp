@@ -26,12 +26,24 @@ namespace {
 constexpr float kDt   = 1.0f / 120.0f; // matches the design's fixed tick
 constexpr int   kTicks = 240;          // 2 seconds of sim
 
+// Small WorldDesc suitable for unit tests.  The production default
+// (max_bodies = 64k) causes Jolt's temp allocator (16 MB) to be
+// exhausted during the first tick because the body/pair buffer
+// reservation alone exceeds that budget at that scale.  Unit tests
+// never need more than a handful of bodies.
+WorldDesc unit_world_desc() {
+    WorldDesc d{};
+    d.max_bodies      = 256u;
+    d.max_constraints = 256u;
+    d.tick_hz         = 120u;
+    return d;
+}
+
 // Tiny scope guard so each test starts with a fresh world.
 struct WorldScope {
     World* w = nullptr;
     WorldScope() {
-        WorldDesc desc{};
-        w = create_world(desc);
+        w = create_world(unit_world_desc());
         REQUIRE(w != nullptr);
     }
     ~WorldScope() { destroy_world(w); }
@@ -41,7 +53,7 @@ struct WorldScope {
 
 TEST_CASE("physics-core: world creates and destroys cleanly",
           "[physics][smoke]") {
-    WorldDesc desc{};
+    WorldDesc desc = unit_world_desc();
     World* w = create_world(desc);
     REQUIRE(w != nullptr);
     destroy_world(w);
@@ -191,7 +203,7 @@ TEST_CASE("physics-core: identical worlds produce identical traces "
     // platform check (arm64 vs x86_64 bit-identity) is wired into the
     // CI matrix when lane 18 (net) lockstep tests come online.
     auto run = [](float* out_y_trace, int n) {
-        World* w = create_world(WorldDesc{});
+        World* w = create_world(unit_world_desc());
         BodyDesc d{};
         d.shape    = Shape::Sphere;
         d.pos[1]   = 5.0f;
