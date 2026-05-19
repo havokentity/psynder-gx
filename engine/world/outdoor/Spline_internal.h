@@ -13,11 +13,11 @@
 
 #pragma once
 
+#include "world/outdoor/GpuVertex_internal.h"
 #include "world/outdoor/Terrain.h"
 
 #include "core/Types.h"
 #include "math/Math.h"
-#include "render/raster/Raster.h"
 
 #include <cmath>
 #include <vector>
@@ -107,12 +107,13 @@ PSY_FORCEINLINE void frame_at(const SplineRoadSegment& seg,
     up_out    = new_up;
 }
 
-// One DrawItem-worth of vertices + indices for an extruded strip. The
-// caller owns the vectors; we append to them.
+// One draw-worth of vertices + indices for an extruded road strip.
+// Lane 09 (render-pipeline) will consume this directly.
+// The caller owns the vectors; we append to them.
 struct ExtrudedStrip {
-    std::vector<render::raster::Vertex> vertices;
-    std::vector<u32>                    indices;
-    u8                                  flags = kDrawItemFlagDrivable;
+    std::vector<OutdoorVertex> vertices;
+    std::vector<u32>           indices;
+    u8                         flags = kDrawItemFlagDrivable;
 };
 
 // Extrude a single Bezier segment into a textured strip. `samples` is the
@@ -146,14 +147,14 @@ inline ExtrudedStrip extrude_segment(const SplineRoadSegment& seg,
             c.z + r.z * seg.half_width,
         };
 
-        render::raster::Vertex vL{};
+        OutdoorVertex vL{};
         vL.position    = left;
         vL.normal      = u;
         vL.uv          = math::Vec2{ 0.0f, t * v_scale };
         vL.lightmap_uv = vL.uv;
         vL.color       = 0xFFFFFFFFu;
 
-        render::raster::Vertex vR{};
+        OutdoorVertex vR{};
         vR.position    = right;
         vR.normal      = u;
         vR.uv          = math::Vec2{ 1.0f, t * v_scale };

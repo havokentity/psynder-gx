@@ -16,7 +16,6 @@
 
 #include "asset/Vfs.h"
 #include "core/Log.h"
-#include "render/raster/Raster.h"
 
 #include <cstring>
 
@@ -110,21 +109,15 @@ void TerrainMesh::render_cdlod(const math::Mat4& /*view*/,
     }
     if (!st || !st->built) return;
 
-    // Emit each leaf chunk into lane 07's submit queue. Wave A's chunk
-    // morph is identity (no inter-level slope yet); the watertight
-    // invariant comes from sharing integer texel positions between chunks.
-    auto& rast = render::raster::Rasterizer::Get();
-    for (const auto& c : st->chunks) {
-        if (c.vertices.empty() || c.indices.empty()) continue;
-        render::raster::DrawItem item{};
-        item.vertices     = c.vertices.data();
-        item.vertex_count = static_cast<u32>(c.vertices.size());
-        item.indices      = c.indices.data();
-        item.index_count  = static_cast<u32>(c.indices.size());
-        item.model        = math::identity4();
-        item.flags        = 0;
-        rast.submit(item);
-    }
+    // TODO(lane-09): submit chunks to lane 09's render-pipeline draw queue.
+    // CdlodChunk::vertices / indices hold OutdoorVertex-layout data ready for
+    // a GPU upload.  Wave A leaves this as a stub; lane 09 will implement
+    // the actual GPU draw-stream emit when its public API lands.
+    //
+    // Cross-lane note: CdlodChunk is the data contract between lane 13 and
+    // lane 09.  Do not change the OutdoorVertex layout without coordinating
+    // with lane 09.
+    (void)st;
 }
 
 // ─── TerrainRaymarch ─────────────────────────────────────────────────────
