@@ -3,21 +3,22 @@
 // samples/00_clear/main.cpp — M0 deliverable.
 //
 // Animated clear color on macOS Apple Silicon via native Metal, and on
-// Windows + Linux via Vulkan. One source, three platforms — the bar set
-// in DESIGN-PSYNDER-GX.md §13 M0.
+// Windows via Vulkan. One source, multiple platforms — the bar set in
+// DESIGN-PSYNDER-GX.md §13 M0.
 //
 // Wire-up:
-//   1. lane 25 (platform-macos) opens an NSWindow + attaches CAMetalLayer
-//      and gives us a typed void* via native_layer().
-//   2. lane 07 (gpu) reads that handle out of DeviceDesc::native_window
-//      _handle, drives MTLDevice / nextDrawable / present.
-//   3. The Metal + Vulkan backends both encode an animated clear color
-//      inside cmd_submit() — no per-frame work needed from the sample
-//      beyond pumping the begin/cmd/end loop and the OS event queue.
+//   * macOS: lane 25 opens an NSWindow + CAMetalLayer; lane 07 drives
+//     MTLDevice / nextDrawable / present.
+//   * Windows: lane 23 opens a Win32 HWND; lane 07 wraps it via
+//     vkCreateWin32SurfaceKHR + drives the swapchain.
+//   * Linux: pending — lane 24 has Wayland / XCB surface helpers but
+//     they need a tagged-handle ABI agreement with lane 07 before the
+//     sample can hand off a void* unambiguously. Issue filed in lane
+//     09's INTEGRATION.txt (lane09-002 / lane24-handle-abi).
 //
-// The Win32 + Linux wire-up uses lanes 23/24's surface-creation helpers;
-// orchestrator's box can't smoke-test those paths so they're gated by
-// preprocessor and ship behind "needs PC validation" flags.
+// On Metal AND Vulkan the backend's cmd_submit encodes an animated
+// clear color internally; the sample only orchestrates the begin /
+// cmd / end loop and the OS event pump.
 
 #include <cstdio>
 #include <cstdlib>
@@ -27,7 +28,11 @@
 
 #if defined(PSYNDER_GX_PLATFORM_MACOS)
 #  include "platform/macos/PublicPlatformMacos.h"
-namespace plat = psynder::platform::macos;
+#elif defined(PSYNDER_GX_PLATFORM_WIN32)
+#  include "platform/Platform.h"
+#  include "platform/win32/Win32Window.h"
+#elif defined(PSYNDER_GX_PLATFORM_LINUX)
+#  include "platform/Platform.h"
 #endif
 
 namespace {
@@ -51,10 +56,13 @@ Args parse(int argc, char** argv) {
 
 } // namespace
 
-// ─── macOS path ─────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────
+// macOS — native Metal via lane 25
+// ────────────────────────────────────────────────────────────────────────
 #if defined(PSYNDER_GX_PLATFORM_MACOS)
 
 int main(int argc, char** argv) {
+    namespace plat = psynder::platform::macos;
     const Args args = parse(argc, argv);
 
     if (!args.quiet) {
@@ -62,7 +70,6 @@ int main(int argc, char** argv) {
                     args.smoke_frames);
     }
 
-    // 1. Open the NSWindow + CAMetalLayer.
     plat::WindowDesc wdesc;
     wdesc.title         = "Psynder-GX · sample_00_clear (M0)";
     wdesc.window_width  = 1280;
@@ -73,11 +80,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 2. Construct psy::gpu::Device, handing the CAMetalLayer through.
     psynder::gpu::DeviceDesc ddesc{};
-    ddesc.enable_validation   = false;
-    ddesc.enable_rt           = false;            // M5 work; not needed for M0
-    ddesc.enable_mesh_shaders = false;            // M9 work
+    ddesc.enable_validation    = false;
+    ddesc.enable_rt            = false;
+    ddesc.enable_mesh_shaders  = false;
     ddesc.native_window_handle = plat::native_layer(win);
 
     psynder::gpu::Device* dev = psynder::gpu::create_device(ddesc);
@@ -94,31 +100,19 @@ int main(int argc, char** argv) {
                     psynder::gpu::device_supports_mesh_shaders(dev) ? 1 : 0);
     }
 
-    // 3. Drive the main loop. The Metal backend's cmd_submit encodes the
-    //    animated clear color internally — the sample only orchestrates.
     std::uint64_t frame_idx = 0;
     while (!plat::should_close(win)) {
         plat::pump_events();
-
-        if (!psynder::gpu::begin_frame(dev)) {
-            // swapchain out-of-date or device lost; lane 07 logs internally.
-            continue;
-        }
-
-        if (psynder::gpu::CmdBuffer* cmd = psynder::gpu::cmd_open(dev)) {
+        if (!psynder::gpu::begin_frame(dev)) continue;
+        if (auto* cmd = psynder::gpu::cmd_open(dev)) {
             psynder::gpu::cmd_submit(dev, cmd);
         }
-
         psynder::gpu::end_frame(dev);
-
-        // Handle window resize. drawable_width / _height update when
-        // the user drags the window edge or moves to a different display
-        // with a different backingScaleFactor.
-        const std::uint32_t dw = plat::drawable_width(win);
-        const std::uint32_t dh = plat::drawable_height(win);
-        psynder::gpu::resize_swapchain(dev, dw, dh);
-
-        if (args.smoke_frames > 0 && ++frame_idx >= static_cast<std::uint64_t>(args.smoke_frames)) {
+        psynder::gpu::resize_swapchain(dev,
+            plat::drawable_width(win),
+            plat::drawable_height(win));
+        if (args.smoke_frames > 0 &&
+            ++frame_idx >= static_cast<std::uint64_t>(args.smoke_frames)) {
             if (!args.quiet) {
                 std::printf("[sample_00_clear] smoke complete: %llu frames\n",
                             static_cast<unsigned long long>(frame_idx));
@@ -132,26 +126,110 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-#else
-// ─── Win/Linux placeholder ──────────────────────────────────────────────
-// The corresponding lane (23-platform-win32 / 24-platform-linux) ships its
-// own PublicPlatformWin32.h / PublicPlatformLinux.h with create_window
-// helpers; we'll wire them in once they expose a comparable contract. For
-// now, surface a clear "needs PC validation" message.
+// ────────────────────────────────────────────────────────────────────────
+// Windows — Vulkan swapchain on a Win32 HWND via lane 23 + lane 07
+// ────────────────────────────────────────────────────────────────────────
+#elif defined(PSYNDER_GX_PLATFORM_WIN32)
+
+int main(int argc, char** argv) {
+    namespace plat = psynder::platform;
+    const Args args = parse(argc, argv);
+
+    if (!args.quiet) {
+        std::printf("[sample_00_clear] platform=Windows  backend=Vulkan  smoke_frames=%d\n",
+                    args.smoke_frames);
+        std::fflush(stdout); // so the user sees this even if the GPU init crashes
+    }
+
+    plat::WindowDesc wdesc;
+    wdesc.title         = "Psynder-GX · sample_00_clear (M0)";
+    wdesc.window_width  = 1280;
+    wdesc.window_height = 720;
+
+    plat::Window* win = plat::create_window(wdesc);
+    if (!win) {
+        std::fprintf(stderr, "[sample_00_clear] failed to create Win32 window\n");
+        return 1;
+    }
+
+    // The cross-platform create_window() returns Window*. On Win32 the
+    // concrete type is psynder::platform::win32::Win32Window; downcast
+    // so we can grab the raw HWND for psy::gpu::DeviceDesc.
+    auto* w32 = static_cast<plat::win32::Win32Window*>(win);
+    HWND hwnd = w32->hwnd();
+    if (!hwnd) {
+        std::fprintf(stderr, "[sample_00_clear] Win32Window returned null HWND\n");
+        plat::destroy_window(win);
+        return 1;
+    }
+
+    psynder::gpu::DeviceDesc ddesc{};
+    ddesc.enable_validation    = false;
+    ddesc.enable_rt            = false;
+    ddesc.enable_mesh_shaders  = false;
+    ddesc.native_window_handle = reinterpret_cast<void*>(hwnd);
+
+    psynder::gpu::Device* dev = psynder::gpu::create_device(ddesc);
+    if (!dev) {
+        std::fprintf(stderr, "[sample_00_clear] psy::gpu::create_device failed (check Vulkan runtime + ICD)\n");
+        plat::destroy_window(win);
+        return 1;
+    }
+    if (!args.quiet) {
+        std::printf("[sample_00_clear] device=%s  rt=%d  mesh=%d\n",
+                    psynder::gpu::device_name(dev),
+                    psynder::gpu::device_supports_rt(dev) ? 1 : 0,
+                    psynder::gpu::device_supports_mesh_shaders(dev) ? 1 : 0);
+        std::fflush(stdout);
+    }
+
+    std::uint64_t frame_idx = 0;
+    while (!win->should_close()) {
+        win->poll_events();
+        if (!psynder::gpu::begin_frame(dev)) continue;
+        if (auto* cmd = psynder::gpu::cmd_open(dev)) {
+            psynder::gpu::cmd_submit(dev, cmd);
+        }
+        psynder::gpu::end_frame(dev);
+        psynder::gpu::resize_swapchain(dev,
+            win->window_width(),
+            win->window_height());
+        if (args.smoke_frames > 0 &&
+            ++frame_idx >= static_cast<std::uint64_t>(args.smoke_frames)) {
+            if (!args.quiet) {
+                std::printf("[sample_00_clear] smoke complete: %llu frames\n",
+                            static_cast<unsigned long long>(frame_idx));
+            }
+            break;
+        }
+    }
+
+    psynder::gpu::destroy_device(dev);
+    plat::destroy_window(win);
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Linux — placeholder until lane 24 ⇄ lane 07 handle ABI lands
+// ────────────────────────────────────────────────────────────────────────
+#elif defined(PSYNDER_GX_PLATFORM_LINUX)
 
 int main(int argc, char** argv) {
     const Args args = parse(argc, argv);
-
-#  if defined(PSYNDER_GX_BACKEND_VULKAN)
-    std::printf("[sample_00_clear] platform=Vulkan host  backend=Vulkan  smoke_frames=%d\n",
+    std::printf("[sample_00_clear] platform=Linux  backend=Vulkan  smoke_frames=%d\n",
                 args.smoke_frames);
-    std::printf("[sample_00_clear] M0 sample wire-up for Win/Linux pending lane 23/24 "
-                "PublicPlatform*.h handle ABI — verify on your PC box.\n");
-#  else
-    std::printf("[sample_00_clear] no GPU backend selected at build time\n");
-#  endif
-
-    return args.smoke_frames > 0 ? 0 : 0;
+    std::printf("[sample_00_clear] M0 visual demo pending Wayland/XCB handle ABI "
+                "between lane 24 and lane 07. The CI build proves the engine\n"
+                "                  libs compile on this platform; visual smoke "
+                "lands with the M1 / lane09-002 cmd-encoder API extension.\n");
+    return 0;
 }
 
-#endif // PSYNDER_GX_PLATFORM_MACOS
+#else
+
+int main(int /*argc*/, char** /*argv*/) {
+    std::printf("[sample_00_clear] no GPU backend selected at build time\n");
+    return 1;
+}
+
+#endif
