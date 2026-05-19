@@ -199,10 +199,13 @@ TEST_CASE("world_bsp/build_leaf_draws produces one DrawItem per face",
 
     BspMaterialResolve resolve{};  // no override → pass material id through
 
-    std::vector<render::raster::DrawItem> draws;
+    // Lane 12 retired the CPU-rasterizer DrawItem in favor of BspMeshSet
+    // (same data shape, GX-native material id is a plain u32 instead of
+    // the raster Handle<MaterialTag> newtype).
+    std::vector<BspMeshSet> draws;
     build_leaf_draws(map, geom, map.leaves[2], resolve, draws);
     REQUIRE(draws.size() == 1);
-    REQUIRE(draws[0].material.raw == 102u);
+    REQUIRE(draws[0].material_id == 102u);
     REQUIRE(draws[0].vertex_count == 3u);
     REQUIRE(draws[0].vertices != nullptr);
 }
