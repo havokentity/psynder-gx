@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Psynder — AVX-512 wide-path kernel implementations. Lane 03 owns.
 //
-// Each function is decorated with __attribute__((target("avx512f,avx512bw,avx512vl")))
+// Each function is decorated with
+// __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq")))
 // so the compiler emits AVX-512 instructions ONLY inside these function bodies.
 // The rest of psynder_simd compiles at the x86-64 baseline (SSE4.2) or the
 // AVX2 fast path — no TU-wide -mavx512f flag is used. This is the fix for the
@@ -32,7 +33,7 @@
 namespace psynder::simd {
 
 // Convenience macro — keeps the attribute in one place.
-#define PSY_AVX512 __attribute__((target("avx512f,avx512bw,avx512vl")))
+#define PSY_AVX512 __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq")))
 
 // f32x16 stores two AVX2 halves (defined in Simd_internal.h).  Inside the
 // target-attributed bodies below the compiler may freely use _mm512_* because

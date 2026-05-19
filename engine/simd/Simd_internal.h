@@ -779,7 +779,7 @@ PSY_FORCEINLINE i32x8 broadcast_i32x8(psynder::i32 s) noexcept {
 
 // ─── AVX-512 opportunistic f32x16 ────────────────────────────────────────
 // The AVX-512 native kernels live in Simd_avx512.cpp and are decorated with
-// __attribute__((target("avx512f,avx512bw,avx512vl"))) so the compiler only
+// __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq"))) so the compiler only
 // emits AVX-512 instructions inside those specific functions, NOT across the
 // entire translation unit.  This is the fix for the SIGILL incident: the old
 // -mavx512f compile flag allowed auto-vectorisation anywhere in psynder_simd.
@@ -804,7 +804,7 @@ PSY_FORCEINLINE i32x8 broadcast_i32x8(psynder::i32 s) noexcept {
 //
 // The kernels below are out-of-line declarations only; Simd_avx512.cpp
 // provides the definitions, each carrying
-// __attribute__((target("avx512f,avx512bw,avx512vl"))) so AVX-512
+// __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq"))) so AVX-512
 // instructions are emitted ONLY inside those function bodies.
 // Dispatch.cpp gates all calls to the wide-16 path on Tier::Avx512.
 struct f32x16 {
