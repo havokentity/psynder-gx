@@ -98,19 +98,34 @@ if(PSYNDER_GX_VENDOR_JOLT AND NOT TARGET Jolt)
         GIT_SHALLOW    TRUE
         SOURCE_SUBDIR  Build
     )
-    FetchContent_MakeAvailable(JoltPhysics)
-
-    # Jolt's own CMakeLists turns INTERPROCEDURAL_OPTIMIZATION (LTO) ON for
-    # Release. Apple Clang + lld on macOS handles the resulting LLVM bitcode
-    # in libJolt.a just fine; GNU /usr/bin/ld on Linux doesn't, and the link
-    # of psynder_unit explodes with:
+    # Jolt's Build/CMakeLists.txt calls check_ipo_supported() at configure
+    # time and on success sets CMAKE_INTERPROCEDURAL_OPTIMIZATION_<CONFIG>
+    # globally for Release / RelWithDebInfo / MinSizeRel. That causes Jolt
+    # to compile with -flto and libJolt.a then contains LLVM bitcode.
+    # Apple Clang + lld on macOS handle that fine; GNU /usr/bin/ld on
+    # Linux 24.04 doesn't, and psynder_unit's link explodes with:
     #   /usr/bin/ld: lib/libJolt.a: error adding symbols: file format not
     #   recognized
-    # Force IPO OFF on the Jolt target so libJolt.a contains plain ELF object
-    # code. We re-enable LTO globally once the engine switches to lld on
-    # Linux as well — tracked separately.
+    # Force the cache vars OFF BEFORE FetchContent_MakeAvailable so Jolt's
+    # configure can't turn IPO back on. Setting only the target property
+    # post-fetch is too late — Jolt has already baked -flto into its
+    # compile flags by then.
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE        OFF CACHE BOOL "" FORCE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO OFF CACHE BOOL "" FORCE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL     OFF CACHE BOOL "" FORCE)
+
+    FetchContent_MakeAvailable(JoltPhysics)
+
+    # Belt-and-suspenders: also flip the target property OFF in case Jolt
+    # added it explicitly to its own target rather than relying on the
+    # CMAKE_* global.
     if(TARGET Jolt)
-        set_target_properties(Jolt PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+        set_target_properties(Jolt PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION                FALSE
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE        FALSE
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE
+            INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL     FALSE
+        )
     endif()
 endif()
 
