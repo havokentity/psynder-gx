@@ -5,6 +5,7 @@
 // identical match orderings from the same input.
 
 #include "Completion.h"
+#include <utility>
 
 #include "Console.h"
 

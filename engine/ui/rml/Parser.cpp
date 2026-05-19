@@ -20,6 +20,7 @@
 // the goal is "the obvious HUDs parse correctly," not full conformance.
 
 #include "Rml_internal.h"
+#include <utility>
 
 #include "core/Log.h"
 

@@ -11,6 +11,7 @@
 // (DESIGN-PSYNDER-GX.md §14 — lockstep determinism.)
 
 #include "DemoReader.h"
+#include <utility>
 
 namespace psynder::net {
 

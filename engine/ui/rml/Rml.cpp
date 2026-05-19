@@ -11,6 +11,7 @@
 // Removed: #include "render/Framebuffer.h"
 
 #include "Rml.h"
+#include <utility>
 #include "Rml_internal.h"
 
 #include "asset/Vfs.h"

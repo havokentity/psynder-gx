@@ -16,6 +16,7 @@
 //    the poll in M2 per DESIGN §14 (platform-native watchers).
 
 #include "shader/PublicShader.h"
+#include <utility>
 #include "shader/impl/ShaderImpl.h"
 
 #include <array>

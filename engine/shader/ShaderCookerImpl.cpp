@@ -16,6 +16,7 @@
 // NOTE: DO NOT MODIFY engine/asset/ShaderCookerGx.h — it is lane 05 territory.
 
 #include "asset/ShaderCookerGx.h"
+#include <utility>
 #include "shader/impl/ShaderImpl.h"
 
 #include <cstdio>

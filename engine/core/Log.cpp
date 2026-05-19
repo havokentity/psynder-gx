@@ -21,6 +21,7 @@
 //     which we don't try to eliminate at the API surface.
 
 #include "Log.h"
+#include <utility>
 
 #include "Types.h"
 

@@ -116,10 +116,25 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
       - name: Install Vulkan SDK
-        uses: humbletim/install-vulkan-sdk@v1.1.1
-        with:
-          version: 1.3.290.0
-          cache: true
+        shell: pwsh
+        run: |
+          # The humbletim action depends on actions/cache@v2 which GitHub
+          # auto-fails now. Direct install from LunarG keeps us off third-
+          # party action churn. Pin a stable SDK version that matches the
+          # one in DESIGN §2.2 + the Linux apt source.
+          $version = "1.3.296.0"
+          $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+          Invoke-WebRequest -Uri $url -OutFile vulkan-sdk.exe -UseBasicParsing
+          # Silent install — the LunarG installer is a Qt IFW package; these
+          # are the documented headless flags.
+          Start-Process -Wait -FilePath vulkan-sdk.exe -ArgumentList @(
+            "--accept-licenses",
+            "--default-answer",
+            "--confirm-command", "install"
+          )
+          # Export for subsequent steps.
+          "VULKAN_SDK=C:\VulkanSDK\$version"     | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "C:\VulkanSDK\$version\Bin"             | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - name: Configure
         shell: cmd
         run: cmake --preset win-clang-release %PSY_CMAKE_FLAGS%

@@ -28,6 +28,7 @@
 // exit and joins the watcher thread cleanly.
 
 #include "Vfs.h"
+#include <utility>
 
 #include "LmpakFormat.h"
 #include "core/Diag.h"

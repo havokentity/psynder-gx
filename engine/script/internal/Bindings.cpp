@@ -9,6 +9,7 @@
 // is shaped so swapping the backing store is a localised change.
 
 #include "Bindings.h"
+#include <utility>
 #include "Registry.h"
 
 #if defined(__clang__) || defined(__GNUC__)

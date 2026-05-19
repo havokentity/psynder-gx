@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <utility>
+
 #include "../Log.h"
 #include "../Types.h"
 

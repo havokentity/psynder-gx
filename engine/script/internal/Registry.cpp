@@ -2,6 +2,7 @@
 // Psynder — script-lane registry impl.
 
 #include "Registry.h"
+#include <utility>
 
 #if defined(__clang__) || defined(__GNUC__)
 #  pragma GCC diagnostic push
