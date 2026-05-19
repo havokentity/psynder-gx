@@ -107,6 +107,21 @@ if(PSYNDER_GX_PLATFORM_MACOS)
 elseif(PSYNDER_GX_PLATFORM_WIN32 OR PSYNDER_GX_PLATFORM_LINUX)
     target_compile_definitions(psynder_gpu PUBLIC PSYNDER_GX_BACKEND_VULKAN=1)
 
+    # Vulkan WSI platform protos are gated behind VK_USE_PLATFORM_*_KHR
+    # in vulkan/vulkan.h. Without these, symbols like
+    # vkCreateWin32SurfaceKHR / vkCreateWaylandSurfaceKHR are not declared
+    # and the surface creation in lane 07/23/24 fails to compile.
+    if(PSYNDER_GX_PLATFORM_WIN32)
+        target_compile_definitions(psynder_gpu PUBLIC VK_USE_PLATFORM_WIN32_KHR=1)
+    elseif(PSYNDER_GX_PLATFORM_LINUX)
+        # Both because the runtime picks Wayland-vs-X11 dynamically.
+        target_compile_definitions(psynder_gpu PUBLIC
+            VK_USE_PLATFORM_WAYLAND_KHR=1
+            VK_USE_PLATFORM_XCB_KHR=1
+            VK_USE_PLATFORM_XLIB_KHR=1
+        )
+    endif()
+
     # Vulkan headers — required. Comes from LunarG SDK on Win/Linux. Lets
     # VulkanBackend.h #include <vulkan/vulkan.h> resolve.
     find_package(Vulkan REQUIRED)

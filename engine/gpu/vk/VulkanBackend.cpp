@@ -552,7 +552,18 @@ void VulkanBackend::destroy_per_frame_() {
         if (f.rdr_done)  vkDestroySemaphore(device_, f.rdr_done,  nullptr);
         if (f.img_avail) vkDestroySemaphore(device_, f.img_avail, nullptr);
         if (f.pool)      vkDestroyCommandPool(device_, f.pool, nullptr);
-        f = {};
+        // Reset fields explicitly: `f = {}` would copy-assign PerFrame which
+        // contains an embedded VkCmdBuf wrapper. VkCmdBuf inherits from
+        // CmdBuffer/RefCountedBase whose copy-assignment is deleted, so the
+        // implicit PerFrame copy-assign is also deleted. Apple Clang elides
+        // the assignment via move-construction; Linux/Windows Clang flag it.
+        f.pool      = VK_NULL_HANDLE;
+        f.cb        = VK_NULL_HANDLE;
+        f.img_avail = VK_NULL_HANDLE;
+        f.rdr_done  = VK_NULL_HANDLE;
+        f.in_flight = VK_NULL_HANDLE;
+        // f.wrapper intentionally left in place — it's a no-op shell that
+        // doesn't own any GPU resources itself (the cb above is the owner).
     }
 }
 

@@ -34,6 +34,8 @@
 
 #include <string>
 #include <cstdio>
+#include <unistd.h>   // getcwd, access, F_OK — needed by both the dedicated
+                      // server branch and the graphical branch below.
 
 // Include common utilities (always compiled).
 // LinuxCommon.cpp provides: is_wayland_session(), clock_ns/s(),
