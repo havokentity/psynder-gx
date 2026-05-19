@@ -374,8 +374,14 @@ void MetalBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
         auto* c = static_cast<MtlCmdBuf*>(cmd);
         // Close any encoder the user left open. Render lanes that call
         // begin_render but forget end_render still get a valid submit.
+        // Render encoder carries an explicit [retain] from begin_render —
+        // balance it with [release] here on the forgotten-end_render path.
+        // (Compute encoders are opened-and-closed within a single dispatch()
+        // autoreleasepool scope and never persist across calls, so they
+        // need only endEncoding here, not release.)
         if (c->encoder) {
             [c->encoder endEncoding];
+            [c->encoder release];
             c->encoder = nil;
         }
         if (c->compute_encoder) {
@@ -612,7 +618,16 @@ void MetalBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
             }
         }
 
-        c->encoder = [c->cb renderCommandEncoderWithDescriptor:rpd];
+        // Explicit [retain] is REQUIRED here: the TU is -fno-objc-arc and
+        // the call returns an autoreleased object.  Without the retain, the
+        // encoder would be released when this `@autoreleasepool` block
+        // drains at function exit, and every subsequent encoder call —
+        // set_viewport / set_scissor / bind_pipeline / push_constants /
+        // bind_vertex_buffer / bind_index_buffer / draw_indexed — would be
+        // hitting a dangling pointer.  end_render() balances this with a
+        // matching [release] after [endEncoding].  (Same pattern is used
+        // for frame_.drawable / frame_.command_buffer above, ~L294/L300.)
+        c->encoder = [[c->cb renderCommandEncoderWithDescriptor:rpd] retain];
         c->encoder.label = @"psy::gpu user pass";
         // Suppress the M0 auto-clear: cmd_submit's frame_.encoded_clear gate
         // is per-frame; flipping it here means subsequent cmd_submit
@@ -626,6 +641,10 @@ void MetalBackend::end_render(CmdBuffer* cmd) {
         auto* c = static_cast<MtlCmdBuf*>(cmd);
         if (!c || !c->encoder) return;
         [c->encoder endEncoding];
+        // Balance the explicit [retain] in begin_render.  Without the
+        // matching [release], the encoder would leak its retain count
+        // indefinitely (process-wide leak — small but accumulates).
+        [c->encoder release];
         c->encoder = nil;
         c->bound_render_pso = nil;
         c->index_mtl        = nil;
