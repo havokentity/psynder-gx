@@ -16,7 +16,7 @@
 
 #include "Win32Present.h"
 
-#if defined(PSYNDER_PLATFORM_WIN32)
+#if defined(PSYNDER_PLATFORM_WIN32) && !defined(PSYNDER_GX)
 
 #include <algorithm>
 #include <cstring>
@@ -457,4 +457,4 @@ bool Win32Present::present(const render::Framebuffer& fb,
 
 }  // namespace psynder::platform::win32
 
-#endif  // PSYNDER_PLATFORM_WIN32
+#endif  // PSYNDER_PLATFORM_WIN32 && !PSYNDER_GX

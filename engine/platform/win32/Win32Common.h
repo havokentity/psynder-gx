@@ -1,13 +1,25 @@
 // SPDX-License-Identifier: MIT
-// Psynder — Win32 platform shared bits (header-only).
+// Psynder(-GX) — Win32 platform shared bits (header-only).
 //
 // All Win32 sources are guarded by PSYNDER_PLATFORM_WIN32. The lane's
 // CMakeLists only adds this directory when building on Windows, but we
 // guard at the source level too so an out-of-band Mac/Linux compile (e.g.
 // running clang-tidy across the tree) doesn't choke on windows.h.
 //
-// This header centralizes the Win32 + COM + DXGI includes and a few tiny
-// helpers shared across Win32Window/Input/Present/Audio.
+// This header centralizes the Win32 + COM + DXGI + WASAPI + XInput includes
+// and a few tiny helpers shared across Win32Window/Input/Present/Audio.
+//
+// D3D11 / D3DCompile:
+//   In Psynder (CPU renderer, !PSYNDER_GX): included here for Win32Present.
+//   In Psynder-GX (PSYNDER_GX defined): D3D11 is not used. The includes are
+//   conditionally excluded to keep the GX build free of D3D11 headers. The
+//   DXGI headers are still included for the DXGI factory types used by WASAPI
+//   device enumeration.
+//
+// Vulkan (Win32VulkanSurface.h):
+//   Win32VulkanSurface.h includes <vulkan/vulkan.h> with VK_USE_PLATFORM_WIN32_KHR.
+//   That header is NOT included here to avoid polluting every Win32 TU with
+//   Vulkan; only Win32VulkanSurface.{h,cpp} need it.
 
 #pragma once
 
@@ -22,19 +34,28 @@
 
 #include <windows.h>
 
-// COM + DXGI + D3D11 + WASAPI + XInput
+// COM + WRL ComPtr (used by Win32Present in non-GX and Win32Audio always).
 #include <combaseapi.h>
 #include <objbase.h>
 #include <wrl/client.h>
 
+// DXGI — used by Win32Audio (IMMDevice enumeration touches DXGI types on some
+// driver stacks) and Win32Present (swap chain) in non-GX builds.
 #include <dxgi1_4.h>
+
+#if !defined(PSYNDER_GX)
+// D3D11 + D3DCompile are only needed for the CPU framebuffer blit (Psynder).
+// In GX builds Vulkan is the only graphics API; omit to keep includes clean.
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#endif  // !PSYNDER_GX
 
+// WASAPI audio (Win32Audio — used in both Psynder and Psynder-GX).
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <Functiondiscoverykeys_devpkey.h>
 
+// XInput gamepads (Win32Input — both builds).
 #include <xinput.h>
 
 #include "core/Log.h"

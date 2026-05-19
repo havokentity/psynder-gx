@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: MIT
 // Psynder — DXGI flip-model swap chain + scaled-blit pass.
 //
-// The CPU framebuffer (lane 07 fills, the platform reads) is uploaded to a
-// fixed-size D3D11 texture each frame; a single passthrough quad samples
-// that texture into the swap chain back buffer with the user-selected
-// ScaleMode + AspectMode (DESIGN.md §7.9, §11.1).
+// *** PSYNDER-GX NOTE ***
+// In Psynder-GX (when PSYNDER_GX is defined) this entire class is DISABLED.
+// Presenting is owned by psy::gpu (Vulkan swapchain); the platform layer only
+// supplies the HWND via Win32VulkanSurface. See engine/gpu/PublicGpu.h and
+// Win32VulkanSurface.h.
+//
+// In the original Psynder (CPU renderer) the CPU framebuffer (lane 07 fills,
+// the platform reads) is uploaded to a fixed-size D3D11 texture each frame;
+// a single passthrough quad samples that texture into the swap chain back buffer
+// with the user-selected ScaleMode + AspectMode (DESIGN.md §7.9, §11.1).
 //
 // The GPU does literally one textured triangle pair per present. No engine
 // shader runs here.
 
 #pragma once
 
-#if defined(PSYNDER_PLATFORM_WIN32)
+#if defined(PSYNDER_PLATFORM_WIN32) && !defined(PSYNDER_GX)
 
 #include "Win32Common.h"
 #include "platform/Platform.h"
@@ -90,4 +96,4 @@ private:
 
 }  // namespace psynder::platform::win32
 
-#endif  // PSYNDER_PLATFORM_WIN32
+#endif  // PSYNDER_PLATFORM_WIN32 && !PSYNDER_GX

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-// Psynder — Win32 platform façade. Owns the factory functions the shim
+// Psynder(-GX) — Win32 platform façade. Owns the factory functions the shim
 // dispatches into, plus the file-system / executable-path helpers.
 //
-// Implementation lives in Win32Window / Win32Input / Win32Present /
-// Win32Audio — this TU just wires them up.
+// Implementation lives in Win32Window / Win32Input / Win32Audio (and
+// Win32Present in non-GX builds, Win32VulkanSurface in GX builds).
+// This TU just wires them up.
 
 #include "platform/Platform.h"
 
@@ -13,6 +14,12 @@
 #include "Win32Common.h"
 #include "Win32Input.h"
 #include "Win32Window.h"
+
+#if defined(PSYNDER_GX)
+// In GX builds expose the Vulkan surface helper so other lanes can find it
+// by including only Platform.h + this translation unit.
+#include "Win32VulkanSurface.h"
+#endif
 
 #include <shlobj.h>
 
