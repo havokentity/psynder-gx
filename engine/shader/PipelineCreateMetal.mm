@@ -32,6 +32,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,8 +57,15 @@ namespace {
 // Single-process MTLDevice cache. MTLCreateSystemDefaultDevice can be
 // called multiple times — Apple returns the same underlying device on
 // Apple Silicon — but it's still good practice to hold one reference.
+//
+// THREADING: create_graphics / create_compute may be called concurrently
+// from lane 04's worker threads (per the cross-lane handshake documented
+// at the top of ShaderCompile.cpp), so the device init and the alive-pso
+// vectors must be guarded. We use std::once_flag for the device init
+// (idempotent + zero-cost on the fast path) and std::mutex for the
+// alive-vector appends + the pipeline-shim writes downstream.
 id<MTLDevice>      g_mtl_device  = nil;
-bool               g_init_tried  = false;
+std::once_flag     g_init_once;
 
 // Stable storage for shipped MTLLibrary / MTLFunction / MTLPipelineState
 // objects. ARC is OFF for this TU (per CMakeLists -fno-objc-arc), so we
@@ -69,17 +77,17 @@ bool               g_init_tried  = false;
 std::vector<id> g_alive_render_psos;
 std::vector<id> g_alive_compute_psos;
 std::vector<id> g_alive_libs;
+std::mutex      g_alive_mu;   // guards the three vectors above
 
 bool ensure_device() {
-    if (g_mtl_device) return true;
-    if (g_init_tried) return g_mtl_device != nil;
-    g_init_tried = true;
-    g_mtl_device = MTLCreateSystemDefaultDevice();
-    if (!g_mtl_device) {
-        std::fputs("[psy::shader::mtl] MTLCreateSystemDefaultDevice returned nil; "
-                   "lane 08 cannot build Metal PSOs (lane 07 will log "
-                   "'PipelineHandle not registered' at bind time)\n", stderr);
-    }
+    std::call_once(g_init_once, []{
+        g_mtl_device = MTLCreateSystemDefaultDevice();
+        if (!g_mtl_device) {
+            std::fputs("[psy::shader::mtl] MTLCreateSystemDefaultDevice returned nil; "
+                       "lane 08 cannot build Metal PSOs (lane 07 will log "
+                       "'PipelineHandle not registered' at bind time)\n", stderr);
+        }
+    });
     return g_mtl_device != nil;
 }
 
@@ -183,10 +191,13 @@ bool create_and_register_graphics_pso(
         rpd.vertexFunction   = vs_fn;
         rpd.fragmentFunction = fs_fn;
 
-        // Color attachment 0 — match lane 07's swapchain pixel format.
-        // CAMetalLayer.pixelFormat in MetalBackend defaults to
-        // MTLPixelFormatBGRA8Unorm_sRGB; mirror that here.
-        rpd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+        // Color attachment 0 — must match lane 07's CAMetalLayer.pixelFormat
+        // verbatim or Metal validation triggers and rendering blanks.  Lane 07
+        // (engine/gpu/mtl/MetalBackend.mm, around line 260) configures the
+        // layer as MTLPixelFormatBGRA8Unorm — NOT the _sRGB variant.  Mirror
+        // that.  Switching to sRGB would require updating both sites and the
+        // sample shaders' gamma handling, which is M2 work.
+        rpd.colorAttachments[0].pixelFormat     = MTLPixelFormatBGRA8Unorm;
         rpd.colorAttachments[0].blendingEnabled = NO;
 
         // No depth attachment for M1 forward-to-swapchain.
@@ -218,14 +229,19 @@ bool create_and_register_graphics_pso(
         }
 
         // Keep PSO + libs alive for the process lifetime (M1 leak; M2
-        // integrates with lane 07's frames-in-flight reaper).
-        g_alive_render_psos.push_back(pso);
-        g_alive_libs.push_back(vs_lib);
-        g_alive_libs.push_back(fs_lib);
+        // integrates with lane 07's frames-in-flight reaper).  Guarded
+        // because create_graphics can fire from multiple worker threads.
+        {
+            std::lock_guard<std::mutex> _(g_alive_mu);
+            g_alive_render_psos.push_back(pso);
+            g_alive_libs.push_back(vs_lib);
+            g_alive_libs.push_back(fs_lib);
+        }
 
         // Hand off to lane 07's registry. Untyped void* — the shim
         // bridge-casts to id<MTLRenderPipelineState> on its side
-        // (also -fno-objc-arc).
+        // (also -fno-objc-arc).  The lane-07 shim is itself mutex-guarded
+        // (see psynder_gx_mtl_register_render_pso in MetalBackend.mm).
         psynder_gx_mtl_register_render_pso(handle_id, (__bridge void*)pso);
         return true;
     }
@@ -277,8 +293,11 @@ bool create_and_register_compute_pso(
         // gpu::dispatch() arguments which are independent of this.
         const std::uint32_t tgs_x = 64, tgs_y = 1, tgs_z = 1;
 
-        g_alive_compute_psos.push_back(pso);
-        g_alive_libs.push_back(lib);
+        {
+            std::lock_guard<std::mutex> _(g_alive_mu);
+            g_alive_compute_psos.push_back(pso);
+            g_alive_libs.push_back(lib);
+        }
         [cs_fn release]; // pso retains its function internally
 
         psynder_gx_mtl_register_compute_pso(

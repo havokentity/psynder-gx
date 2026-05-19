@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #if defined(PSYNDER_GX_BACKEND_VULKAN)
