@@ -166,7 +166,26 @@ TEST_CASE("render-pipeline: encode_*() walk with a real psy::gpu::Device",
      || p->hiz.downsample_compute.valid()
      || p->hiz.depth_only_graphics.valid()
      || p->gpu_cull.cull_compute.valid();
-    if (any_pipeline_compiled) {
+    // Headless-device check: on Vulkan, create_device() can succeed
+    // without a surface, but cmd_open() returns nullptr (no swapchain to
+    // anchor a frame against).  In that mode every encode_*() helper
+    // early-outs, so the stats stay zero even when shaders compile.  Probe
+    // by attempting a single cmd_open() on the device — if it comes back
+    // null, treat this as a headless run and skip the draw-count assertion.
+    // (Metal's CmdBuffer path doesn't need a swapchain, so this branch
+    // is mostly hit by Linux Vulkan CI.)
+    bool headless_no_cmds = false;
+    if (auto* probe = psynder::gpu::cmd_open(dev)) {
+        psynder::gpu::cmd_submit(dev, probe);
+    } else {
+        headless_no_cmds = true;
+    }
+
+    if (headless_no_cmds) {
+        SUCCEED("Device is headless (cmd_open returned nullptr); "
+                "encode_*() helpers correctly early-out, no GPU work to "
+                "count");
+    } else if (any_pipeline_compiled) {
         // At least one pipeline compiled, so at least one corresponding
         // encode_*() helper should have fired across kFrames frames.
         const std::uint64_t total_fired =

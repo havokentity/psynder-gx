@@ -175,27 +175,37 @@ void render(Pipeline* p, const View& view) {
         return;
     }
 
-    // 2. Light cluster build + GPU cull on a shared compute cmd buffer.
-    //    Both are pure compute dispatches; the Metal backend opens / closes
-    //    its compute encoder around each call so they can co-exist in one
-    //    cmd buffer without the user managing scopes.
-    if (gpu::CmdBuffer* cmd_compute = gpu::cmd_open(p->device)) {
-        encode_light_cluster_build(p, cmd_compute, view);
-        encode_gpu_cull           (p, cmd_compute, view);
-        gpu::cmd_submit(p->device, cmd_compute);
+    // 2. Light cluster build — no HiZ dependency, runs as soon as the
+    //    cluster grid is set up.  Pure compute; submitted on its own cmd
+    //    buffer so the GPU can overlap it with the depth pre-pass below.
+    if (gpu::CmdBuffer* cmd_cluster = gpu::cmd_open(p->device)) {
+        encode_light_cluster_build(p, cmd_cluster, view);
+        gpu::cmd_submit(p->device, cmd_cluster);
     }
 
-    // 3. Depth pre-pass + HiZ downsample chain. Depth is a render pass; HiZ
-    //    is compute, but must come after end_render so the Metal compute
+    // 3. Depth pre-pass + HiZ downsample chain.  Depth is a render pass;
+    //    HiZ is compute and MUST come after end_render so the Metal compute
     //    encoder can open cleanly (see MetalBackend.mm: "dispatch called
-    //    inside a render pass; ignored"). They share one cmd buffer.
+    //    inside a render pass; ignored").  They share one cmd buffer.
     if (gpu::CmdBuffer* cmd_depth = gpu::cmd_open(p->device)) {
         encode_depth_prepass (p, cmd_depth, view);
         encode_hiz_downsample(p, cmd_depth);
         gpu::cmd_submit(p->device, cmd_depth);
     }
 
-    // 4. Opaque forward+ pass. Distinct cmd buffer for the same scope
+    // 4. GPU instance cull.  Order matters: this consumes the HiZ pyramid
+    //    populated by step 3 (occlusion test against the conservative-max
+    //    mip chain).  An earlier revision ran cull before HiZ — that would
+    //    have been silently incorrect once the SCAFFOLD body in gpu_cull
+    //    .slang grows real HiZ sampling.  Copilot's PR #8 review caught
+    //    the ordering bug; the cull now runs on its own cmd buffer
+    //    submitted *after* cmd_depth so the HiZ writes are visible.
+    if (gpu::CmdBuffer* cmd_cull = gpu::cmd_open(p->device)) {
+        encode_gpu_cull(p, cmd_cull, view);
+        gpu::cmd_submit(p->device, cmd_cull);
+    }
+
+    // 5. Opaque forward+ pass. Distinct cmd buffer for the same scope
     //    reason as above (render pass) and so the orchestrator can
     //    optionally interleave it with the post lane (lane 11) once that
     //    integration lands.
