@@ -128,8 +128,9 @@ static_assert(sizeof(Vertex) == 48, "Vertex stride must be 48 bytes");
 //
 // Real metric scale per the GX coding standard: 1 world unit = 1 metre.
 // The triangle is ~1 m tall (vertical extent 0.6 + 0.4 = 1.0 m), centred
-// on the world origin. Camera sits 2 m back along -Z so the triangle
-// fills a reasonable fraction of the 1280x720 frame at 60° vertical FOV.
+// on the world origin. Camera sits 2 m back along +Z (RH coordinates;
+// camera looks down -Z toward the origin) so the triangle fills a
+// reasonable fraction of the 1280x720 frame at 60° vertical FOV.
 //
 // Per-vertex RGB tint cycles R/G/B around the corners so the rotation is
 // visibly orientation-locked even if the texture sample fails.
