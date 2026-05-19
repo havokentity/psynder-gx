@@ -99,6 +99,19 @@ if(PSYNDER_GX_VENDOR_JOLT AND NOT TARGET Jolt)
         SOURCE_SUBDIR  Build
     )
     FetchContent_MakeAvailable(JoltPhysics)
+
+    # Jolt's own CMakeLists turns INTERPROCEDURAL_OPTIMIZATION (LTO) ON for
+    # Release. Apple Clang + lld on macOS handles the resulting LLVM bitcode
+    # in libJolt.a just fine; GNU /usr/bin/ld on Linux doesn't, and the link
+    # of psynder_unit explodes with:
+    #   /usr/bin/ld: lib/libJolt.a: error adding symbols: file format not
+    #   recognized
+    # Force IPO OFF on the Jolt target so libJolt.a contains plain ELF object
+    # code. We re-enable LTO globally once the engine switches to lld on
+    # Linux as well — tracked separately.
+    if(TARGET Jolt)
+        set_target_properties(Jolt PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+    endif()
 endif()
 
 # ─── Lane static library ─────────────────────────────────────────────────
