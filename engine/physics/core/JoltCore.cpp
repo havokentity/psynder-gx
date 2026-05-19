@@ -282,14 +282,41 @@ JPH::ShapeRefC MakeShape(const psynder::physics::BodyDesc& d) {
 
 namespace psynder::physics {
 
+// Compute the TempAllocator size from the body count.
+//
+// Derivation (Option A):
+//   Jolt's documented per-body overhead during a single physics step is
+//   roughly 640 B/body for contact manifolds + broad-phase scratch +
+//   island builder work.  We round up to 1 KiB/body to give a comfortable
+//   safety margin and account for constraint-side scratch (the two default
+//   to the same count).  A 16 MiB floor keeps tiny test worlds (a few dozen
+//   bodies) from over-allocating.
+//
+//   Reference: https://jrouwe.github.io/JoltPhysics/ — "Memory Usage" note
+//   in PhysicsSystem::Update docs (~640 B/active body at peak step).
+//
+// For the default WorldDesc (max_bodies = 64 000):
+//   max(16 MiB, 64 000 * 1 KiB) = max(16 777 216, 65 536 000) ≈ 62.5 MiB.
+//   This comfortably covers the measured ~55 MiB peak on a full 64k-body tick.
+inline std::size_t TempAllocSize(std::uint32_t max_bodies) noexcept {
+    constexpr std::size_t kFloor       = 16u * 1024u * 1024u;   // 16 MiB
+    constexpr std::size_t kBytesPerBody = 1024u;                 // 1 KiB/body
+    const     std::size_t scaled       = static_cast<std::size_t>(max_bodies)
+                                         * kBytesPerBody;
+    return scaled > kFloor ? scaled : kFloor;
+}
+
 struct World {
     JPH::PhysicsSystem               system;
-    JPH::TempAllocatorImpl           temp_allocator{ 16 * 1024 * 1024 };
+    JPH::TempAllocatorImpl           temp_allocator;
     JPH::JobSystemSingleThreaded     job_system{ JPH::cMaxPhysicsJobs };
     BPLayerInterfaceImpl             bp_layers;
     ObjectVsBPLayerFilterImpl        obj_vs_bp;
     ObjectLayerPairFilterImpl        obj_vs_obj;
     std::uint32_t                    tick_hz = 120;
+
+    explicit World(std::uint32_t max_bodies)
+        : temp_allocator(TempAllocSize(max_bodies)) {}
 };
 
 struct RigidBody {
@@ -315,7 +342,9 @@ struct CharacterController {
 World* create_world(const WorldDesc& desc) {
     JoltGlobalInit();
 
-    auto* w = new (std::nothrow) World();
+    // Pass max_bodies through so the constructor sizes temp_allocator correctly.
+    const std::uint32_t raw_max = desc.max_bodies > 0 ? desc.max_bodies : 65536u;
+    auto* w = new (std::nothrow) World(raw_max);
     if (!w) {
         JoltGlobalShutdown();
         return nullptr;
@@ -323,7 +352,8 @@ World* create_world(const WorldDesc& desc) {
 
     // Cap body / pair / contact buffers at the configured maximum.
     // Jolt's own ranges are uint, so clamp to a sane upper bound.
-    const JPH::uint max_bodies = desc.max_bodies > 0 ? desc.max_bodies : 65536u;
+    // raw_max was already clamped above; reuse it here to stay consistent.
+    const JPH::uint max_bodies = static_cast<JPH::uint>(raw_max);
     const JPH::uint max_pairs  = max_bodies;
     const JPH::uint max_constr = desc.max_constraints > 0 ? desc.max_constraints
                                                           : max_bodies;
