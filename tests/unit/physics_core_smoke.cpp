@@ -176,7 +176,7 @@ TEST_CASE("physics-core: character controller responds to input",
     }
 
     float pos0[3]{};
-    character_get_transform(cc, pos0, 0.0f);
+    character_get_transform(cc, pos0, nullptr);
 
     // Drive forward (+Z) for half a second.
     CharacterInput fwd{};
@@ -188,7 +188,7 @@ TEST_CASE("physics-core: character controller responds to input",
     }
 
     float pos1[3]{};
-    character_get_transform(cc, pos1, 0.0f);
+    character_get_transform(cc, pos1, nullptr);
     REQUIRE(pos1[2] > pos0[2] + 0.5f);
 
     destroy_character(scope.w, cc);
