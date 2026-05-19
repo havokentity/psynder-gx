@@ -14,7 +14,7 @@ if(TARGET Catch2::Catch2WithMain)
         psynder_core psynder_math psynder_simd psynder_scene
         psynder_world_bsp psynder_world_outdoor
         psynder_render_raster psynder_render_rt psynder_render_post
-        psynder_asset psynder_audio psynder_net
+        psynder_asset psynder_audio psynder_net psynder_net_voice
         psynder_ui_imm
         psynder_gpu
     )
