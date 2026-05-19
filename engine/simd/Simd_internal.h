@@ -778,31 +778,60 @@ PSY_FORCEINLINE i32x8 broadcast_i32x8(psynder::i32 s) noexcept {
 }
 
 // ─── AVX-512 opportunistic f32x16 ────────────────────────────────────────
-// Gated by `__AVX512F__` — the compiler must have been invoked with -mavx512f
-// (or the host was an AVX-512 toolchain). Fallback is two AVX2 halves; the
-// runtime dispatcher still inspects CpuFeatures::avx512f before calling any
-// routine that depends on this width.
+// The AVX-512 native kernels live in Simd_avx512.cpp and are decorated with
+// __attribute__((target("avx512f,avx512bw,avx512vl"))) so the compiler only
+// emits AVX-512 instructions inside those specific functions, NOT across the
+// entire translation unit.  This is the fix for the SIGILL incident: the old
+// -mavx512f compile flag allowed auto-vectorisation anywhere in psynder_simd.
+//
+// On x86-64 with GCC/Clang: declarations here; definitions in Simd_avx512.cpp.
+// On MSVC: no per-function AVX-512 attribute equivalent exists — MSVC users
+//   get the composed fallback (two AVX2 halves) until clang-cl is used.
+// On aarch64: always the fallback.
+//
+// f32x16 is always defined (both native and fallback branches) so generic
+// templates / tests compile everywhere; callers must gate on dispatch tier.
 
-#if defined(__AVX512F__)
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__)) && !defined(_MSC_VER)
+// ── Native x86-64 wide path (Clang/GCC only) ─────────────────────────────
+// __m512 is not defined unless the TU is compiled with -mavx512f — but we
+// deliberately do NOT add that flag here.  The type is available via
+// <immintrin.h> when the __attribute__((target)) fires.  We therefore use an
+// opaque 64-byte aligned storage in the header and expose __m512 only inside
+// Simd_avx512.cpp (which includes this header after defining the attribute).
+// The real f32x16 storage struct is defined in Simd_avx512.cpp's local scope;
+// the public type below is the composed fallback — Simd_avx512.cpp provides
+// the fast non-inline implementations that shadow the inline fallbacks.
+//
+// Concretely: the struct stays as two-halves everywhere (safe on all CPUs).
+// The AVX-512 TU overrides the batched functions with wider implementations
+// that the linker will prefer when the translation unit is linked in.
+// Dispatch.cpp gates all calls to the wide-16 path on Tier::Avx512.
 struct f32x16 {
-    __m512 v;
+    f32x8 lo, hi;
 };
-PSY_FORCEINLINE f32x16 add16(f32x16 a, f32x16 b) noexcept   { return f32x16{_mm512_add_ps(a.v, b.v)}; }
-PSY_FORCEINLINE f32x16 sub16(f32x16 a, f32x16 b) noexcept   { return f32x16{_mm512_sub_ps(a.v, b.v)}; }
-PSY_FORCEINLINE f32x16 mul16(f32x16 a, f32x16 b) noexcept   { return f32x16{_mm512_mul_ps(a.v, b.v)}; }
-PSY_FORCEINLINE f32x16 fma16(f32x16 a, f32x16 b, f32x16 c)  noexcept {
-    return f32x16{_mm512_fmadd_ps(a.v, b.v, c.v)};
-}
-PSY_FORCEINLINE f32x16 load_aligned16(const psynder::f32* p)   noexcept { return f32x16{_mm512_load_ps(p)}; }
-PSY_FORCEINLINE f32x16 load_unaligned16(const psynder::f32* p) noexcept { return f32x16{_mm512_loadu_ps(p)}; }
-PSY_FORCEINLINE void   store_aligned16(psynder::f32* p, f32x16 v)   noexcept { _mm512_store_ps(p, v.v); }
-PSY_FORCEINLINE void   store_unaligned16(psynder::f32* p, f32x16 v) noexcept { _mm512_storeu_ps(p, v.v); }
-PSY_FORCEINLINE f32x16 broadcast16(psynder::f32 s) noexcept { return f32x16{_mm512_set1_ps(s)}; }
-PSY_FORCEINLINE psynder::f32 reduce_add16(f32x16 a) noexcept { return _mm512_reduce_add_ps(a.v); }
+
+// Declarations for the AVX-512 wide kernels defined in Simd_avx512.cpp.
+// Each definition carries __attribute__((target("avx512f,avx512bw,avx512vl")))
+// so AVX-512 instructions are emitted ONLY inside those function bodies.
+f32x16       add16(f32x16 a, f32x16 b) noexcept;
+f32x16       sub16(f32x16 a, f32x16 b) noexcept;
+f32x16       mul16(f32x16 a, f32x16 b) noexcept;
+f32x16       fma16(f32x16 a, f32x16 b, f32x16 c) noexcept;
+f32x16       load_aligned16(const psynder::f32* p) noexcept;
+f32x16       load_unaligned16(const psynder::f32* p) noexcept;
+void         store_aligned16(psynder::f32* p, f32x16 v) noexcept;
+void         store_unaligned16(psynder::f32* p, f32x16 v) noexcept;
+f32x16       broadcast16(psynder::f32 s) noexcept;
+psynder::f32 reduce_add16(f32x16 a) noexcept;
+
 #else
-// Composed fallback so code referring to f32x16 still compiles. The widest-
-// path consumers should still gate this with the dispatch tier, but a
-// portable definition makes generic templates / tests cleaner.
+// ── Composed fallback (MSVC, aarch64, scalar) ─────────────────────────────
+// On MSVC there is no per-function ISA attribute equivalent to GCC/Clang's
+// __attribute__((target(...))).  Using /arch:AVX512 would re-introduce the
+// TU-wide problem.  Until clang-cl is adopted as the MSVC build path, MSVC
+// callers get the two-AVX2-halves path.  The fallback is still fast on any
+// AVX2 host and correct on all CPUs.
 struct f32x16 {
     f32x8 lo, hi;
 };
