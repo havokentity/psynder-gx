@@ -22,6 +22,7 @@
 
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace psynder::net {
 
@@ -57,29 +58,29 @@ public:
 
     // Open a new .psydem file at `cfg.path`. Writes the file header +
     // roster block. Returns false if the file cannot be created.
-    // STUB: returns true without creating a file.
     bool open(const DemoWriterConfig& cfg) noexcept;
 
     // True if the writer has an open file.
-    bool is_open() const noexcept { return open_; }
+    bool is_open() const noexcept { return file_ != nullptr; }
 
     // Append a frame (snapshot delta) record for `tick`.
     // `snapshot_bytes` is the full snapshot for this tick.
     // `baseline_tick`  is the tick whose snapshot will be XOR'd as the delta
     //                  base; use `tick` to force a keyframe.
-    // STUB: no-op, returns true.
-    bool write_frame(u32               tick,
-                     u32               baseline_tick,
+    //
+    // The writer maintains an internal baseline buffer and bumps every
+    // `cfg.keyframe_interval` ticks to a fresh keyframe regardless of the
+    // `baseline_tick` hint. Keyframe ticks are added to the TOC.
+    bool write_frame(u32                 tick,
+                     u32                 baseline_tick,
                      std::span<const u8> snapshot_bytes) noexcept;
 
     // Append an input record for `tick`. `inputs` is a span of PlayerInputEntry.
-    // STUB: no-op, returns true.
-    bool write_inputs(u32                             tick,
+    bool write_inputs(u32                               tick,
                       std::span<const PlayerInputEntry> inputs) noexcept;
 
-    // Finalise the demo: serialise the TOC + footer and close the file.
-    // After this returns, is_open() == false.
-    // STUB: no-op.
+    // Finalise the demo: serialise the TOC + footer, patch the header's
+    // end_tick, and close the file. After this returns, is_open() == false.
     void finalise() noexcept;
 
     // Emergency close without writing TOC (e.g. server crash path).
@@ -91,10 +92,16 @@ public:
     u32 ticks_written() const noexcept { return ticks_written_; }
 
 private:
-    bool open_        = false;
-    u32  ticks_written_ = 0;
-    // M6: add FILE* or std::FILE*, TOC scratch buffer, baseline snapshot buffer,
-    // keyframe interval counter.
+    // Underlying file. void* keeps us out of <cstdio> in this header.
+    void*                       file_ = nullptr;
+    u32                         ticks_written_   = 0;
+    u32                         keyframe_interval_ = 16;
+    u32                         start_tick_      = 0;
+    u32                         last_tick_       = 0;
+    u32                         last_keyframe_tick_ = 0;
+    std::vector<u8>             baseline_;       // last keyframe snapshot, raw
+    std::vector<DemoTocEntry>   toc_;
+    std::vector<u8>             scratch_;        // delta encode scratch
 };
 
 }  // namespace psynder::net
