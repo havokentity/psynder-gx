@@ -30,7 +30,9 @@
 #if PSYNDER_PLATFORM_LINUX
 
 #include "LinuxPlatform.h"
+#include "PublicPlatformLinux.h"
 #include "platform/Platform.h"
+#include "gpu/PublicGpu.h"
 
 #include <string>
 #include <cstdio>
@@ -126,7 +128,12 @@ class WaylandWindow final : public Window {
 public:
     explicit WaylandWindow(linux_platform::WaylandWindowHandle* h,
                            linux_platform::EvdevReader*          evdev)
-        : handle_(h), evdev_(evdev) {}
+        : handle_(h), evdev_(evdev) {
+        // Populate the tagged handle for lane 07 (gpu) surface creation.
+        gpu_handle_.kind               = psynder::gpu::LinuxNativeWindowHandle::Kind::Wayland;
+        gpu_handle_.wayland.wl_display = h ? static_cast<void*>(h->display) : nullptr;
+        gpu_handle_.wayland.wl_surface = h ? static_cast<void*>(h->surface) : nullptr;
+    }
 
     ~WaylandWindow() override {
         linux_platform::destroy_wayland_window(handle_);
@@ -180,10 +187,16 @@ public:
     ::wl_display* wayland_display() const { return handle_ ? handle_->display  : nullptr; }
     ::wl_surface* wayland_surface() const { return handle_ ? handle_->surface  : nullptr; }
 
+    // Typed handle for the gpu lane.
+    const psynder::gpu::LinuxNativeWindowHandle* gpu_native_handle() const {
+        return &gpu_handle_;
+    }
+
 private:
-    linux_platform::WaylandWindowHandle* handle_;
-    linux_platform::EvdevReader*         evdev_;
-    MouseState mouse_{};
+    linux_platform::WaylandWindowHandle*    handle_;
+    linux_platform::EvdevReader*            evdev_;
+    MouseState                              mouse_{};
+    psynder::gpu::LinuxNativeWindowHandle   gpu_handle_{};
 };
 
 // ─── XCB graphical window ─────────────────────────────────────────────────
@@ -191,7 +204,12 @@ class XcbWindow final : public Window {
 public:
     explicit XcbWindow(linux_platform::XcbWindowHandle* h,
                        linux_platform::EvdevReader*      evdev)
-        : handle_(h), evdev_(evdev) {}
+        : handle_(h), evdev_(evdev) {
+        // Populate the tagged handle for lane 07 (gpu) surface creation.
+        gpu_handle_.kind                    = psynder::gpu::LinuxNativeWindowHandle::Kind::Xcb;
+        gpu_handle_.xcb.xcb_connection      = h ? static_cast<void*>(h->connection) : nullptr;
+        gpu_handle_.xcb.xcb_window          = h ? static_cast<std::uint32_t>(h->window) : 0u;
+    }
 
     ~XcbWindow() override {
         linux_platform::destroy_xcb_window(handle_);
@@ -242,10 +260,16 @@ public:
         return handle_ ? handle_->window : 0;
     }
 
+    // Typed handle for the gpu lane.
+    const psynder::gpu::LinuxNativeWindowHandle* gpu_native_handle() const {
+        return &gpu_handle_;
+    }
+
 private:
-    linux_platform::XcbWindowHandle* handle_;
-    linux_platform::EvdevReader*     evdev_;
-    MouseState mouse_{};
+    linux_platform::XcbWindowHandle*            handle_;
+    linux_platform::EvdevReader*                evdev_;
+    MouseState                                  mouse_{};
+    psynder::gpu::LinuxNativeWindowHandle       gpu_handle_{};
 };
 
 // ─── Input wrapper (evdev-backed) ─────────────────────────────────────────
@@ -316,6 +340,32 @@ Window* create_window_impl(const WindowDesc& desc)
 }
 
 void destroy_window_impl(Window* w) { delete w; }
+
+// ─── PublicPlatformLinux: native_window_handle ───────────────────────────
+// Declared in psynder::platform::linux_platform (PublicPlatformLinux.h).
+// Defined here, nested inside psynder::platform as "namespace linux_platform",
+// so that WaylandWindow and XcbWindow (injected from the anonymous namespace
+// above into psynder::platform) are directly name-accessible.
+//
+// dynamic_cast is used for type-safe dispatch; platform startup is not a
+// hot path and RTTI is not banned here (AGENTS.md restricts it only to the
+// renderer/physics/netcode hot subsystems).
+
+namespace linux_platform {
+
+const psynder::gpu::LinuxNativeWindowHandle* native_window_handle(
+    psynder::platform::Window* win)
+{
+    if (!win) return nullptr;
+    // WaylandWindow and XcbWindow are defined in the anonymous namespace
+    // nested inside psynder::platform (this TU).  They are visible here
+    // because this nested namespace body is inside psynder::platform.
+    if (auto* wl  = dynamic_cast<WaylandWindow*>(win))  return wl ->gpu_native_handle();
+    if (auto* xcb = dynamic_cast<XcbWindow*>(win))      return xcb->gpu_native_handle();
+    return nullptr;
+}
+
+} // namespace linux_platform
 
 // ─── Public: input ────────────────────────────────────────────────────────
 // The evdev reader is owned by the Window; for non-window input queries

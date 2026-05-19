@@ -125,12 +125,47 @@ struct TextureDesc {
     const char*   debug_name = nullptr;
 };
 
+// ─── Linux-only tagged window-handle ────────────────────────────────────
+// On Win32  DeviceDesc::native_window_handle is a plain HWND (void*).
+// On macOS  it is a CAMetalLayer* (void*).
+// On Linux  it points to a LinuxNativeWindowHandle so the Vulkan backend
+//           can dispatch to vkCreateWaylandSurfaceKHR or
+//           vkCreateXcbSurfaceKHR without ambiguity (Issue lane09-002).
+//
+// All OS-specific pointer types are stored as void* to avoid pulling
+// wayland-client.h / xcb/xcb.h into this public header.  The Vulkan
+// backend casts them back to the concrete types at the surface-creation
+// call site — see engine/gpu/vk/VulkanBackend.cpp, create_surface_().
+struct LinuxNativeWindowHandle {
+    enum class Kind : std::uint8_t { Wayland, Xcb };
+
+    // Named sub-structs avoid the -Wnested-anon-types Clang extension warning.
+    struct WaylandFields {
+        void* wl_display; // cast to ::wl_display*      at the surface-creation site
+        void* wl_surface; // cast to ::wl_surface*      at the surface-creation site
+    };
+    struct XcbFields {
+        void*         xcb_connection; // cast to ::xcb_connection_t* at the surface-creation site
+        std::uint32_t xcb_window;     // xcb_window_t is uint32
+    };
+
+    Kind kind;
+    union {
+        WaylandFields wayland;
+        XcbFields     xcb;
+    };
+};
+
 // ─── Device — top-level GPU handle ──────────────────────────────────────
 struct DeviceDesc {
     bool enable_validation = false; // Vulkan validation layers in dev builds
     bool enable_rt         = true;  // gated by hardware capability detection
     bool enable_mesh_shaders = true;
-    void* native_window_handle = nullptr; // HWND / NSWindow* / wl_surface*
+    // Platform-specific:
+    //   Win32  — HWND cast to void*
+    //   macOS  — CAMetalLayer* cast to void*
+    //   Linux  — LinuxNativeWindowHandle* cast to void*  (see struct above)
+    void* native_window_handle = nullptr;
 };
 
 Device* create_device(const DeviceDesc&);
