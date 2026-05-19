@@ -16,6 +16,7 @@
 #include <string_view>
 
 #include "platform/macos/PublicPlatformMacos.h"
+#include "platform/Platform.h"  // KeyCode, kKeyCodeCount
 
 namespace psynder::platform::macos {
 
@@ -56,6 +57,37 @@ struct RawMouseSnapshot {
     bool   middle_down = false;
 };
 RawMouseSnapshot raw_mouse_snapshot_and_reset();
+
+// ─── Keyboard state ──────────────────────────────────────────────────────
+// Indexed by psynder::platform::KeyCode cast to std::size_t.
+// key_down[k]    = currently held (level trigger)
+// key_pressed[k] = transitioned 0→1 this frame (edge trigger, cleared by
+//                  keyboard_begin_frame() called from pump_events())
+//
+// Both arrays are modified only on the main thread (inside the NSEvent
+// pump), so plain bool suffices. They are public (not atomic) because
+// Input::key_down / key_pressed are also called from the main thread only.
+
+static constexpr std::size_t kKeyCount =
+    static_cast<std::size_t>(psynder::platform::KeyCode::Count);
+
+struct KeyboardState {
+    bool down   [kKeyCount]{};
+    bool pressed[kKeyCount]{};
+};
+
+// Process a single NSEvent keycode + direction into the global keyboard
+// state. is_down = true for KeyDown, false for KeyUp.
+// Called from MacosPlatform.mm's NSEvent loop.
+void keyboard_event(psynder::platform::KeyCode key, bool is_down);
+
+// Clear the edge-triggered pressed[] array. Must be called at the START of
+// each pump_events() before dispatching new events so pressed[] only ever
+// describes keys that transitioned this frame.
+void keyboard_begin_frame();
+
+// Read-only access for MacInput::key_down / key_pressed.
+const KeyboardState& keyboard_state();
 
 // ─── Filesystem helpers (live in MacosPlatformFs.cpp, plain C++) ────────
 std::string fs_executable_path();
