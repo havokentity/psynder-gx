@@ -8,7 +8,7 @@
 // It routes through submit_boxes_to_gpu() (RenderInterface.cpp) which
 // uploads vertex data and emits a CmdBuffer drawcall.
 //
-// Removed: #include "render/Framebuffer.h"
+// GX Wave-B: render() routes through submit_boxes_to_gpu() via CmdBuffer.
 
 #include "Rml.h"
 #include <utility>

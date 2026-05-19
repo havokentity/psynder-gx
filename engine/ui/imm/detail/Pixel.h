@@ -13,7 +13,7 @@
 //     the GPU alpha blend mode supersedes this at draw time)
 //   - `iclamp()` integer clamp (used by rect and circle geometry emitters)
 //
-// render/Framebuffer.h is NOT included here.
+// GPU alpha blend supersedes CPU blend at draw time.
 
 #pragma once
 

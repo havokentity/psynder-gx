@@ -7,8 +7,7 @@
 // GX Wave-B refactor: replaces the Psynder Wave-A CPU rasterizer back-end
 // (psy::render::raster::*) with a psy::gpu::* GPU draw path.
 //
-// REMOVED: #include "render/Framebuffer.h"
-// REMOVED: #include "render/raster/Raster.h"
+// GX Wave-B: CPU rasterizer back-end replaced with psy::gpu::* draw path.
 //
 // What this file does:
 //   submit_boxes_to_gpu() — called by Rml.cpp once per visible document per
