@@ -137,21 +137,32 @@ struct TextureDesc {
 // backend casts them back to the concrete types at the surface-creation
 // call site — see engine/gpu/vk/VulkanBackend.cpp, create_surface_().
 struct LinuxNativeWindowHandle {
-    enum class Kind : std::uint8_t { Wayland, Xcb };
+    enum class Kind : std::uint8_t {
+        Invalid = 0,  // default-constructed state — backend rejects with a clear error
+        Wayland,
+        Xcb,
+    };
 
     // Named sub-structs avoid the -Wnested-anon-types Clang extension warning.
+    // Default member initializers on every field so a default-constructed
+    // handle is fully zeroed — the backend's `default:` case in
+    // create_surface_() catches Kind::Invalid + null pointers and rejects
+    // explicitly instead of reading indeterminate union storage.
     struct WaylandFields {
-        void* wl_display; // cast to ::wl_display*      at the surface-creation site
-        void* wl_surface; // cast to ::wl_surface*      at the surface-creation site
+        void* wl_display = nullptr; // cast to ::wl_display*      at the surface-creation site
+        void* wl_surface = nullptr; // cast to ::wl_surface*      at the surface-creation site
     };
     struct XcbFields {
-        void*         xcb_connection; // cast to ::xcb_connection_t* at the surface-creation site
-        std::uint32_t xcb_window;     // xcb_window_t is uint32
+        void*         xcb_connection = nullptr; // cast to ::xcb_connection_t* at the surface-creation site
+        std::uint32_t xcb_window     = 0;       // xcb_window_t is uint32
     };
 
-    Kind kind;
+    Kind kind = Kind::Invalid;
+    // Active variant is determined by `kind`. Wayland gets the default
+    // member init (all nulls) so a default-constructed handle is fully
+    // zeroed; population happens at window-create time in lane 24.
     union {
-        WaylandFields wayland;
+        WaylandFields wayland{};
         XcbFields     xcb;
     };
 };

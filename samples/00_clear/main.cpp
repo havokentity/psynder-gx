@@ -104,7 +104,16 @@ int main(int argc, char** argv) {
     std::uint64_t frame_idx = 0;
     while (!plat::should_close(win)) {
         plat::pump_events();
-        if (!psynder::gpu::begin_frame(dev)) continue;
+        if (!psynder::gpu::begin_frame(dev)) {
+            // begin_frame can fail on OUT_OF_DATE_KHR / similar Metal surface
+            // events (window resize, display change). Drive a swapchain
+            // resize before retrying — otherwise the loop spins on stale
+            // surface caps forever and the window appears frozen.
+            psynder::gpu::resize_swapchain(dev,
+                plat::drawable_width(win),
+                plat::drawable_height(win));
+            continue;
+        }
         if (auto* cmd = psynder::gpu::cmd_open(dev)) {
             psynder::gpu::cmd_submit(dev, cmd);
         }
@@ -187,7 +196,16 @@ int main(int argc, char** argv) {
     std::uint64_t frame_idx = 0;
     while (!win->should_close()) {
         win->poll_events();
-        if (!psynder::gpu::begin_frame(dev)) continue;
+        if (!psynder::gpu::begin_frame(dev)) {
+            // begin_frame can fail on OUT_OF_DATE_KHR (window resize, monitor
+            // mode change, sleep/wake). Drive a swapchain resize before
+            // retrying — otherwise the loop spins on stale surface caps
+            // forever and the window appears frozen.
+            psynder::gpu::resize_swapchain(dev,
+                win->window_width(),
+                win->window_height());
+            continue;
+        }
         if (auto* cmd = psynder::gpu::cmd_open(dev)) {
             psynder::gpu::cmd_submit(dev, cmd);
         }
@@ -276,7 +294,16 @@ int main(int argc, char** argv) {
     std::uint64_t frame_idx = 0;
     while (!win->should_close()) {
         win->poll_events();
-        if (!psynder::gpu::begin_frame(dev)) continue;
+        if (!psynder::gpu::begin_frame(dev)) {
+            // begin_frame can fail on OUT_OF_DATE_KHR (window resize, monitor
+            // mode change, sleep/wake). Drive a swapchain resize before
+            // retrying — otherwise the loop spins on stale surface caps
+            // forever and the window appears frozen.
+            psynder::gpu::resize_swapchain(dev,
+                win->window_width(),
+                win->window_height());
+            continue;
+        }
         if (auto* cmd = psynder::gpu::cmd_open(dev)) {
             psynder::gpu::cmd_submit(dev, cmd);
         }

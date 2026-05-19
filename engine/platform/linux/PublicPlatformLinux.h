@@ -16,9 +16,21 @@
 // Dedicated-server builds (PSYNDER_GX_DEDICATED_SERVER=1) strip all
 // windowing and audio — do not call these in server-only code paths.
 //
-// Threading: callable from any thread; internals serialize with a mutex.
-// Returned char* from default_audio_device_name() is a static buffer owned
-// by the implementation; valid until the next call to that function.
+// Threading:
+//   * Audio accessors (default_audio_device_name / _sample_rate) — callable
+//     from any thread; internals serialize with a mutex. Returned char* is
+//     a static buffer owned by the implementation; valid until the next
+//     call to that function.
+//   * native_window_handle(Window*) — NOT mutex-guarded. Reads a per-window
+//     POD struct populated at window construction. Caller must:
+//       (a) only call after psynder::platform::create_window() has returned
+//           for the same Window*;
+//       (b) NOT call after destroy_window() — pointer becomes dangling;
+//       (c) treat the returned pointer as borrowed for the Window's
+//           lifetime (no need to free).
+//     Multiple threads may read concurrently — the struct's fields are
+//     written once at create time and never modified afterwards. If the
+//     window is destroyed mid-read on another thread, that's a caller bug.
 //
 // Audio backend priority (selected at compile time via CMake pkg_check_modules):
 //   1. PipeWire   (libpipewire-0.3-dev)   — PSYNDER_LINUX_AUDIO_PIPEWIRE=1
