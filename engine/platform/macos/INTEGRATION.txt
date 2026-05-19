@@ -1,0 +1,107 @@
+Lane 25 — platform-macos — cross-lane integration notes
+========================================================
+
+Wave B delivered (this commit) — files inside engine/platform/macos/ only:
+  * PublicPlatformMacos.h     — lane-public contract (no AppKit in interface)
+  * MacosPlatform_internal.h  — lane-private declarations
+  * MacosPlatform.mm          — NSWindow + CAMetalLayer + IOKit + GameController
+                                + CoreAudio device-name lookup. Objective-C++,
+                                ARC enabled via per-source-file -fobjc-arc.
+  * MacosPlatformFs.cpp       — process / FS helpers in plain C++
+  * MacPlatform.cpp           — legacy psynder::platform::Window shim delegating
+                                to the new GX surface (compat for vendored
+                                Psynder code in other lanes)
+  * MacosSmoke.mm             — standalone surface smoke binary (opt-in via
+                                -DPSYNDER_GX_PLATFORM_MACOS_BUILD_SMOKE=ON)
+  * CMakeLists.txt            — psynder_platform_macos lane + smoke target
+
+Lane-local verification (NO other lanes required):
+  Hand-compiled the lane and ran sample_macos_smoke for 180 frames at HiDPI:
+    [macos-smoke] CAMetalLayer = ...  drawable = 2560x1440  point = 1280x720
+    [macos-smoke] audio default = <device name> @ 48000 Hz
+    [macos-smoke] exited after 180 frames in 0.116s (1556.6 FPS)
+  The CAMetalLayer is alive, presents nextDrawable, and renders an animated
+  clear-color from the smoke binary itself (lane 07 will replace that draw
+  cycle with its own psy::gpu::end_frame path).
+
+Wave C (orchestrator) integration steps for the M0 demo:
+  1. Land lane 01 (engine/core/) — supplies core/Types.h + core/Log.h. Required
+     to compile MacPlatform.cpp (the legacy psynder::platform shim) and
+     anything that #includes engine/platform/Platform.h. PublicPlatformMacos.h
+     itself does NOT depend on core, so lane 07 can include it standalone.
+  2. Land lane 07 (engine/gpu/). Lane 07's create_device() should:
+       (a) #include "platform/macos/PublicPlatformMacos.h"
+       (b) From the sample, call psynder::platform::macos::create_window(...)
+           and pass psynder::platform::macos::native_layer(win) as
+           DeviceDesc::native_window_handle.
+       (c) Inside the Metal backend, treat native_window_handle as a
+           CAMetalLayer* and call layer.device = mtl_device + drive
+           nextDrawable / present yourself per DESIGN §11.3.
+       (d) On resize, resize_swapchain() reads drawable_width / height from
+           PublicPlatformMacos and re-creates depth attachments.
+  3. Wire samples/00_clear/main.cpp (orchestrator-owned) to:
+       (a) Call psynder::platform::macos::create_window().
+       (b) Construct psy::gpu::Device with native_window_handle.
+       (c) Loop: pump_events() -> psy::gpu::begin_frame() -> cmd_open() ->
+           clear-color encode -> cmd_submit() -> end_frame() -> exit on
+           --smoke-frames hit OR macos::should_close().
+       (d) Honour the AGENTS.md /tmp/psynder_gx_smoke.lockdir mutex around
+           the runtime invocation.
+  4. Lane 14 (audio) consumes default_audio_device_name() +
+     default_audio_sample_rate() to open AUHAL. The CoreAudio AUHAL backend
+     itself was deliberately NOT carried into this lane — DESIGN §8 puts
+     the mixer in engine/audio/. We expose only the device lookup so lane
+     14 can decide buffer sizes / output formats.
+
+What this lane does NOT touch (per AGENTS.md ownership):
+  * engine/core/, engine/render/Framebuffer.h, engine/gpu/, samples/*,
+    root CMakeLists.txt, engine/platform/CMakeLists.txt (aggregator),
+    engine/platform/Platform.h, engine/platform/Platform.cpp.
+
+Limitations / known follow-ups (not blocking M0):
+  * NSEvent keyboard input is NOT yet folded into the legacy MouseState/Input
+    interface — the legacy MacInput::key_*() always returns false. The IOKit
+    raw mouse IS wired through MacInput::mouse() but only via the
+    snapshot-and-reset accumulator (one polling consumer at a time).
+    Lane consumers that need keys should call NSEvent directly through
+    psynder::platform::macos::Window's view, or wait for the input
+    refactor when lane 01 (core) lands an Input service that supersedes
+    the legacy interface.
+  * IOKit HID Manager open() fails silently if the user has not granted
+    Input Monitoring permission (macOS 11+). NSEvent mouseMoved is the
+    fallback for that scenario; we still record cursor position through
+    the view's mouseMoved: handler (currently unimplemented — to add when
+    lane 01 supplies the keyboard / mouse Input contract).
+  * Fullscreen + display selection: WindowDesc has no fullscreen flag in
+    PublicPlatformMacos.h yet. Add when lane 21 (ui) needs a borderless
+    fullscreen toggle for the F11 demo path.
+  * Multiple windows: a single global IOKit + GameController state is fine
+    for the single-window-per-process design (DESIGN §11.1). If we ever
+    spawn an editor + viewport pair, the state needs window-scoping.
+
+Sample command for the orchestrator to validate this lane standalone
+(does NOT require lane 01 / 07 to be present):
+
+  cd <worktree>
+  mkdir -p build/mac-lane25
+  clang++ -c -std=c++23 -fobjc-arc -arch arm64 -mmacosx-version-min=14.0 \
+    -DPSYNDER_PLATFORM_MACOS=1 -DPSYNDER_GX_PLATFORM_MACOS=1 -I engine \
+    -o build/mac-lane25/MacosPlatform.o engine/platform/macos/MacosPlatform.mm
+  clang++ -c -std=c++23 -arch arm64 -mmacosx-version-min=14.0 \
+    -DPSYNDER_PLATFORM_MACOS=1 -DPSYNDER_GX_PLATFORM_MACOS=1 -I engine \
+    -o build/mac-lane25/MacosPlatformFs.o engine/platform/macos/MacosPlatformFs.cpp
+  clang++ -c -std=c++23 -fobjc-arc -arch arm64 -mmacosx-version-min=14.0 \
+    -DPSYNDER_PLATFORM_MACOS=1 -DPSYNDER_GX_PLATFORM_MACOS=1 -I engine \
+    -o build/mac-lane25/MacosSmoke.o engine/platform/macos/MacosSmoke.mm
+  clang++ -arch arm64 -mmacosx-version-min=14.0 -o build/mac-lane25/sample_macos_smoke \
+    build/mac-lane25/MacosPlatform.o build/mac-lane25/MacosPlatformFs.o \
+    build/mac-lane25/MacosSmoke.o \
+    -framework Cocoa -framework AppKit -framework Foundation \
+    -framework QuartzCore -framework Metal -framework CoreAudio \
+    -framework AudioToolbox -framework GameController -framework IOKit \
+    -framework CoreFoundation
+  LOCK=/tmp/psynder_gx_smoke.lockdir
+  while ! mkdir "$LOCK" 2>/dev/null; do sleep 0.5; done
+  trap 'rmdir "$LOCK"' EXIT
+  ./build/mac-lane25/sample_macos_smoke --smoke-frames=120
+  rmdir "$LOCK"; trap - EXIT
