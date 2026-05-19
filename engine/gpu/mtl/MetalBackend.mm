@@ -42,8 +42,20 @@
 namespace psynder::gpu {
 
 // ─── Concrete Metal-owning resource types ───────────────────────────────
+//
+// ARC is OFF for this TU (-fno-objc-arc). Any id<T> we hold must be
+// released when the wrapper is destroyed. The destructors below are
+// invoked via the virtual ~RefCountedBase chain from delete_resource().
 struct MtlBuffer  : Buffer  { id<MTLBuffer>       handle = nil; void* mapped = nullptr; };
-struct MtlTexture : Texture { id<MTLTexture>      handle = nil; };
+struct MtlTexture : Texture {
+    id<MTLTexture> handle = nil;
+    ~MtlTexture() override {
+        if (handle) {
+            [handle release];
+            handle = nil;
+        }
+    }
+};
 struct MtlSampler : Sampler { id<MTLSamplerState> handle = nil; };
 struct MtlCmdBuf  : CmdBuffer {
     id<MTLCommandBuffer>          cb               = nil;
@@ -106,6 +118,10 @@ public:
     void dispatch    (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t) override;
 
     void destroy_resource(RefCountedBase* res) override;
+
+    // Test-only readback (see PublicGpuInternal.h Backend::texture_readback_mip0).
+    bool texture_readback_mip0(Texture* tex, void* out_dst_bytes,
+                               std::size_t dst_bytes_size) override;
 
 private:
     bool attach_layer_from_handle_(Device* dev, void* native_handle);
@@ -408,18 +424,128 @@ void MetalBackend::resize_swapchain(Device* dev, std::uint32_t w, std::uint32_t 
     }
 }
 
-// ─── Resource creation — minimal stubs for M0 ───────────────────────────
+// ─── Resource creation ──────────────────────────────────────────────────
 //
-// Buffers / textures / samplers are not exercised by sample_00_clear.
-// We return concrete RefCountedBase-derived stub objects so Handle<T>
-// arithmetic works for callers (lane 09/21) that wire up paths against
-// the public surface but don't actually use the contents at M0.
+// Buffers / samplers remain minimal M0-stubs. create_texture now grows the
+// M1 upload path: when TextureDesc::initial_data != nullptr we allocate a
+// real id<MTLTexture> with shader-read usage and replaceRegion: the bytes
+// in place. Apple Silicon's unified memory means no staging buffer is
+// needed; the texture's backing storage is host-visible by default
+// (MTLStorageModeShared on M-series).
+//
+// When initial_data is null we preserve the existing M0 behaviour (return
+// a bare MtlTexture wrapper with handle == nil) so render lanes that only
+// need a handle for ABI plumbing continue to compile + link.
 Buffer* MetalBackend::create_buffer(Device* /*dev*/, const BufferDesc& /*desc*/) {
     return new (std::nothrow) MtlBuffer();
 }
-Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& /*desc*/) {
-    return new (std::nothrow) MtlTexture();
+
+// ─── Format → bytes_per_pixel + MTLPixelFormat helpers ──────────────────
+//
+// Restricted to the M1 supported set per the PublicGpu.h contract on
+// TextureDesc::initial_data. SRGB variants intentionally absent — the
+// SRGB-typed Metal formats use the same byte layout (4 bpp) as their
+// Unorm peers, but lane 07's M1 brief defers SRGB upload to M3 because
+// the gamma channel decision belongs to the asset cooker (lane 09).
+namespace {
+
+inline std::uint32_t bytes_per_pixel_for_upload(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm: return 4u;
+        case Format::Bgra8Unorm: return 4u;
+        case Format::R8Unorm:    return 1u;
+        default:                 return 0u; // not supported on the M1 upload path
+    }
 }
+
+inline MTLPixelFormat to_mtl_pixel_format_for_upload(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm: return MTLPixelFormatRGBA8Unorm;
+        case Format::Bgra8Unorm: return MTLPixelFormatBGRA8Unorm;
+        case Format::R8Unorm:    return MTLPixelFormatR8Unorm;
+        default:                 return MTLPixelFormatInvalid;
+    }
+}
+
+} // anonymous
+
+Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) {
+    @autoreleasepool {
+        auto* tex = new (std::nothrow) MtlTexture();
+        if (!tex) return nullptr;
+
+        // Fast path: caller didn't supply initial data → preserve the
+        // existing M0 stub behaviour (no MTLTexture allocation, handle nil).
+        if (desc.initial_data == nullptr) {
+            return tex;
+        }
+
+        // Validate format. M1 supports a small allow-list; everything else
+        // (SRGB, compressed, depth, float) goes through the M3 path.
+        const std::uint32_t bpp = bytes_per_pixel_for_upload(desc.format);
+        const MTLPixelFormat mtl_fmt = to_mtl_pixel_format_for_upload(desc.format);
+        if (bpp == 0 || mtl_fmt == MTLPixelFormatInvalid) {
+            std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Bgra8Unorm/R8Unorm)\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+
+        // Validate dimensions + buffer size. mip-0-only contract.
+        if (desc.width == 0 || desc.height == 0) {
+            std::fputs("[psy::gpu::mtl] create_texture: initial_data given but width/height is 0\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+        const std::size_t expected = static_cast<std::size_t>(desc.width)
+                                   * static_cast<std::size_t>(desc.height)
+                                   * static_cast<std::size_t>(bpp);
+        if (desc.initial_data_size != expected) {
+            std::fprintf(stderr,
+                "[psy::gpu::mtl] create_texture: initial_data_size=%zu != expected %zu (%ux%u, %u bpp)\n",
+                desc.initial_data_size, expected, desc.width, desc.height, bpp);
+            delete tex;
+            return nullptr;
+        }
+
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:mtl_fmt
+                                         width:(NSUInteger)desc.width
+                                        height:(NSUInteger)desc.height
+                                     mipmapped:NO];
+        // Default usage = ShaderRead. Promote when the user asks for more
+        // via TextureUsage bits; storage / RT need explicit opt-in so the
+        // Metal driver can pick the optimal backing layout.
+        MTLTextureUsage usage = MTLTextureUsageShaderRead;
+        if (has_usage(desc.usage, TextureUsage::Storage))      usage |= MTLTextureUsageShaderWrite;
+        if (has_usage(desc.usage, TextureUsage::RenderTarget) ||
+            has_usage(desc.usage, TextureUsage::DepthStencil)) usage |= MTLTextureUsageRenderTarget;
+        td.usage = usage;
+        // Unified memory on Apple Silicon — replaceRegion: writes go
+        // straight to the texture's backing store, no staging buffer.
+        td.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> handle = [mtl_device_ newTextureWithDescriptor:td];
+        if (!handle) {
+            std::fputs("[psy::gpu::mtl] create_texture: newTextureWithDescriptor returned nil\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+
+        MTLRegion region = MTLRegionMake2D(0, 0,
+                                           (NSUInteger)desc.width,
+                                           (NSUInteger)desc.height);
+        const NSUInteger bytes_per_row =
+            (NSUInteger)desc.width * (NSUInteger)bpp;
+        [handle replaceRegion:region
+                  mipmapLevel:0
+                    withBytes:desc.initial_data
+                  bytesPerRow:bytes_per_row];
+
+        tex->handle = handle;
+        return tex;
+    }
+}
+
 Sampler* MetalBackend::create_sampler(Device* /*dev*/) {
     return new (std::nothrow) MtlSampler();
 }
@@ -435,6 +561,47 @@ void MetalBackend::buffer_unmap(Buffer* /*b*/) {
 void MetalBackend::destroy_resource(RefCountedBase* res) {
     // M0: synchronous destroy. M1+: defer-release to last_completed_frame.
     delete res;
+}
+
+// ─── Test-only: mip-0 readback ─────────────────────────────────────────
+//
+// Drains the texture's mip-0 contents back into a host-visible byte
+// buffer. NOT a public ABI — see PublicGpuInternal.h Backend::
+// texture_readback_mip0. Apple Silicon's unified memory makes this
+// trivial: replaceRegion-style writes are immediately visible to
+// getBytes:fromRegion:, no staging or fence wait needed.
+bool MetalBackend::texture_readback_mip0(Texture* base_tex,
+                                         void* out_dst_bytes,
+                                         std::size_t dst_bytes_size) {
+    if (!base_tex || !out_dst_bytes || dst_bytes_size == 0) return false;
+    auto* tex = static_cast<MtlTexture*>(base_tex);
+    if (!tex->handle) return false;
+
+    @autoreleasepool {
+        id<MTLTexture> h = tex->handle;
+        const NSUInteger w = h.width;
+        const NSUInteger hh = h.height;
+        // bpp inferred from the texture's MTLPixelFormat. We only handle
+        // the M1-supported set; anything else means the upload path also
+        // refused it so we shouldn't be reading it back.
+        NSUInteger bpp = 0;
+        switch (h.pixelFormat) {
+            case MTLPixelFormatRGBA8Unorm: bpp = 4; break;
+            case MTLPixelFormatBGRA8Unorm: bpp = 4; break;
+            case MTLPixelFormatR8Unorm:    bpp = 1; break;
+            default: return false;
+        }
+        const std::size_t expected = (std::size_t)w * (std::size_t)hh * (std::size_t)bpp;
+        if (dst_bytes_size != expected) return false;
+
+        const NSUInteger bytes_per_row = w * bpp;
+        MTLRegion region = MTLRegionMake2D(0, 0, w, hh);
+        [h getBytes:out_dst_bytes
+            bytesPerRow:bytes_per_row
+              fromRegion:region
+             mipmapLevel:0];
+        return true;
+    }
 }
 
 // ─── Render-encoder API (lane09-001 unblock) ────────────────────────────

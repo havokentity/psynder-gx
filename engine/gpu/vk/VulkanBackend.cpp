@@ -154,6 +154,10 @@ public:
 
     void destroy_resource(RefCountedBase* res) override;
 
+    // Test-only readback (see PublicGpuInternal.h Backend::texture_readback_mip0).
+    bool texture_readback_mip0(Texture* tex, void* out_dst_bytes,
+                               std::size_t dst_bytes_size) override;
+
 private:
     bool create_instance_(Device* dev);
     bool create_surface_(Device* dev, void* native_handle);
@@ -751,16 +755,550 @@ void VulkanBackend::resize_swapchain(Device* dev, std::uint32_t w, std::uint32_t
     create_swapchain_(dev, w, h);
 }
 
-// ─── Resource stubs (M0) ────────────────────────────────────────────────
+// ─── Resource creation ──────────────────────────────────────────────────
+//
+// Buffers / samplers remain minimal M0-stubs until lane 07 grows them out.
+// create_texture now wires the M1 upload path: when TextureDesc::initial_data
+// is non-null we allocate a real VkImage, a host-visible staging VkBuffer,
+// memcpy the source bytes in, and copy them onto the image with the
+// canonical UNDEFINED → TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+// transition pair. Submission is synchronous: we wait on a one-shot fence
+// before returning so the texture is ready by the time the Handle reaches
+// the caller. The staging buffer is destroyed immediately after the wait.
+
 Buffer*  VulkanBackend::create_buffer (Device*, const BufferDesc&)  { return new (std::nothrow) VkBufferRes(); }
-Texture* VulkanBackend::create_texture(Device*, const TextureDesc&) { return new (std::nothrow) VkTextureRes(); }
 Sampler* VulkanBackend::create_sampler(Device*)                     { return new (std::nothrow) VkSamplerRes(); }
 void*    VulkanBackend::buffer_map  (Buffer* b) { return static_cast<VkBufferRes*>(b)->mapped; }
 void     VulkanBackend::buffer_unmap(Buffer*) {}
 
+namespace {
+
+// ─── Format → VkFormat + bytes_per_pixel mapping ────────────────────────
+//
+// M1 upload path supports an explicit allow-list. SRGB variants share
+// byte layout with their Unorm peers but the gamma-channel decision
+// belongs to the asset cooker (lane 09); deferred to M3.
+inline std::uint32_t vk_bytes_per_pixel_for_upload(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm: return 4u;
+        case Format::Bgra8Unorm: return 4u;
+        case Format::R8Unorm:    return 1u;
+        default:                 return 0u;
+    }
+}
+
+inline VkFormat to_vk_format_for_upload(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
+        case Format::Bgra8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
+        case Format::R8Unorm:    return VK_FORMAT_R8_UNORM;
+        default:                 return VK_FORMAT_UNDEFINED;
+    }
+}
+
+// Look up a memory type whose properties include every flag in `want`.
+// Returns UINT32_MAX when no matching type exists in the type_bits mask.
+inline std::uint32_t find_memory_type(VkPhysicalDevice phys,
+                                      std::uint32_t type_bits,
+                                      VkMemoryPropertyFlags want) {
+    VkPhysicalDeviceMemoryProperties mem{};
+    vkGetPhysicalDeviceMemoryProperties(phys, &mem);
+    for (std::uint32_t i = 0; i < mem.memoryTypeCount; ++i) {
+        if ((type_bits & (1u << i)) == 0) continue;
+        if ((mem.memoryTypes[i].propertyFlags & want) == want) return i;
+    }
+    return UINT32_MAX;
+}
+
+} // anonymous
+
+Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
+    auto* tex = new (std::nothrow) VkTextureRes();
+    if (!tex) return nullptr;
+
+    // Fast path: no initial_data → preserve the M0 stub behaviour
+    // (handle / view / mem remain VK_NULL_HANDLE).
+    if (desc.initial_data == nullptr) {
+        return tex;
+    }
+
+    // Validate the format + dimensions + buffer size before we touch any
+    // Vulkan API. Returning nullptr here is the "no crash, invalid handle"
+    // contract from PublicGpu.h.
+    const std::uint32_t bpp = vk_bytes_per_pixel_for_upload(desc.format);
+    const VkFormat vk_fmt   = to_vk_format_for_upload(desc.format);
+    if (bpp == 0 || vk_fmt == VK_FORMAT_UNDEFINED) {
+        std::fputs("[psy::gpu::vk] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Bgra8Unorm/R8Unorm)\n", stderr);
+        delete tex;
+        return nullptr;
+    }
+    if (desc.width == 0 || desc.height == 0) {
+        std::fputs("[psy::gpu::vk] create_texture: initial_data given but width/height is 0\n", stderr);
+        delete tex;
+        return nullptr;
+    }
+    const std::size_t expected = static_cast<std::size_t>(desc.width)
+                               * static_cast<std::size_t>(desc.height)
+                               * static_cast<std::size_t>(bpp);
+    if (desc.initial_data_size != expected) {
+        std::fprintf(stderr,
+            "[psy::gpu::vk] create_texture: initial_data_size=%zu != expected %zu (%ux%u, %u bpp)\n",
+            desc.initial_data_size, expected, desc.width, desc.height, bpp);
+        delete tex;
+        return nullptr;
+    }
+    if (device_ == VK_NULL_HANDLE || phys_ == VK_NULL_HANDLE) {
+        std::fputs("[psy::gpu::vk] create_texture: backend not initialised (no VkDevice)\n", stderr);
+        delete tex;
+        return nullptr;
+    }
+
+    // ─── Image + image memory ────────────────────────────────────────────
+    VkImageCreateInfo ici{};
+    ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = vk_fmt;
+    ici.extent        = {desc.width, desc.height, 1u};
+    ici.mipLevels     = 1u;
+    ici.arrayLayers   = 1u;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (has_usage(desc.usage, TextureUsage::Storage))     ici.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (has_usage(desc.usage, TextureUsage::RenderTarget))ici.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (has_usage(desc.usage, TextureUsage::TransferSrc)) ici.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkImage image = VK_NULL_HANDLE;
+    if (vkCreateImage(device_, &ici, nullptr, &image) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkCreateImage failed\n", stderr);
+        delete tex;
+        return nullptr;
+    }
+
+    VkMemoryRequirements img_req{};
+    vkGetImageMemoryRequirements(device_, image, &img_req);
+    const std::uint32_t img_mt = find_memory_type(phys_, img_req.memoryTypeBits,
+                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (img_mt == UINT32_MAX) {
+        std::fputs("[psy::gpu::vk] create_texture: no DEVICE_LOCAL memory type for image\n", stderr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+    VkMemoryAllocateInfo img_mai{};
+    img_mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    img_mai.allocationSize  = img_req.size;
+    img_mai.memoryTypeIndex = img_mt;
+    VkDeviceMemory img_mem = VK_NULL_HANDLE;
+    if (vkAllocateMemory(device_, &img_mai, nullptr, &img_mem) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkAllocateMemory(image) failed\n", stderr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+    if (vkBindImageMemory(device_, image, img_mem, 0) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkBindImageMemory failed\n", stderr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+
+    // ─── Staging buffer (host-visible) ───────────────────────────────────
+    VkBufferCreateInfo sbci{};
+    sbci.sType        = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    sbci.size         = static_cast<VkDeviceSize>(expected);
+    sbci.usage        = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    sbci.sharingMode  = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkBuffer staging_buf = VK_NULL_HANDLE;
+    if (vkCreateBuffer(device_, &sbci, nullptr, &staging_buf) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkCreateBuffer(staging) failed\n", stderr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+    VkMemoryRequirements sb_req{};
+    vkGetBufferMemoryRequirements(device_, staging_buf, &sb_req);
+    const std::uint32_t sb_mt = find_memory_type(phys_, sb_req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (sb_mt == UINT32_MAX) {
+        std::fputs("[psy::gpu::vk] create_texture: no HOST_VISIBLE|HOST_COHERENT memory type for staging\n", stderr);
+        vkDestroyBuffer(device_, staging_buf, nullptr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+    VkMemoryAllocateInfo sb_mai{};
+    sb_mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    sb_mai.allocationSize  = sb_req.size;
+    sb_mai.memoryTypeIndex = sb_mt;
+    VkDeviceMemory sb_mem = VK_NULL_HANDLE;
+    if (vkAllocateMemory(device_, &sb_mai, nullptr, &sb_mem) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkAllocateMemory(staging) failed\n", stderr);
+        vkDestroyBuffer(device_, staging_buf, nullptr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+    vkBindBufferMemory(device_, staging_buf, sb_mem, 0);
+
+    void* mapped = nullptr;
+    if (vkMapMemory(device_, sb_mem, 0, sb_req.size, 0, &mapped) != VK_SUCCESS || !mapped) {
+        std::fputs("[psy::gpu::vk] create_texture: vkMapMemory(staging) failed\n", stderr);
+        vkDestroyBuffer(device_, staging_buf, nullptr);
+        vkFreeMemory(device_, sb_mem, nullptr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+    std::memcpy(mapped, desc.initial_data, expected);
+    vkUnmapMemory(device_, sb_mem);
+
+    // ─── One-shot transfer command buffer ────────────────────────────────
+    VkCommandPool   xfer_pool = VK_NULL_HANDLE;
+    VkCommandBuffer xfer_cb   = VK_NULL_HANDLE;
+    VkFence         xfer_fence = VK_NULL_HANDLE;
+
+    auto fail_cleanup = [&]() {
+        if (xfer_fence) vkDestroyFence(device_, xfer_fence, nullptr);
+        if (xfer_pool)  vkDestroyCommandPool(device_, xfer_pool, nullptr);
+        vkDestroyBuffer(device_, staging_buf, nullptr);
+        vkFreeMemory(device_, sb_mem, nullptr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+    };
+
+    VkCommandPoolCreateInfo pci{};
+    pci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = gfx_queue_idx_;
+    if (vkCreateCommandPool(device_, &pci, nullptr, &xfer_pool) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkCreateCommandPool(upload) failed\n", stderr);
+        fail_cleanup();
+        return nullptr;
+    }
+    VkCommandBufferAllocateInfo cbai{};
+    cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.commandPool        = xfer_pool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(device_, &cbai, &xfer_cb) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkAllocateCommandBuffers(upload) failed\n", stderr);
+        fail_cleanup();
+        return nullptr;
+    }
+
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(xfer_cb, &bi);
+
+    // UNDEFINED → TRANSFER_DST_OPTIMAL
+    {
+        VkImageMemoryBarrier b{};
+        b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.srcAccessMask    = 0;
+        b.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.image            = image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        vkCmdPipelineBarrier(xfer_cb,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+
+    VkBufferImageCopy region{};
+    region.bufferOffset      = 0;
+    region.bufferRowLength   = 0; // tightly packed
+    region.bufferImageHeight = 0;
+    region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageOffset       = {0, 0, 0};
+    region.imageExtent       = {desc.width, desc.height, 1u};
+    vkCmdCopyBufferToImage(xfer_cb, staging_buf, image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    // TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+    {
+        VkImageMemoryBarrier b{};
+        b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+        b.image            = image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        vkCmdPipelineBarrier(xfer_cb,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+
+    vkEndCommandBuffer(xfer_cb);
+
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (vkCreateFence(device_, &fci, nullptr, &xfer_fence) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkCreateFence(upload) failed\n", stderr);
+        fail_cleanup();
+        return nullptr;
+    }
+
+    VkSubmitInfo si{};
+    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &xfer_cb;
+    if (vkQueueSubmit(gfx_queue_, 1, &si, xfer_fence) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkQueueSubmit(upload) failed\n", stderr);
+        fail_cleanup();
+        return nullptr;
+    }
+    // Synchronous wait — M3 will batch via the JobSystem; for M1 we block.
+    vkWaitForFences(device_, 1, &xfer_fence, VK_TRUE, UINT64_MAX);
+
+    vkDestroyFence(device_, xfer_fence, nullptr);
+    vkDestroyCommandPool(device_, xfer_pool, nullptr); // implicitly frees xfer_cb
+    vkDestroyBuffer(device_, staging_buf, nullptr);
+    vkFreeMemory(device_, sb_mem, nullptr);
+
+    // ─── Sampled image view for shader binding ───────────────────────────
+    VkImageViewCreateInfo vci{};
+    vci.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image            = image;
+    vci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format           = vk_fmt;
+    vci.components       = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(device_, &vci, nullptr, &view) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_texture: vkCreateImageView failed\n", stderr);
+        vkFreeMemory(device_, img_mem, nullptr);
+        vkDestroyImage(device_, image, nullptr);
+        delete tex;
+        return nullptr;
+    }
+
+    tex->handle             = image;
+    tex->view               = view;
+    tex->mem                = img_mem;
+    tex->device_for_destroy = device_;
+    (void)dev;
+    return tex;
+}
+
 void VulkanBackend::destroy_resource(RefCountedBase* res) {
+    // The virtual ~VkTextureRes() releases its own Vulkan handles via the
+    // cached device_for_destroy pointer (no RTTI / downcast needed here —
+    // see VulkanBackend.h for the rationale).
     delete res;
 }
+
+// ─── Test-only: mip-0 readback ─────────────────────────────────────────
+//
+// Synchronous copy of mip-0 back to a host buffer. NOT a public ABI —
+// invoked only by tests/unit/gpu_texture_upload.cpp through the
+// Backend::texture_readback_mip0 virtual. Implementation:
+//   * Allocate a host-visible staging buffer.
+//   * Transition the image SHADER_READ_ONLY → TRANSFER_SRC_OPTIMAL.
+//   * vkCmdCopyImageToBuffer; transition back to SHADER_READ_ONLY.
+//   * Submit, wait, memcpy out, destroy the staging buffer.
+bool VulkanBackend::texture_readback_mip0(Texture* base_tex,
+                                          void* out_dst_bytes,
+                                          std::size_t dst_bytes_size) {
+    if (!base_tex || !out_dst_bytes || dst_bytes_size == 0) return false;
+    auto* tex = static_cast<VkTextureRes*>(base_tex);
+    if (tex->handle == VK_NULL_HANDLE) return false;
+    if (device_ == VK_NULL_HANDLE || phys_ == VK_NULL_HANDLE) return false;
+    if (gfx_queue_ == VK_NULL_HANDLE) return false;
+
+    const TextureDesc& desc = tex->desc;
+    const std::uint32_t bpp = vk_bytes_per_pixel_for_upload(desc.format);
+    if (bpp == 0) return false;
+    const std::size_t expected = static_cast<std::size_t>(desc.width)
+                               * static_cast<std::size_t>(desc.height)
+                               * static_cast<std::size_t>(bpp);
+    if (expected == 0 || dst_bytes_size != expected) return false;
+
+    // Host-visible staging buffer.
+    VkBuffer staging_buf = VK_NULL_HANDLE;
+    VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bci{};
+        bci.sType        = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size         = static_cast<VkDeviceSize>(expected);
+        bci.usage        = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode  = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device_, &bci, nullptr, &staging_buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(device_, staging_buf, &req);
+        const std::uint32_t mt = find_memory_type(phys_, req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (mt == UINT32_MAX) {
+            vkDestroyBuffer(device_, staging_buf, nullptr);
+            return false;
+        }
+        VkMemoryAllocateInfo mai{};
+        mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = mt;
+        if (vkAllocateMemory(device_, &mai, nullptr, &staging_mem) != VK_SUCCESS) {
+            vkDestroyBuffer(device_, staging_buf, nullptr);
+            return false;
+        }
+        vkBindBufferMemory(device_, staging_buf, staging_mem, 0);
+    }
+
+    // One-shot command buffer + fence.
+    VkCommandPool   pool  = VK_NULL_HANDLE;
+    VkCommandBuffer cb    = VK_NULL_HANDLE;
+    VkFence         fence = VK_NULL_HANDLE;
+    auto teardown = [&](){
+        if (fence) vkDestroyFence(device_, fence, nullptr);
+        if (pool)  vkDestroyCommandPool(device_, pool, nullptr);
+        if (staging_buf) vkDestroyBuffer(device_, staging_buf, nullptr);
+        if (staging_mem) vkFreeMemory(device_, staging_mem, nullptr);
+    };
+
+    {
+        VkCommandPoolCreateInfo pci{};
+        pci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pci.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        pci.queueFamilyIndex = gfx_queue_idx_;
+        if (vkCreateCommandPool(device_, &pci, nullptr, &pool) != VK_SUCCESS) {
+            teardown();
+            return false;
+        }
+        VkCommandBufferAllocateInfo cbai{};
+        cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool        = pool;
+        cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(device_, &cbai, &cb) != VK_SUCCESS) {
+            teardown();
+            return false;
+        }
+        VkFenceCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        vkCreateFence(device_, &fci, nullptr, &fence);
+    }
+
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &bi);
+
+    // SHADER_READ_ONLY → TRANSFER_SRC_OPTIMAL
+    {
+        VkImageMemoryBarrier b{};
+        b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b.srcAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+        b.dstAccessMask    = VK_ACCESS_TRANSFER_READ_BIT;
+        b.image            = tex->handle;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        vkCmdPipelineBarrier(cb,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+
+    VkBufferImageCopy r{};
+    r.bufferOffset      = 0;
+    r.bufferRowLength   = 0;
+    r.bufferImageHeight = 0;
+    r.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    r.imageOffset       = {0, 0, 0};
+    r.imageExtent       = {desc.width, desc.height, 1u};
+    vkCmdCopyImageToBuffer(cb, tex->handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging_buf, 1, &r);
+
+    // TRANSFER_SRC_OPTIMAL → SHADER_READ_ONLY_OPTIMAL (restore)
+    {
+        VkImageMemoryBarrier b{};
+        b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout        = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b.newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcAccessMask    = VK_ACCESS_TRANSFER_READ_BIT;
+        b.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+        b.image            = tex->handle;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        vkCmdPipelineBarrier(cb,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+
+    vkEndCommandBuffer(cb);
+
+    VkSubmitInfo si{};
+    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cb;
+    if (vkQueueSubmit(gfx_queue_, 1, &si, fence) != VK_SUCCESS) {
+        teardown();
+        return false;
+    }
+    vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    void* mapped = nullptr;
+    bool ok = (vkMapMemory(device_, staging_mem, 0, expected, 0, &mapped) == VK_SUCCESS && mapped);
+    if (ok) {
+        std::memcpy(out_dst_bytes, mapped, expected);
+        vkUnmapMemory(device_, staging_mem);
+    }
+
+    teardown();
+    return ok;
+}
+
+// Texture destructor — release the owned VkImage / VkImageView /
+// VkDeviceMemory in reverse creation order. Safe when called on an
+// M0-stub texture (all handles null and `device_for_destroy` null).
+// Defined out-of-line so the body can call Vulkan loader entry points
+// without forcing the header to drag <volk.h> into every consumer.
+//
+// Fully-qualified `::psynder::gpu::VkTextureRes` because this definition
+// sits inside the `psynder::gpu::vk_be` namespace block (the rest of the
+// VulkanBackend impl). The unqualified form `VkTextureRes::~VkTextureRes`
+// would attempt to bind to `psynder::gpu::vk_be::VkTextureRes` which
+// doesn't exist.
+} // namespace vk_be
+} // namespace psynder::gpu
+
+namespace psynder::gpu {
+VkTextureRes::~VkTextureRes() {
+    if (device_for_destroy != VK_NULL_HANDLE) {
+        if (view)   vkDestroyImageView(device_for_destroy, view, nullptr);
+        if (handle) vkDestroyImage    (device_for_destroy, handle, nullptr);
+        if (mem)    vkFreeMemory      (device_for_destroy, mem, nullptr);
+    }
+    view   = VK_NULL_HANDLE;
+    handle = VK_NULL_HANDLE;
+    mem    = VK_NULL_HANDLE;
+}
+} // namespace psynder::gpu
+
+namespace psynder::gpu {
+namespace vk_be {
 
 // ─── Render-encoder API (lane09-001 unblock) ────────────────────────────
 //
