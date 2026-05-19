@@ -82,6 +82,21 @@ DemoWriter& DemoWriter::operator=(DemoWriter&& o) noexcept {
 bool DemoWriter::open(const DemoWriterConfig& cfg) noexcept {
     if (file_) return false;
     if (!cfg.path) return false;
+    // DemoWriterConfig::roster is a fixed 64-entry array.  Reject any
+    // caller that says it has more players than that — without this
+    // guard the fwrite below would read past the end of cfg.roster.
+    // The 64 == sizeof(cfg.roster)/sizeof(cfg.roster[0]) constant is
+    // pinned in PublicNet.h's DemoWriterConfig declaration; we re-state
+    // it as a static_assert via the array decay so it stays in sync.
+    static_assert(sizeof(DemoWriterConfig::roster) /
+                  sizeof(DemoWriterConfig::roster[0]) == 64u,
+                  "DemoWriterConfig::roster must remain a 64-entry array; "
+                  "update the bound check below if you change the size.");
+    if (cfg.player_count > 64u) return false;
+    // tick_hz is encoded as u8 in DemoFileHeader.  Reject any tick rate
+    // that wouldn't round-trip — callers should only pass tick_config_64
+    // / tick_config_128 / tick_config_256, all of which fit.
+    if (cfg.tick_cfg.tick_hz > 255u) return false;
 
     // "wb+" so finalise() can fread() the header back to patch end_tick.
     // "wb" is write-only and the patch path would silently fail.
@@ -160,9 +175,16 @@ bool DemoWriter::write_frame(u32                 tick,
     }
 
     // Payload: DemoFrameRecordPreamble (8 bytes) + scratch_.
+    // payload_len is a u16 on disk — refuse to silently truncate.  A
+    // frame larger than 64 KiB would corrupt the next record's offset
+    // and make the reader desync; the on-disk format would need a wider
+    // length field to fix, which is a v2 demo format change.
+    const usize payload_bytes =
+        sizeof(DemoFrameRecordPreamble) + scratch_.size();
+    if (payload_bytes > 0xFFFFu) return false;
     DemoRecordHeader rhdr{};
     rhdr.type         = static_cast<u8>(kRecordTypeFrame);
-    rhdr.payload_len  = static_cast<u16>(sizeof(DemoFrameRecordPreamble) + scratch_.size());
+    rhdr.payload_len  = static_cast<u16>(payload_bytes);
     rhdr.tick         = tick;
     DemoFrameRecordPreamble pre{};
     pre.baseline_tick = baseline_field;
@@ -193,10 +215,15 @@ bool DemoWriter::write_inputs(u32                               tick,
     if (!file_) return false;
     std::FILE* f = as_file(file_);
 
+    // input_count is a u8 on disk; refuse to silently truncate.
+    // payload_len is u16 (same caveat as write_frame).
+    if (inputs.size() > 255u) return false;
+    const usize ipayload_bytes =
+        sizeof(DemoInputPreamble) + inputs.size() * sizeof(PlayerInputEntry);
+    if (ipayload_bytes > 0xFFFFu) return false;
     DemoRecordHeader rhdr{};
     rhdr.type        = static_cast<u8>(kRecordTypeInput);
-    rhdr.payload_len = static_cast<u16>(sizeof(DemoInputPreamble)
-                                         + inputs.size() * sizeof(PlayerInputEntry));
+    rhdr.payload_len = static_cast<u16>(ipayload_bytes);
     rhdr.tick        = tick;
     DemoInputPreamble pre{};
     pre.input_count  = static_cast<u8>(inputs.size());

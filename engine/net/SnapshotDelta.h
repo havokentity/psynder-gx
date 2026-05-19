@@ -55,7 +55,15 @@ usize xor_delta_encode(std::span<const u8> baseline,
 // ──────────────────────────────────────────────────────────────────────────
 // xor_delta_decode — inverse of xor_delta_encode. Reads `delta` (the
 // RLE-compressed XOR stream), XORs against `baseline`, writes the
-// reconstructed snapshot into `out` (resized to `baseline.size()`).
+// reconstructed snapshot into `out`.
+//
+// Sizing: `out` is sized to at least `baseline.size()`.  When the encoder
+// produced a delta against a `current` snapshot LARGER than baseline (an
+// allowed size-mismatch case), the decoder grows `out` to the
+// reconstructed size — i.e. `out.size() == max(baseline.size(),
+// reconstructed_size)`.  Earlier revisions claimed strict equality but
+// the encoder's grow-the-stream-past-baseline path made that a lie;
+// Copilot's PR #10 review caught it.
 //
 // Returns true on success. Returns false if `delta` is truncated mid-run
 // (e.g. ends with a lone 0x00 with no run-length byte).

@@ -76,12 +76,16 @@ bool do_init_once() noexcept {
 #endif
 }
 
-native_sock_t to_native(int fd) noexcept {
+native_sock_t to_native(std::intptr_t fd) noexcept {
     return static_cast<native_sock_t>(fd);
 }
 
-int from_native(native_sock_t s) noexcept {
-    return static_cast<int>(s);
+std::intptr_t from_native(native_sock_t s) noexcept {
+    // Reinterpret-style cast through intptr_t.  On POSIX, native_sock_t is
+    // a non-negative int and widens cleanly.  On Windows native_sock_t is
+    // a UINT_PTR; INVALID_SOCKET (== (UINT_PTR)~0) converts to intptr_t -1
+    // by the C standard's signed/unsigned cast rules at the same bit width.
+    return static_cast<std::intptr_t>(s);
 }
 
 bool set_nonblocking(native_sock_t s) noexcept {

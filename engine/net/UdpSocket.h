@@ -29,6 +29,7 @@
 
 #include "core/Types.h"
 
+#include <cstdint>
 #include <span>
 
 namespace psynder::net {
@@ -101,14 +102,23 @@ public:
     // Returns the underlying OS socket descriptor (POSIX int / Winsock
     // SOCKET cast). Test introspection only — production code should not
     // touch this.
-    int  native_handle() const noexcept { return fd_; }
+    std::intptr_t native_handle() const noexcept { return fd_; }
 
 private:
-    // -1 means closed; both POSIX (int) and Winsock (uintptr_t cast to int)
-    // fit here because we never bind to a real-world ephemeral that high.
-    int  fd_         = -1;
-    u16  local_port_ = 0;
-    u16  reserved_   = 0;
+    // -1 means closed.  Storage MUST be pointer-sized so a Win64 SOCKET
+    // (UINT_PTR, 64-bit) round-trips without truncation — the prior
+    // `int fd_` would corrupt valid handles whose high bits were set,
+    // causing is_open()/close() to spuriously fail.  POSIX's `int`
+    // socket descriptor widens cleanly into the wider type and
+    // `fd_ >= 0` remains the correct open-sentinel check on both
+    // platforms because Winsock's INVALID_SOCKET == (UINT_PTR)~0 maps
+    // to intptr_t -1 under the documented C cast rules.
+    //
+    // Copilot's PR #10 review caught the bug.  The reserved_ slot stays
+    // to preserve struct padding for any callers that introspect layout.
+    std::intptr_t fd_         = -1;
+    u16           local_port_ = 0;
+    u16           reserved_   = 0;
 };
 
 // ──────────────────────────────────────────────────────────────────────────

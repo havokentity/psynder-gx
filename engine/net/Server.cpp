@@ -71,14 +71,12 @@ bool Server::start(const TickConfig& cfg, u16 bind_port) noexcept {
     current_tick_  = 0;
     stop_requested_.store(false);
 
-    const auto period_dur = frame_period_from_cfg(cfg);
-    frame_period_ = static_cast<u64>(period_dur.count());
-    if (frame_period_ == 0) return false;
+    frame_period_ = frame_period_from_cfg(cfg);
+    if (frame_period_ == SteadyDur::zero()) return false;
 
     if (!socket_.open(bind_port)) return false;
 
-    const SteadyPoint anchor = now() + period_dur;
-    next_deadline_ = static_cast<u64>(anchor.time_since_epoch().count());
+    next_deadline_ = now() + frame_period_;
     return true;
 }
 
@@ -92,11 +90,8 @@ u64 Server::run(u32 tick_count) noexcept {
     if (!is_running()) return 0;
     u64 executed = 0;
     for (u32 i = 0; i < tick_count; ++i) {
-        const SteadyPoint dl{SteadyDur{static_cast<i64>(next_deadline_)}};
-        high_res_sleep_until(dl, spin_lock_final_);
-        const SteadyPoint actual = now();
-        const u64 actual_count = static_cast<u64>(actual.time_since_epoch().count());
-        if (!step_one_tick_(actual_count)) break;
+        high_res_sleep_until(next_deadline_, spin_lock_final_);
+        if (!step_one_tick_(now())) break;
         ++executed;
     }
     return executed;
@@ -105,37 +100,34 @@ u64 Server::run(u32 tick_count) noexcept {
 void Server::run_until_stop() noexcept {
     if (!is_running()) return;
     while (!stop_requested_.load()) {
-        const SteadyPoint dl{SteadyDur{static_cast<i64>(next_deadline_)}};
-        high_res_sleep_until(dl, spin_lock_final_);
-        const SteadyPoint actual = now();
-        const u64 actual_count = static_cast<u64>(actual.time_since_epoch().count());
-        if (!step_one_tick_(actual_count)) break;
+        high_res_sleep_until(next_deadline_, spin_lock_final_);
+        if (!step_one_tick_(now())) break;
     }
 }
 
-bool Server::step_one_tick_(u64 deadline_now) noexcept {
-    const u64 tick_started_at = deadline_now;
+bool Server::step_one_tick_(SteadyPoint actual_start) noexcept {
     ++current_tick_;
 
     if (tick_cb_) {
         tick_cb_(current_tick_, cfg_.frame_sec);
     }
 
-    const u64 tick_ended_at =
-        static_cast<u64>(now().time_since_epoch().count());
-    const u64 tick_cost = tick_ended_at - tick_started_at;
+    const SteadyPoint tick_ended_at = now();
+    const SteadyDur   tick_cost     = tick_ended_at - actual_start;
     stats_.ticks_executed.fetch_add(1);
 
     // Schedule next deadline. If the tick overran the frame period we drop
     // the missed time on the floor and re-anchor to `ended + period`
     // rather than letting `next_deadline_ += period` race ahead of `now`.
     if (tick_cost > frame_period_) {
-        const u64 overrun = tick_cost - frame_period_;
+        const SteadyDur overrun = tick_cost - frame_period_;
+        const u64 overrun_ns = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(overrun).count());
         stats_.ticks_overran.fetch_add(1);
-        stats_.total_drift_ns.fetch_add(overrun);
+        stats_.total_drift_ns.fetch_add(overrun_ns);
         u64 prev_max = stats_.max_overrun_ns.load();
-        while (overrun > prev_max
-               && !stats_.max_overrun_ns.compare_exchange_weak(prev_max, overrun)) {
+        while (overrun_ns > prev_max
+               && !stats_.max_overrun_ns.compare_exchange_weak(prev_max, overrun_ns)) {
             // retry
         }
         next_deadline_ = tick_ended_at + frame_period_;

@@ -128,9 +128,18 @@ DemoReaderResult DemoReader::open(const char* path) noexcept {
         return DemoReaderResult::VersionMismatch;
     }
 
-    // Roster.
+    // Roster.  Seek to roster_offset rather than relying on the roster
+    // following the header byte-for-byte — the format will eventually
+    // grow header fields, and any future header that's larger than the
+    // current DemoFileHeader would slip the roster off by N bytes if
+    // we kept assuming it lives at fixed offset sizeof(DemoFileHeader).
+    // Copilot's PR #10 review caught the over-eager assumption.
     roster_.clear();
     if (header_.player_count > 0) {
+        if (std::fseek(f, static_cast<long>(header_.roster_offset), SEEK_SET) != 0) {
+            std::fclose(f);
+            return DemoReaderResult::CorruptFile;
+        }
         roster_.resize(header_.player_count);
         if (std::fread(roster_.data(), sizeof(DemoRosterEntry),
                        header_.player_count, f) != header_.player_count) {
@@ -139,7 +148,16 @@ DemoReaderResult DemoReader::open(const char* path) noexcept {
         }
     }
 
-    // Seek to first record.
+    // Validate first_record_offset lands past the end of the roster
+    // (writer-side invariant), then seek there.  An inconsistent header
+    // would otherwise stream-feed parser corruption into advance_tick().
+    const u64 expected_first_rec =
+        static_cast<u64>(header_.roster_offset)
+      + static_cast<u64>(header_.player_count) * sizeof(DemoRosterEntry);
+    if (header_.first_record_offset < expected_first_rec) {
+        std::fclose(f);
+        return DemoReaderResult::CorruptFile;
+    }
     if (std::fseek(f, static_cast<long>(header_.first_record_offset), SEEK_SET) != 0) {
         std::fclose(f);
         return DemoReaderResult::CorruptFile;
@@ -253,11 +271,29 @@ DemoReaderResult DemoReader::advance_tick(DemoTickData& out) noexcept {
         } else if (rhdr.type == kRecordTypeInput) {
             DemoInputPreamble pre{};
             if (std::fread(&pre, sizeof(pre), 1, f) != 1) return DemoReaderResult::CorruptFile;
+            // payload_len must cover the preamble + the declared entry
+            // count.  Without this check a corrupt rhdr would let
+            // pre.input_count claim more entries than fit in the
+            // recorded payload, causing the parser to read into the
+            // next record and desync the entire stream.
             const usize entries = pre.input_count;
+            const usize expected_entry_bytes =
+                sizeof(pre) + entries * sizeof(PlayerInputEntry);
+            if (rhdr.payload_len < expected_entry_bytes) {
+                return DemoReaderResult::CorruptFile;
+            }
             out.inputs.resize(entries);
             if (entries > 0
                 && std::fread(out.inputs.data(), sizeof(PlayerInputEntry), entries, f) != entries) {
                 return DemoReaderResult::CorruptFile;
+            }
+            // Skip any padding the writer added between the entries and
+            // the end of the declared payload range (forward-compat for
+            // a future writer adding more bytes per record).
+            if (const usize extra = rhdr.payload_len - expected_entry_bytes; extra != 0) {
+                if (std::fseek(f, static_cast<long>(extra), SEEK_CUR) != 0) {
+                    return DemoReaderResult::CorruptFile;
+                }
             }
         } else {
             // Skip unknown / reserved.

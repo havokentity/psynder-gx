@@ -58,43 +58,48 @@ usize xor_delta_encode(std::span<const u8> baseline,
 bool xor_delta_decode(std::span<const u8> baseline,
                       std::span<const u8> delta,
                       std::vector<u8>&    out) noexcept {
+    // Sizing — see the contract in SnapshotDelta.h: `out` is at least
+    // baseline.size(), but may grow when the encoder ran against a
+    // longer `current`.  We pre-size to baseline.size() and let
+    // `write_byte` grow on demand for the size-mismatch tail.
     const usize bn = baseline.size();
     out.assign(bn, 0u);
     usize cursor = 0;  // index into `out`
     usize i      = 0;  // index into `delta`
+
+    // Helper: read baseline[cursor] when within range, else 0 (the
+    // documented "implicit zero" for bytes past the baseline length).
+    auto baseline_at = [&](usize c) noexcept -> u8 {
+        return (c < bn) ? baseline[c] : u8{0};
+    };
+    // Helper: write a byte at `cursor`, growing `out` past `bn` when
+    // necessary.  Previously the zero-run branch computed `bn - cursor`
+    // unguarded after the literal branch had already pushed cursor past
+    // `bn`, underflowing the size and writing out of bounds — Copilot's
+    // PR #10 review caught it.
+    auto write_byte = [&](u8 b) noexcept {
+        if (cursor < out.size()) {
+            out[cursor] = b;
+        } else {
+            out.push_back(b);
+        }
+        ++cursor;
+    };
+
     while (i < delta.size()) {
         const u8 tag = delta[i++];
         if (tag == 0x00u) {
             // Zero-run escape: next byte is run_length-1.
             if (i >= delta.size()) return false;       // truncated
             const usize run = static_cast<usize>(delta[i++]) + 1u;
-            if (cursor + run > bn) {
-                // Run extends past baseline. We allow zero-extending in
-                // the encoder, so the decoder must tolerate it here.
-                // Cap to baseline size; the trailing zeros are no-ops.
-                const usize fill = bn - cursor;
-                for (usize k = 0; k < fill; ++k) out[cursor + k] = baseline[cursor + k];
-                cursor = bn;
-                // Skip any remaining run beyond bn — nothing to write.
-                continue;
-            }
+            // A zero-XOR mask means "current byte equals baseline byte
+            // at this cursor".  Past the baseline tail, baseline_at()
+            // returns 0, so the current byte is also 0.
             for (usize k = 0; k < run; ++k) {
-                out[cursor + k] = baseline[cursor + k];
+                write_byte(baseline_at(cursor));
             }
-            cursor += run;
         } else {
-            if (cursor >= bn) {
-                // Delta has extra bytes past baseline end. Either the
-                // baseline was shorter than `current` at encode time, or
-                // the wire data is corrupt. We grow `out` to absorb the
-                // tail so the round-trip property holds for the
-                // size-mismatch case.
-                out.push_back(tag);
-                ++cursor;
-            } else {
-                out[cursor] = baseline[cursor] ^ tag;
-                ++cursor;
-            }
+            write_byte(static_cast<u8>(baseline_at(cursor) ^ tag));
         }
     }
     // Any tail of `out` past `cursor` keeps its zero-init (== baseline XOR

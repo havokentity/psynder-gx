@@ -32,6 +32,7 @@
 #include "core/Types.h"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 
 namespace psynder::net {
@@ -108,16 +109,24 @@ public:
     void set_spin_lock_final_wait(bool on) noexcept { spin_lock_final_ = on; }
 
 private:
+    using SteadyClock = std::chrono::steady_clock;
+    using SteadyPoint = SteadyClock::time_point;
+    using SteadyDur   = SteadyClock::duration;
+
     // The actual tick step. Returns false if the user requested a stop
     // inside the callback (so run_until_stop sees it without re-checking).
-    bool step_one_tick_(u64 now_ticks) noexcept;
+    bool step_one_tick_(SteadyPoint actual_start) noexcept;
 
     TickConfig         cfg_{};
     UdpSocket          socket_;
     TickCallback       tick_cb_;
     u32                current_tick_   = 0;
-    u64                next_deadline_  = 0;  // platform::Clock::ticks_now units
-    u64                frame_period_   = 0;  // in platform clock ticks
+    // Native steady_clock storage — see Server.cpp for the rationale.
+    // The previous u64 round-trip via i64 was sign-bit-fragile because
+    // steady_clock's duration::rep is implementation-defined-signed.
+    // Copilot's PR #10 review caught the unsigned-cast hazard.
+    SteadyPoint        next_deadline_  = SteadyPoint{};
+    SteadyDur          frame_period_   = SteadyDur::zero();
     std::atomic<bool>  stop_requested_{false};
     bool               spin_lock_final_ = true;
     ServerStats        stats_;

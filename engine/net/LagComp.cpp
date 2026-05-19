@@ -117,6 +117,14 @@ bool LagCompContext::bracket_internal_(
     if (!newer) {
         newer = older;
     }
+    // Both bracket snapshots MUST have the same byte size or the later
+    // memcpy in rewind_world_to would read past the end of `newer` when
+    // it gets selected for the lerp fallback.  This is the invariant
+    // push_world_snapshot relies on (every push is OpaqueWorldState.size
+    // bytes), but we double-check here because a future push_internal_
+    // could regress it — Copilot's PR #10 review caught the missing
+    // assertion.
+    if (older->bytes.size() != newer->bytes.size()) return false;
     out_older_bytes = older->bytes.data();
     out_older_tick  = older->tick;
     out_newer_bytes = newer->bytes.data();
@@ -164,11 +172,15 @@ RewindResult rewind_world_to(LagCompContext&   ctx,
     // Target tick + fraction.
     const f64 target_tick_f = desired_ms / cfg.frame_ms;
     u32       target_tick   = static_cast<u32>(target_tick_f);
-    // The 16-bit sub-tick fraction lives in [0, 0xFFFF]. Combine it with
-    // the integer-tick derivation to produce the final fractional tick
-    // index used for the interp weight.
+    // The 16-bit sub-tick fraction lives in [0, 0xFFFF].  Divide by
+    // 65536.0 (NOT 0xFFFF) so the maximum encoded value 0xFFFF maps to
+    // just under 1.0 (≈ 0.99998) instead of exactly 1.0.  Earlier
+    // revisions divided by 0xFFFF, which let the max fraction land
+    // exactly on a tick boundary, push `target_tick` forward by one in
+    // the normalisation loop below, and break the clamping/bracketing
+    // contract.  Copilot's PR #10 review caught it.
     const f64 subtick_frac = static_cast<f64>(sub_tick_frac_u16)
-                             / static_cast<f64>(0xFFFFu);
+                             / 65536.0;
     f64 frac = (target_tick_f - static_cast<f64>(target_tick)) + subtick_frac;
     while (frac >= 1.0) { ++target_tick; frac -= 1.0; }
     if (frac < 0.0) frac = 0.0;
