@@ -126,6 +126,17 @@ Win32Window::Win32Window(const WindowDesc& desc)
 
     ::ShowWindow(hwnd_, SW_SHOW);
     ::UpdateWindow(hwnd_);
+
+    // Diagnostic: log the actual window style applied. If the user reports
+    // a borderless window despite passing WindowDesc{resizable=true}, the
+    // style printed here tells us whether something stripped WS_CAPTION /
+    // WS_THICKFRAME between our CreateWindowEx call and ShowWindow.
+    const LONG_PTR actual_style    = ::GetWindowLongPtrW(hwnd_, GWL_STYLE);
+    const LONG_PTR actual_ex_style = ::GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    PSY_LOG_INFO("[win32] window style=0x{:x} ex_style=0x{:x} (WS_OVERLAPPEDWINDOW=0x{:x})",
+                 static_cast<std::uint64_t>(actual_style),
+                 static_cast<std::uint64_t>(actual_ex_style),
+                 static_cast<std::uint64_t>(WS_OVERLAPPEDWINDOW));
 }
 
 Win32Window::~Win32Window() {
@@ -299,6 +310,13 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
             const u32  flags = static_cast<u32>(lparam);
             const KeyCode k  = vk_to_keycode(vk, flags);
             if (k != KeyCode::Unknown) in.on_key(k, true);
+            // Sample / demo convenience: Esc closes the window. Lane 22
+            // editor and any production game will want to override this
+            // (e.g. open a pause menu). Move to a console var or per-window
+            // hook when the input lane lands a proper rebinder.
+            if (vk == VK_ESCAPE) {
+                should_close_ = true;
+            }
             return 0;
         }
         case WM_KEYUP: case WM_SYSKEYUP: {
