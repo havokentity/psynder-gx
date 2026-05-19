@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Psynder — Win32 window implementation.
+// Psynder(-GX) — Win32 window implementation.
 //
 // The window class is registered once per process (the class name carries
 // the executable pointer so re-using the same binary works), and each
-// Win32Window owns its HWND + a Win32Present (DXGI swap chain).
+// Win32Window owns its HWND.
+//
+// In Psynder (!PSYNDER_GX) the window also owns a Win32Present (DXGI swap
+// chain + D3D11 blit). In Psynder-GX the present path is removed; present is
+// handled by psy::gpu via the HWND exposed through hwnd().
 
 #include "Win32Window.h"
 
@@ -45,7 +49,7 @@ ATOM register_window_class(HINSTANCE hinst) {
     wc.lpfnWndProc   = &Win32Window::static_wnd_proc;
     wc.hInstance     = hinst;
     wc.hCursor       = ::LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;  // we paint the whole client every present
+    wc.hbrBackground = nullptr;  // engine paints every frame
     wc.lpszClassName = kWindowClassName;
 
     s_atom = ::RegisterClassExW(&wc);
@@ -106,17 +110,28 @@ Win32Window::Win32Window(const WindowDesc& desc)
         PSY_LOG_WARN("[win32] raw-input registration failed; mouse deltas fall back to legacy WM_MOUSEMOVE");
     }
 
+#if !defined(PSYNDER_GX)
+    // Psynder CPU-renderer path: boot D3D11 DXGI blit present.
     if (!present_.init(hwnd_, desc.render_width, desc.render_height, desc.vsync)) {
         PSY_LOG_ERROR("[win32] DXGI present init failed");
-        // Window remains usable for input, just won't render.
+        // Window remains usable for input, just won't render via CPU blit.
     }
+#else
+    // Psynder-GX: present is owned by psy::gpu (Vulkan swapchain).
+    // The HWND is exposed via hwnd() and consumed by psy::gpu::create_device()
+    // → Win32VulkanSurface::create_vulkan_surface(). Nothing to init here.
+    PSY_LOG_INFO("[win32] GX build: HWND created ({:p}), Vulkan surface creation "
+                 "deferred to psy::gpu::create_device()", static_cast<void*>(hwnd_));
+#endif
 
     ::ShowWindow(hwnd_, SW_SHOW);
     ::UpdateWindow(hwnd_);
 }
 
 Win32Window::~Win32Window() {
+#if !defined(PSYNDER_GX)
     present_.shutdown();
+#endif
     if (hwnd_) {
         ::SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
         ::DestroyWindow(hwnd_);
@@ -150,15 +165,26 @@ void Win32Window::poll_events() {
         ::DispatchMessageW(&msg);
     }
 
+#if !defined(PSYNDER_GX)
     if (size_pending_) {
         present_.on_window_resize(window_w_, window_h_);
         size_pending_ = false;
     }
+#endif
 }
 
 void Win32Window::present(const render::Framebuffer& fb) {
+#if defined(PSYNDER_GX)
+    // GX build: present is driven by psy::gpu::end_frame(), not here.
+    // If this fires, the game loop is incorrectly calling the CPU-renderer
+    // path on a GX build. Suppress the unused-parameter warning.
+    (void)fb;
+    PSY_LOG_ERROR("[win32] Win32Window::present(fb) called in a GX build. "
+                  "Use psy::gpu::end_frame() instead.");
+#else
     if (!hwnd_) return;
     present_.present(fb, desc_.scale_mode, desc_.aspect_mode);
+#endif
 }
 
 void Win32Window::set_title(std::string_view title) {
@@ -167,16 +193,25 @@ void Win32Window::set_title(std::string_view title) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Raw-input
+// Raw-input registration (DESIGN §11.1: RegisterRawInputDevices)
 // ─────────────────────────────────────────────────────────────────────────
 
 bool Win32Window::register_raw_input() {
+    // Register for raw mouse input. RIDEV_NOLEGACY is intentionally NOT set —
+    // we want legacy WM_MOUSEMOVE to continue flowing so we still get the
+    // absolute cursor position for UI cursor rendering. Raw delta
+    // (on_wm_input → on_mouse_raw_delta) provides the unaccelerated
+    // high-frequency delta used by the FPS look-around.
     RAWINPUTDEVICE rid{};
     rid.usUsagePage = HID_USAGE_PAGE_GENERIC;
     rid.usUsage     = HID_USAGE_GENERIC_MOUSE;
-    rid.dwFlags     = 0;        // keep legacy WM_MOUSEMOVE for cursor position
+    rid.dwFlags     = 0;
     rid.hwndTarget  = hwnd_;
-    return ::RegisterRawInputDevices(&rid, 1, sizeof(rid)) == TRUE;
+    const BOOL ok = ::RegisterRawInputDevices(&rid, 1, sizeof(rid));
+    if (!ok) {
+        PSY_LOG_WARN("[win32] RegisterRawInputDevices failed (err={})", ::GetLastError());
+    }
+    return ok == TRUE;
 }
 
 void Win32Window::on_wm_input(LPARAM lparam) {
@@ -194,6 +229,8 @@ void Win32Window::on_wm_input(LPARAM lparam) {
     const auto* ri = reinterpret_cast<RAWINPUT*>(g_raw_buf.data());
     if (ri->header.dwType != RIM_TYPEMOUSE) return;
     const RAWMOUSE& m = ri->data.mouse;
+    // MOUSE_MOVE_ABSOLUTE is set for devices like digitizers that report
+    // absolute screen position. For a real mouse it will be zero (relative).
     if ((m.usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
         input_singleton().on_mouse_raw_delta(
             static_cast<f32>(m.lLastX), static_cast<f32>(m.lLastY));
@@ -231,8 +268,8 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
 
         case WM_PAINT: {
-            // Engine drives presents from its frame loop; here we just
-            // validate the rect so WM_PAINT doesn't keep re-queuing.
+            // Engine drives presents from its frame loop; validate the dirty
+            // rect so WM_PAINT doesn't keep re-queuing.
             PAINTSTRUCT ps{};
             ::BeginPaint(hwnd_, &ps);
             ::EndPaint(hwnd_, &ps);
@@ -244,7 +281,16 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
             window_h_ = static_cast<u32>(HIWORD(lparam));
             if (window_w_ == 0) window_w_ = 1;
             if (window_h_ == 0) window_h_ = 1;
+#if !defined(PSYNDER_GX)
+            // Psynder CPU path defers the ResizeBuffers call to poll_events().
             size_pending_ = true;
+#else
+            // Psynder-GX: resize_swapchain() is driven by psy::gpu, which
+            // must observe the new dimensions on its next begin_frame or on
+            // an explicit psynder::gpu::resize_swapchain() call. The game
+            // loop is expected to check window_width()/window_height() and
+            // call resize_swapchain() when they change.
+#endif
             return 0;
         }
 

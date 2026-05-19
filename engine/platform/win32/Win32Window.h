@@ -1,5 +1,18 @@
 // SPDX-License-Identifier: MIT
-// Psynder — Win32 Window implementation (CreateWindowEx + WndProc + DXGI present).
+// Psynder(-GX) — Win32 Window implementation (CreateWindowEx + WndProc).
+//
+// In Psynder (CPU renderer, !PSYNDER_GX):
+//   The window owns a Win32Present (D3D11 DXGI blit path) that uploads a CPU
+//   framebuffer to the swap chain each frame.
+//
+// In Psynder-GX (PSYNDER_GX defined):
+//   Presenting is owned by psy::gpu (Vulkan swapchain). Win32Window only
+//   manages the HWND + message loop + input registration. The HWND is exposed
+//   via hwnd() and passed as DeviceDesc::native_window_handle to
+//   psy::gpu::create_device(); Win32VulkanSurface wraps the actual
+//   vkCreateWin32SurfaceKHR call. Win32Present is not compiled in GX builds.
+//   present(fb) is implemented as a no-op error stub so the class remains
+//   concrete (Platform.h Window base has it as pure virtual).
 
 #pragma once
 
@@ -7,7 +20,11 @@
 
 #include "platform/Platform.h"
 #include "Win32Common.h"
+
+#if !defined(PSYNDER_GX)
+// CPU blit path — Psynder only.
 #include "Win32Present.h"
+#endif
 
 namespace psynder::platform::win32 {
 
@@ -21,14 +38,26 @@ public:
 
     // ── Public API (Platform.h Window contract) ─────────────────────────
     void poll_events() override;
-    bool should_close() const override                { return should_close_; }
-    void present(const render::Framebuffer& fb) override;
-    void set_title(std::string_view title) override;
-    u32  window_width()  const override               { return window_w_; }
-    u32  window_height() const override               { return window_h_; }
+    bool should_close() const override { return should_close_; }
 
-    // True iff the underlying HWND + DXGI surface created successfully.
+    // Present a CPU framebuffer.
+    //   Non-GX (Psynder): uploads fb to D3D11 and blits to the DXGI swap chain.
+    //   GX (Psynder-GX):  no-op stub. In GX the frame loop drives present via
+    //                     psy::gpu::end_frame(), not through this API.
+    //                     Calling this in a GX build logs an error.
+    void present(const render::Framebuffer& fb) override;
+
+    void set_title(std::string_view title) override;
+    u32  window_width()  const override { return window_w_; }
+    u32  window_height() const override { return window_h_; }
+
+    // True iff the underlying HWND created successfully.
     bool valid() const noexcept { return hwnd_ != nullptr; }
+
+    // Expose the raw HWND so psy::gpu can pass it to Win32VulkanSurface /
+    // DeviceDesc::native_window_handle. Only needed by callers that are
+    // already inside a PSYNDER_PLATFORM_WIN32 guard.
+    HWND hwnd() const noexcept { return hwnd_; }
 
 private:
     // The class-shared WndProc dispatches into Win32Window::wnd_proc().
@@ -44,17 +73,21 @@ private:
     void on_wm_input(LPARAM lparam);
 
     // ── State ───────────────────────────────────────────────────────────
-    HWND        hwnd_         = nullptr;
-    HINSTANCE   hinstance_    = nullptr;
+    HWND         hwnd_        = nullptr;
+    HINSTANCE    hinstance_   = nullptr;
     std::wstring class_name_;
 
-    WindowDesc  desc_;
-    u32         window_w_     = 0;
-    u32         window_h_     = 0;
+    WindowDesc   desc_;
+    u32          window_w_    = 0;
+    u32          window_h_    = 0;
 
-    bool        should_close_ = false;
-    bool        size_pending_ = false;
+    bool         should_close_ = false;
+
+#if !defined(PSYNDER_GX)
+    // CPU-renderer present path (Psynder only; absent in GX builds).
+    bool         size_pending_ = false;
     Win32Present present_;
+#endif
 };
 
 // Factory entry — keeps the `new`/`delete` symmetry with `destroy_window_impl`.
