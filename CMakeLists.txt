@@ -27,7 +27,21 @@ option(PSYNDER_GX_BUILD_TESTS         "Build unit / golden / netcode / bench tes
 option(PSYNDER_GX_ENABLE_TRACY        "Enable Tracy profiler integration (debug builds default)" OFF)
 option(PSYNDER_GX_ENABLE_SANITIZERS   "Enable ASan + UBSan (debug Linux/Mac only)"               OFF)
 option(PSYNDER_GX_ENABLE_AVX2         "Build x86-64 AVX2 fast-path kernels"                       ON)
-option(PSYNDER_GX_ENABLE_AVX512       "Build x86-64 AVX-512 wide-path kernels (opportunistic)"    ON)
+option(PSYNDER_GX_ENABLE_AVX512       "Build x86-64 AVX-512 wide-path kernels (opportunistic)"    OFF)
+# AVX-512 default is OFF because:
+#   1. Per-TU `-mavx512f` lets the compiler emit AVX-512 instructions
+#      anywhere in those TUs (psynder_simd, Jolt), not just inside
+#      runtime-dispatched kernels. Without AVX-512 on the host CPU the
+#      binary SIGILLs on the first auto-vectorized loop it executes.
+#   2. The CI runners (GitHub Actions ubuntu-24.04) frequently land on
+#      CPUs without AVX-512 (pre-Ice Lake Xeons).
+#   3. Per DESIGN §2.3, "AVX-512F/BW/VL used opportunistically" — but
+#      "opportunistic" means runtime-dispatched, which requires per-
+#      function target attributes (TODO: refactor lane 03-simd to use
+#      __attribute__((target("avx512f"))) on the wide kernels so the
+#      cmake-wide flag is no longer needed). Until that lands, default
+#      OFF. Override with -DPSYNDER_GX_ENABLE_AVX512=ON on a workstation
+#      with confirmed AVX-512 support.
 option(PSYNDER_GX_ENABLE_LTO          "Link-time optimization for release builds"                 ON)
 option(PSYNDER_GX_ENABLE_RT           "Enable hardware ray-tracing pipeline (RTX 20+, RDNA2+, M3+)" ON)
 option(PSYNDER_GX_ENABLE_MESH_SHADERS "Enable mesh-shader pipeline (Turing+, RDNA2+, M3+)"        ON)
