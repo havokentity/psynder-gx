@@ -122,20 +122,17 @@ TEST_CASE("net-voice: muted speakers produce silence at listener",
     speakers[1].opus_size  = sz2;
     speakers[1].world_pos[0] = -1.0f; speakers[1].world_pos[1] = 0.0f; speakers[1].world_pos[2] = 0.0f;
 
-    // Mute both speakers from listener's perspective.
-    psynder::net::voice::mute(1);
-    psynder::net::voice::mute(2);
+    // Mute both speakers per-listener (server-side flag, NOT the client
+    // global mute set — see PR #6 review on mix_for_listener).
+    speakers[0].muted_by_listener = true;
+    speakers[1].muted_by_listener = true;
 
     std::array<std::uint8_t, 4000> mixed_out{};
     const auto mixed_sz = psynder::net::voice::mix_for_listener(
-        speakers, 2, listener_pos, mixed_out.data(), 4000);
+        /*listener_slot=*/0, speakers, 2, listener_pos, mixed_out.data(), 4000);
 
     // Both muted → no audio → 0 bytes returned.
     CHECK(mixed_sz == 0);
-
-    // Unmute for subsequent tests.
-    psynder::net::voice::unmute(1);
-    psynder::net::voice::unmute(2);
 
     psynder::net::voice::shutdown_client();
 }
@@ -181,13 +178,11 @@ TEST_CASE("net-voice: equidistant unmuted speakers produce non-silent mix",
     speakers[1].opus_size    = sz2;
     speakers[1].world_pos[0] = -1.0f; speakers[1].world_pos[1] = 0.0f; speakers[1].world_pos[2] = 0.0f;
 
-    // Both unmuted.
-    psynder::net::voice::unmute(10);
-    psynder::net::voice::unmute(11);
+    // Both unmuted (default — MixSpeaker::muted_by_listener defaults to false).
 
     std::array<std::uint8_t, 4000> mixed_out{};
     const auto mixed_sz = psynder::net::voice::mix_for_listener(
-        speakers, 2, listener_pos, mixed_out.data(), 4000);
+        /*listener_slot=*/0, speakers, 2, listener_pos, mixed_out.data(), 4000);
 
     REQUIRE(mixed_sz > 0);  // got a packet
 

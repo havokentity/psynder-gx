@@ -41,13 +41,27 @@ std::uint32_t capture_frame(std::int16_t* pcm_in, std::uint32_t pcm_samples,
 // Server-side mix: takes opus packets from N speakers + the listener's
 // world position; produces one pre-mixed Opus packet for the listener.
 // O(speakers_in_range) per listener per tick.
+//
+// listener_slot — index into the preallocated per-listener Opus encoder pool
+//   created by init_server(max_listeners). Each listener gets a stream-stable
+//   encoder so Opus codec continuity (MDCT overlap, DTX, LPC history) is
+//   preserved across ticks for that listener's outbound stream. Slot ≥
+//   max_listeners falls back to a temporary encoder (unit-test path).
+//
+// muted_by_listener — per-MixSpeaker flag. The caller (server) must set this
+//   per-listener based on that listener's mute list; the server-side mix
+//   function does NOT consult the client-side `mute()` set (which is local
+//   to the running client process and has no meaning when this function is
+//   invoked from a dedicated server with many listeners).
 struct MixSpeaker {
     std::uint32_t speaker_id;
     const std::uint8_t* opus_data;
     std::uint32_t       opus_size;
     float               world_pos[3];
+    bool                muted_by_listener = false;
 };
-std::uint32_t mix_for_listener(const MixSpeaker* speakers, std::uint32_t n,
+std::uint32_t mix_for_listener(std::uint32_t listener_slot,
+                               const MixSpeaker* speakers, std::uint32_t n,
                                const float listener_pos[3],
                                std::uint8_t* mixed_out, std::uint32_t out_cap);
 

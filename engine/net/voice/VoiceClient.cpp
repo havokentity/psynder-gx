@@ -46,8 +46,11 @@ constexpr int    kChannels     = 1;        // mono capture; HRTF handles stereo
 constexpr int    kFrameSamples = 960;      // 20 ms @ 48 kHz
 constexpr int    kMaxPacket    = 4000;     // bytes — well above Opus max for 20ms
 
-// Distance rolloff (inverse-square, clamped to plateau at kNearClip).
-// 1 world unit = 1 metre (DESIGN §14). Below kNearClip gain is 1.0.
+// Distance rolloff (inverse-distance, clamped to plateau at kNearClip).
+// 1 world unit = 1 metre (DESIGN §14). Below kNearClip gain is 1/kNearClip,
+// i.e. the gain plateaus instead of rising to infinity at zero distance.
+// Inverse-distance (not inverse-square) is the standard perceptual rolloff
+// for voice — see DESIGN §10.9 and the comment at mix_for_listener step 2.
 constexpr float  kNearClip     = 0.5f;    // metres — avoids gain→∞ singularity
 
 // VAD energy gate: -50 dBFS short-term RMS gate with hysteresis.
@@ -66,8 +69,16 @@ struct VoiceState {
     bool         active   = false;
     bool         vad_open = false;    // hysteresis state for VAD gate
 
+    // Configured capture mode (PushToTalk / OpenMic / Vad). The VAD energy
+    // gate only fires when capture == Vad — PushToTalk and OpenMic emit
+    // every frame the caller hands us. Retained from VoiceDesc on init.
+    psynder::net::voice::CaptureMode capture =
+        psynder::net::voice::CaptureMode::PushToTalk;
+
     // Mute list: player IDs whose incoming voice is suppressed client-side.
     // Lane 18 (reliable channel) drives sync; lane 19 owns the local set.
+    // Used ONLY by is_muted() and the receive-side decode-to-playback path;
+    // server-side mix_for_listener uses MixSpeaker::muted_by_listener instead.
     std::unordered_set<psynder::u32> muted_players;
 };
 
@@ -136,6 +147,7 @@ void init_client(const VoiceDesc& desc) {
     }
 
     g_voice.vad_open = false;
+    g_voice.capture  = desc.capture;
     g_voice.active   = true;
 }
 
@@ -150,6 +162,7 @@ void shutdown_client() {
     }
     g_voice.muted_players.clear();
     g_voice.vad_open = false;
+    g_voice.capture  = psynder::net::voice::CaptureMode::PushToTalk;
     g_voice.active   = false;
 }
 
@@ -218,10 +231,14 @@ u32 capture_frame(std::int16_t* pcm_in, u32 pcm_samples,
     if (pcm_samples < static_cast<u32>(kFrameSamples)) return 0u;
     if (opus_out_cap < static_cast<u32>(kMaxPacket))   return 0u;
 
-    // ── VAD energy gate ──────────────────────────────────────────────────
-    // Compute energy of the int16 frame as float RMS.
-    // Scale: int16 full scale = 32768, so normalise to [-1, 1] range.
-    {
+    // ── VAD energy gate (only in CaptureMode::Vad) ────────────────────────
+    // PushToTalk and OpenMic emit every frame the caller hands us — the
+    // PTT key state (PTT) or the always-on policy (OpenMic) decides upstream
+    // whether capture_frame() is called this tick. Only Vad inspects the
+    // signal and may return 0 for quiet frames.
+    if (g_voice.capture == CaptureMode::Vad) {
+        // Compute energy of the int16 frame as float RMS.
+        // Scale: int16 full scale = 32768, so normalise to [-1, 1] range.
         double energy = 0.0;
         const double inv_scale = 1.0 / 32768.0;
         for (u32 i = 0; i < static_cast<u32>(kFrameSamples); ++i) {
@@ -268,13 +285,17 @@ u32 capture_frame(std::int16_t* pcm_in, u32 pcm_samples,
 //   3. Decode each speaker's Opus packet to float PCM (kFrameSamples).
 //      Speaker decoders are lazily created keyed by speaker_id and reused.
 //   4. Multiply decoded PCM by gain and accumulate into float mix buffer.
-//   5. After all speakers: soft-clip via tanh(x * k) / k (k = 1.5) to keep
-//      peak at ±1 without hard truncation.
+//   5. After all speakers: soft-clip via tanh(x * k) / k (k = 1.5). This
+//      preserves small signals near-linearly (the output is ≈ x while
+//      |x| << 1) and gently saturates large peaks. Note the asymptote of
+//      tanh(x*k)/k is ±1/k = ±0.667 (NOT ±1) — by design we leave 3.5 dB
+//      of headroom so the Opus encoder's own dynamics stay clean.
 //   6. Re-encode mix buffer to Opus → mixed_out.
 //
 // Returns the byte count of the output Opus packet, or 0 if no audio.
 
-u32 mix_for_listener(const MixSpeaker* speakers, u32 n,
+u32 mix_for_listener(u32 listener_slot,
+                     const MixSpeaker* speakers, u32 n,
                      const float listener_pos[3],
                      std::uint8_t* mixed_out, u32 out_cap) {
     if (!speakers || n == 0)  return 0u;
@@ -293,8 +314,12 @@ u32 mix_for_listener(const MixSpeaker* speakers, u32 n,
     for (u32 s = 0; s < n; ++s) {
         const MixSpeaker& spk = speakers[s];
 
-        // 1. Skip muted speakers.
-        if (g_voice.muted_players.count(spk.speaker_id) != 0u) continue;
+        // 1. Skip speakers the listener has muted.  The caller pre-fills
+        //    `muted_by_listener` from this listener's mute list — we do NOT
+        //    consult g_voice.muted_players here because that set is the
+        //    *local client's* mute list, which is meaningless for a server
+        //    mixing audio for many listeners (Copilot review on PR #6).
+        if (spk.muted_by_listener) continue;
         if (!spk.opus_data || spk.opus_size == 0) continue;
 
         // 2. Inverse-distance gain (metric). Plateau at kNearClip.
@@ -351,11 +376,18 @@ u32 mix_for_listener(const MixSpeaker* speakers, u32 n,
         }
     }
 
-    // 6. Re-encode to Opus. Use encoder slot 0 when server state is not active
-    // (e.g. unit tests drive mix_for_listener standalone).
+    // 6. Re-encode to Opus. Each listener owns a stream-stable encoder slot
+    // (init_server preallocates max_listeners encoders). Stream-stability
+    // preserves Opus codec state — MDCT overlap, DTX/CNG, LPC history —
+    // across ticks for that listener's outbound stream, which is essential
+    // for continuity and DTX correctness.
+    //
+    // Fallback paths: an out-of-range listener_slot, an inactive server
+    // (typical for unit tests driving mix_for_listener standalone), or a
+    // null encoder in that slot all route to a one-shot temporary encoder.
     OpusEncoder* enc = nullptr;
-    if (g_server.active && !g_server.listener_encoders.empty()) {
-        enc = g_server.listener_encoders[0];
+    if (g_server.active && listener_slot < g_server.listener_encoders.size()) {
+        enc = g_server.listener_encoders[listener_slot];
     }
 
     // Fallback: create a temporary encoder (unit-test path or unconfigured server).
