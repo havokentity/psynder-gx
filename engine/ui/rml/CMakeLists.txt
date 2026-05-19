@@ -1,13 +1,17 @@
-# SPDX-License-Identifier: MIT
-# psynder_ui_rml — Lane 17. Owns: RmlUi integration, RenderInterface impl,
-# FreeType glyphs, Lua handler binding.
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# psynder_ui_rml — Lane 21. Owns: RmlUi integration, RenderInterface impl,
+# FreeType glyph atlas (CPU raster → GPU texture), Lua handler binding.
+#
+# GX Wave-B: switched from psynder_render_raster to psynder_gpu +
+# psynder_shader — the RenderInterface now routes through the GPU.
 
 # ─── Build the lane static library via the project helper ────────────────
 psynder_add_lane(ui_rml
     LINKS
         psynder_core
         psynder_math
-        psynder_render_raster
+        psynder_gpu
+        psynder_shader
         psynder_asset
 )
 # psynder_script is intentionally not linked: lane 15 ships only a public

@@ -1,18 +1,23 @@
-// SPDX-License-Identifier: MIT
-// Psynder — internal 5x7 bitmap font for label() / button() / graph axis
-// labels. Lane 16 (immediate-mode UI).
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// A 6x8 cell (5 wide glyph + 1px gutter; 7 tall glyph + 1px gutter) keeps
-// the per-glyph blit branch-free. The character set is ASCII 0x20..0x7E.
-// Glyphs are hand-encoded from the dmonte VGA palette but rebuilt from
-// scratch so this file is freshly authored Psynder code.
+// engine/ui/imm/detail/Font.h
+//
+// Lane 21 — 5×7 bitmap font for the immediate-mode overlay.
+//
+// GX change from Psynder Wave-A: glyph rendering now pushes 1×1 quads into
+// GpuBatch instead of writing pixels into a CPU framebuffer.
+// render/Framebuffer.h is NOT included here.
+//
+// The glyph data is unchanged — same ASCII 0x20..0x7E coverage, same
+// 6×8 cell size.  FreeType-backed atlas rendering for player HUDs is in
+// the rml/ lane; this bitmap font is for developer overlays only.
 
 #pragma once
 
+#include "GpuBatch.h"
 #include "Pixel.h"
 
 #include "core/Types.h"
-#include "render/Framebuffer.h"
 
 #include <cstring>
 #include <string_view>
@@ -24,16 +29,8 @@ inline constexpr u32 kGlyphHeight  = 7;
 inline constexpr u32 kCellWidth    = kGlyphWidth  + 1;
 inline constexpr u32 kCellHeight   = kGlyphHeight + 1;
 
-// Bit-packed glyphs, MSB-first per row (5 bits → bit4 is leftmost).
-//
-// Layout matches the SmolFont convention: g_font[c - 0x20] is an array
-// of 7 bytes; each byte's low 5 bits are one row of the glyph. Glyphs are
-// only filled in for the ASCII subset we care about (uppercase, digits,
-// punctuation, common symbols, lowercase). Unknown characters render as a
-// hollow box so the absence is visible.
 struct Glyph { u8 rows[kGlyphHeight]; };
 
-// Encoded with the high bit unset so they stay in the 0..31 range.
 inline constexpr Glyph kFont[96] = {
     /* 0x20 ' ' */ {{0,0,0,0,0,0,0}},
     /* 0x21 '!' */ {{0x04,0x04,0x04,0x04,0x00,0x04,0x00}},
@@ -139,34 +136,28 @@ inline const Glyph& glyph_for(char ch) noexcept {
     return kFont[u - 0x20];
 }
 
-inline void draw_glyph(render::Framebuffer& fb,
-                       i32 x,
-                       i32 y,
-                       char ch,
-                       u32 colour) noexcept {
+// Push a single glyph as 1×1 pixel quads into the batch.
+inline void draw_glyph(i32 x, i32 y, char ch, u32 colour) noexcept {
     const Glyph& g = glyph_for(ch);
     for (u32 row = 0; row < kGlyphHeight; ++row) {
         const u8 bits = g.rows[row];
         if (bits == 0U) continue;
-        const i32 py = y + static_cast<i32>(row);
+        const f32 py = static_cast<f32>(y + static_cast<i32>(row));
         for (u32 col = 0; col < kGlyphWidth; ++col) {
             const u8 mask = static_cast<u8>(1U << (kGlyphWidth - 1U - col));
             if (bits & mask) {
-                plot(fb, x + static_cast<i32>(col), py, colour);
+                const f32 px = static_cast<f32>(x + static_cast<i32>(col));
+                batch().push_quad(px, py, px + 1.0f, py + 1.0f, colour);
             }
         }
     }
 }
 
 // Draws a string left-to-right; returns the advance width in pixels.
-inline u32 draw_text(render::Framebuffer& fb,
-                     i32 x,
-                     i32 y,
-                     std::string_view text,
-                     u32 colour) noexcept {
+inline u32 draw_text(i32 x, i32 y, std::string_view text, u32 colour) noexcept {
     i32 pen = x;
     for (char c : text) {
-        draw_glyph(fb, pen, y, c, colour);
+        draw_glyph(pen, y, c, colour);
         pen += static_cast<i32>(kCellWidth);
     }
     return static_cast<u32>(pen - x);

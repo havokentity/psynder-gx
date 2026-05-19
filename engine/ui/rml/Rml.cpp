@@ -1,30 +1,21 @@
-// SPDX-License-Identifier: MIT
-// Psynder — RmlUi binding entry points. Lane 17 owns.
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Implements the frozen public surface in `Rml.h`:
+// engine/ui/rml/Rml.cpp
 //
-//   initialize / shutdown
-//   load_document(virtual_path, name)
-//   show(name) / hide(name)
-//   render(target)
-//   update(dt)
+// Lane 21 — RmlUi binding entry points.
 //
-// Today the implementation drives an in-tree RML/RCSS subset parser +
-// layout pass + rasterizer submitter (see Rml_internal.h, Parser.cpp,
-// Layout.cpp, RenderInterface.cpp).  Flipping the CMake option
-// `PSYNDER_VENDOR_RMLUI=ON` swaps the backend to upstream RmlUi via
-// FetchContent + FreeType while keeping this exact public API.
+// GX Wave-B refactor: render() path no longer takes a CPU framebuffer.
+// It routes through submit_boxes_to_gpu() (RenderInterface.cpp) which
+// uploads vertex data and emits a CmdBuffer drawcall.
 //
-// Hot reload: every successful load_document registers a VFS watch on
-// both the .rml and the .rcss virtual paths; update() reparses any
-// document whose generation counter advanced between frames.
+// Removed: #include "render/Framebuffer.h"
 
 #include "Rml.h"
 #include "Rml_internal.h"
 
 #include "asset/Vfs.h"
 #include "core/Log.h"
-#include "render/Framebuffer.h"
+#include "gpu/PublicGpu.h"
 
 #include <algorithm>
 #include <cstring>
@@ -37,8 +28,11 @@
 namespace psynder::ui::rml::detail {
 
 // Defined in RenderInterface.cpp
-void submit_boxes_to_rasterizer(const std::vector<LayoutBox>& boxes,
-                                render::Framebuffer&          target);
+void submit_boxes_to_gpu(const std::vector<LayoutBox>& boxes,
+                         psynder::gpu::CmdBuffer*      cmd,
+                         psynder::gpu::Device*         dev,
+                         f32 viewport_width,
+                         f32 viewport_height);
 
 // register_lua_surface + dispatch_handler are declared in Rml_internal.h
 // and implemented in LuaBinding.cpp.
@@ -226,19 +220,22 @@ void update(f32 /*dt*/) {
     }
 }
 
-void render(render::Framebuffer& target) {
+void render(psynder::gpu::CmdBuffer* cmd,
+            psynder::gpu::Device*    dev,
+            f32 viewport_width,
+            f32 viewport_height) {
     auto& s = state();
     if (!s.initialized) return;
-    if (target.width == 0 || target.height == 0) return;
+    if (viewport_width <= 0.0f || viewport_height <= 0.0f) return;
+    if (!cmd || !dev) return;
 
-    const math::Vec2 viewport{ static_cast<f32>(target.width),
-                               static_cast<f32>(target.height) };
+    const math::Vec2 viewport{ viewport_width, viewport_height };
 
     for (const auto& [name, doc] : s.documents) {
         if (!doc.visible) continue;
         auto& boxes = s.layout_cache[name];
         detail::layout(doc, viewport, boxes);
-        detail::submit_boxes_to_rasterizer(boxes, target);
+        detail::submit_boxes_to_gpu(boxes, cmd, dev, viewport_width, viewport_height);
     }
 }
 
