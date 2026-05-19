@@ -317,15 +317,15 @@ void walk_visible_leaves(const BspMap& map,
 void build_face_draws(const BspGeometry&        geom,
                       std::span<const BspFace>  faces,
                       const BspMaterialResolve& resolve,
-                      std::vector<render::raster::DrawItem>& out) {
+                      std::vector<BspMeshSet>&  out) {
     out.reserve(out.size() + faces.size());
     for (const BspFace& f : faces) {
         if (f.vertex_count == 0) continue;
-        render::raster::DrawItem di{};
-        di.vertices     = (f.first_vertex < geom.vertices.size())
+        BspMeshSet ms{};
+        ms.vertices     = (f.first_vertex < geom.vertices.size())
                             ? &geom.vertices[f.first_vertex]
                             : nullptr;
-        di.vertex_count = f.vertex_count;
+        ms.vertex_count = f.vertex_count;
         // BSP convention: each face is an n-gon already fan-triangulated by
         // lm_qbsp into `vertex_count - 2` triangles. The index buffer for a
         // single face is therefore (vertex_count - 2) * 3 indices long; we
@@ -334,18 +334,16 @@ void build_face_draws(const BspGeometry&        geom,
         const u32 tri_indices = (f.vertex_count >= 3)
                                   ? (f.vertex_count - 2) * 3
                                   : 0;
-        di.indices      = (f.first_vertex < geom.indices.size())
+        ms.indices      = (f.first_vertex < geom.indices.size())
                             ? &geom.indices[f.first_vertex]
                             : nullptr;
-        di.index_count  = tri_indices;
-        di.model        = math::identity4();
-        if (resolve.table != nullptr && f.material < resolve.count) {
-            di.material = resolve.table[f.material];
-        } else {
-            di.material = render::raster::MaterialId{ f.material };
-        }
-        di.flags = 0;
-        out.push_back(di);
+        ms.index_count  = tri_indices;
+        ms.model        = math::identity4();
+        ms.material_id  = (resolve.table != nullptr && f.material < resolve.count)
+                            ? resolve.table[f.material]
+                            : f.material;
+        ms.flags = 0;
+        out.push_back(ms);
     }
 }
 
@@ -353,7 +351,7 @@ void build_leaf_draws(const BspMap&             map,
                       const BspGeometry&        geom,
                       const BspLeaf&            leaf,
                       const BspMaterialResolve& resolve,
-                      std::vector<render::raster::DrawItem>& out) {
+                      std::vector<BspMeshSet>&  out) {
     if (leaf.face_count == 0 || leaf.first_face >= map.faces.size()) {
         return;
     }
