@@ -10,25 +10,29 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Bootstrap-phase CI flags. The vendored Psynder test suite tested CPU
-# rasterizer + CPU raytracer APIs that don't exist in GX. Tests are
-# disabled across the matrix until the test suite is rebuilt against the
-# GX public-header contracts (M1+ follow-up). Editor builds are also
-# skipped because the editor pulls Node/pnpm and adds CI minutes without
-# proving anything for the engine libs themselves at M0 — re-enabled when
-# lane 22 lands a real React build pipeline.
+# Bootstrap-phase CI flags. Editor builds are skipped because the editor
+# pulls Node/pnpm and adds CI minutes without proving anything for the
+# engine libs at M0 — re-enabled when lane 22 lands a real React build
+# pipeline. Tests are now ON for macOS (Metal) and Linux Vulkan; the
+# Linux Dedicated and Windows jobs leave tests OFF (no GPU/display on
+# the dedicated runner; Windows CTest infra not fully wired yet).
 env:
-  PSY_CMAKE_FLAGS: >-
-    -DPSYNDER_GX_BUILD_TESTS=OFF
+  # Shared across all jobs — tools and editor off everywhere.
+  PSY_CMAKE_FLAGS_BASE: >-
     -DPSYNDER_GX_BUILD_TOOLS=OFF
     -DPSYNDER_GX_EDITOR=OFF
-    -DPSYNDER_GX_BUILD_SAMPLES=ON
 
 jobs:
   mac:
     name: macOS · Metal · arm64
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      PSY_CMAKE_FLAGS: >-
+        -DPSYNDER_GX_BUILD_TOOLS=OFF
+        -DPSYNDER_GX_EDITOR=OFF
+        -DPSYNDER_GX_BUILD_SAMPLES=ON
+        -DPSYNDER_GX_BUILD_TESTS=ON
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,6 +43,8 @@ jobs:
         run: cmake --preset mac-release $PSY_CMAKE_FLAGS
       - name: Build
         run: cmake --build --preset mac-release
+      - name: Unit tests
+        run: ctest --preset mac-release --output-on-failure
       - name: Smoke (animated clear color)
         run: |
           LOCK=/tmp/psynder_gx_smoke.lockdir
@@ -54,7 +60,13 @@ jobs:
   linux:
     name: Linux · Vulkan · x86_64
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      PSY_CMAKE_FLAGS: >-
+        -DPSYNDER_GX_BUILD_TOOLS=OFF
+        -DPSYNDER_GX_EDITOR=OFF
+        -DPSYNDER_GX_BUILD_SAMPLES=ON
+        -DPSYNDER_GX_BUILD_TESTS=ON
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,6 +90,9 @@ jobs:
         run: cmake --preset linux-release $PSY_CMAKE_FLAGS
       - name: Build
         run: cmake --build --preset linux-release
+      - name: Unit tests (headless)
+        # gpu_smoke skips gracefully when no display/Vulkan loader available.
+        run: ctest --preset linux-release --output-on-failure
 
   linux-dedicated:
     name: Linux · Dedicated Server · headless
@@ -93,7 +108,8 @@ jobs:
           sudo apt-get install -y clang-17 ninja-build pkg-config
       - name: Configure
         # Dedicated-server preset strips graphics + audio + editor; samples
-        # are pointless headless, so disable here too.
+        # are pointless headless, so disable here too. Tests stay OFF
+        # because there is no GPU/display on the dedicated runner.
         run: >-
           cmake --preset linux-dedicated-release
           -DPSYNDER_GX_BUILD_TESTS=OFF
@@ -106,6 +122,14 @@ jobs:
     name: Windows · Vulkan · x86_64
     runs-on: windows-2022
     timeout-minutes: 40
+    env:
+      # Tests OFF for now — Windows runner is slow and CTest infra not
+      # fully wired for the platform yet. Re-enable post-M1.
+      PSY_CMAKE_FLAGS: >-
+        -DPSYNDER_GX_BUILD_TOOLS=OFF
+        -DPSYNDER_GX_EDITOR=OFF
+        -DPSYNDER_GX_BUILD_SAMPLES=ON
+        -DPSYNDER_GX_BUILD_TESTS=OFF
     steps:
       - uses: actions/checkout@v4
         with:
