@@ -1,14 +1,61 @@
 // SPDX-License-Identifier: MIT
-// Psynder — Vm (Lua 5.4) public surface. Per DESIGN.md §10.5, the VM runs
+// Psynder-GX — Vm (Lua 5.4) public surface. Per DESIGN.md §10.5, the VM runs
 // on a dedicated game thread; engine workers never enter Lua. All public
 // entry points assume single-thread access.
+//
+// ─── Untested vendored code audit (Wave B, 2026-05-19) ───────────────────
+// The script module was vendored from Psynder, which is BUILDS-ONLY (no
+// runtime verification). The following areas have NOT been tested and may
+// harbour correctness bugs:
+//
+// 1. COROUTINE HANDLING
+//    LuaState opens `luaopen_coroutine`. Lua 5.4 coroutines are cooperative
+//    and must yield via lua_yield() with a continuation; if a system callback
+//    registered via world:register_system() calls coroutine.yield(), Lua
+//    expects a C continuation set up via lua_callk()/lua_pcallk(). Our
+//    run_registered_systems() uses lua_pcall() (no 'k'), so a yield from
+//    inside a system callback will trigger LUA_ERRERR with "attempt to yield
+//    from outside a coroutine". NOT TESTED; not a supported use case in Wave A
+//    but Lua-side user code can trigger it accidentally.
+//
+// 2. FFI / LOADLIB
+//    `package` (luaopen_package) is loaded. On macOS/Linux this opens the
+//    dynamic loader path, meaning user Lua code can call `require` on a shared
+//    library. This was NOT scrubbed in the safe-stdlib setup. For a game
+//    engine the `package.loadlib` escape hatch is a security concern; scrubbing
+//    `package.loadlib` and `package.cpath` is deferred but not done.
+//
+// 3. GARBAGE COLLECTOR PACING
+//    No explicit GC step budget is set. In Lua 5.4 the incremental GC is on
+//    by default. Under heavy scripted entity creation (world:create_entity in
+//    a tight loop) the GC may pause for >1ms inside lua_pcall(). The engine
+//    expects the script VM budget to be bounded; a `lua_gc(L, LUA_GCSTEP, N)`
+//    call with a per-frame step budget is NOT implemented.
+//
+// 4. REGISTRY MEMORY LAYOUT ON lua_close()
+//    ScriptRegistry::release_refs() is called before lua_close() in
+//    Vm::shutdown(). However if a Lua-side error inside a system callback
+//    causes execute_repl() or run_systems() to return early, fn_ref entries
+//    for the remaining (not-yet-run) systems stay on the Lua registry. Those
+//    are cleaned up correctly at shutdown via release_refs(). NOT TESTED for
+//    re-entry — i.e. calling start() → shutdown() → start() in the same
+//    process, which reuses the static VmImpl.
+//
+// 5. EXECUTE_FILE / VFS INTEGRATION
+//    execute_file() currently uses luaL_loadfile() (host filesystem). When
+//    lane 05 ships psynder::asset::read_text(), this will need to swap to a
+//    VFS load. The placeholder comment in execute_file() tracks this; the
+//    implementation has NOT been exercised in any integration context.
+// ─────────────────────────────────────────────────────────────────────────
 
 #include "Script.h"
+#include "ScriptGx.h"
 
 #include "core/Log.h"
 #include "internal/LuaState.h"
 #include "internal/Registry.h"
 #include "internal/Bindings.h"
+#include "internal/GxCvars.h"
 
 #include <mutex>
 #include <string>
@@ -91,6 +138,7 @@ bool Vm::start() {
         return false;
     }
     detail::install_world_api(impl.lua.handle(), &impl.registry);
+    detail::install_gx_cvars(impl.lua.handle());
     impl.started = true;
     PSY_LOG_INFO("script: Vm started (Lua {}.{})", LUA_VERSION_MAJOR,
                  LUA_VERSION_MINOR);
@@ -102,6 +150,7 @@ void Vm::shutdown() {
     if (!impl.started) {
         return;
     }
+    detail::uninstall_gx_cvars();
     impl.registry.release_refs(impl.lua.handle());
     impl.lua.close();
     impl.started = false;
@@ -212,6 +261,14 @@ bool Vm::execute_repl(std::string_view line, std::string& out) {
         lua_pop(L, n_results);
     }
     return true;
+}
+
+// ─── GX extension: repl_eval ─────────────────────────────────────────────
+
+std::string repl_eval(std::string_view line) {
+    std::string out;
+    Vm::Get().execute_repl(line, out);
+    return out;
 }
 
 }  // namespace psynder::script
