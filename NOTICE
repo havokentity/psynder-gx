@@ -1,0 +1,77 @@
+Psynder-GX
+Copyright (c) 2026 havokentity
+
+This product is licensed under MIT OR Apache-2.0 (your choice).
+See LICENSE-MIT and LICENSE-APACHE for the canonical text.
+
+────────────────────────────────────────────────────────────────────────
+Vendored dependencies + sister-project code:
+────────────────────────────────────────────────────────────────────────
+
+engine/core/, engine/math/, engine/simd/, engine/jobs/, engine/scene/,
+engine/asset/, engine/audio/, engine/physics/ (initial scaffold),
+engine/net/, engine/script/, engine/ui/, engine/editor/,
+engine/platform/, engine/world/, cmake/, scripts/
+  Vendored from sibling project Psynder
+    https://github.com/havokentity/psynder
+    License: MIT
+    Copyright (c) 2026 havokentity
+
+third_party/pathtracer-refs/
+  Reference snapshots from the dmonte PathTracer project
+    https://github.com/havokentity/demont-engine
+    License: MIT
+    Copyright (c) 2026 havokentity
+
+third_party/jolt/
+  Jolt Physics
+    https://github.com/jrouwe/JoltPhysics
+    License: MIT
+    Copyright (c) 2021 Jorrit Rouwe
+
+third_party/opus/
+  Opus audio codec (voice chat)
+    https://opus-codec.org/
+    License: BSD-3-Clause + RFC IPR
+    Copyright (c) 2001-present Xiph.Org Foundation, et al.
+
+third_party/freetype/
+  FreeType font rasterization
+    https://freetype.org/
+    License: FTL or GPL-2.0 (we use FTL)
+    Copyright (c) 1996-present The FreeType Project
+
+third_party/rmlui/
+  RmlUi HTML/CSS UI library
+    https://github.com/mikke89/RmlUi
+    License: MIT
+    Copyright (c) 2008-2014 CodePoint Ltd, Shift Technology Ltd; 2019-present The RmlUi Team
+
+third_party/slang/
+  Slang shader language + compiler
+    https://github.com/shader-slang/slang
+    License: MIT-ish (see project LICENSE)
+    Copyright (c) NVIDIA and contributors
+
+third_party/vulkan-headers/, third_party/volk/
+  Vulkan loader + headers
+    Khronos / Sascha Willems
+    License: Apache-2.0 / MIT
+
+third_party/metal-cpp/
+  Apple Metal C++ bindings
+    https://developer.apple.com/metal/cpp/
+    License: Apache-2.0
+    Copyright (c) Apple Inc.
+
+────────────────────────────────────────────────────────────────────────
+Vendor SDKs integrated as thin wrappers (separate licenses, not bundled):
+────────────────────────────────────────────────────────────────────────
+
+NVIDIA DLSS SDK (separate license, present only when SDK installed locally)
+AMD FSR (MIT)
+Intel XeSS (separate license)
+Apple MetalFX (Apple SDK, macOS only)
+
+For the canonical list of versions used per release, see
+docs/third-party-versions.md.

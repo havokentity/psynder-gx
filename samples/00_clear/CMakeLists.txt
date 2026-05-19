@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# sample_00_clear — M0 deliverable.
+# Opens a window, presents an animated clear color via psy::gpu::Device.
+# Acceptance: runs on Win/Linux Vulkan + macOS native Metal from one binary.
+
+add_executable(sample_00_clear main.cpp)
+target_link_libraries(sample_00_clear PRIVATE
+    psynder_common
+    psynder_core
+    psynder_math
+)
+
+# On macOS, the actual Metal-layer + window creation happens in lane 25
+# (engine/platform/macos/). On Win/Linux, lane 23/24 hook the Vulkan
+# surface. The platform aggregator (engine/platform/CMakeLists.txt) wires
+# the right one in.
+if(TARGET psynder_platform)
+    target_link_libraries(sample_00_clear PRIVATE psynder_platform)
+endif()
+if(TARGET psynder_gpu)
+    target_link_libraries(sample_00_clear PRIVATE psynder_gpu)
+endif()

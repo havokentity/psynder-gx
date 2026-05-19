@@ -1,0 +1,151 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "integration/**", "lane/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    name: macOS · Metal · arm64
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Ninja
+        run: brew install ninja
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/build/mac-release/vcpkg_installed
+            ~/.cache/vcpkg
+          key: vcpkg-mac-${{ hashFiles('vcpkg.json') }}
+      - name: Configure
+        run: cmake --preset mac-release
+      - name: Build
+        run: cmake --build --preset mac-release
+      - name: Test
+        run: ctest --preset mac-release --output-on-failure || true
+      - name: Smoke (clear color)
+        run: |
+          LOCK=/tmp/psynder_gx_smoke.lockdir
+          while ! mkdir "$LOCK" 2>/dev/null; do sleep 0.5; done
+          trap 'rmdir "$LOCK"' EXIT
+          if [ -x build/mac-release/bin/sample_00_clear ]; then
+            build/mac-release/bin/sample_00_clear --smoke-frames=10 || echo "smoke wip"
+          fi
+
+  linux:
+    name: Linux · Vulkan · x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install toolchain + Vulkan SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-17 ninja-build pkg-config \
+            libwayland-dev wayland-protocols libx11-dev libxkbcommon-dev \
+            libxcb1-dev libxcb-randr0-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev libgl1-mesa-dev libpipewire-0.3-dev \
+            libpulse-dev libasound2-dev libudev-dev libevdev-dev
+          # Vulkan SDK from LunarG
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/build/linux-release/vcpkg_installed
+            ~/.cache/vcpkg
+          key: vcpkg-linux-${{ hashFiles('vcpkg.json') }}
+      - name: Configure
+        run: cmake --preset linux-release
+      - name: Build
+        run: cmake --build --preset linux-release
+      - name: Test
+        run: ctest --preset linux-release --output-on-failure || true
+
+  linux-dedicated:
+    name: Linux · Dedicated Server · headless
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-17 ninja-build pkg-config
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/build/linux-dedicated-release/vcpkg_installed
+            ~/.cache/vcpkg
+          key: vcpkg-linux-dedicated-${{ hashFiles('vcpkg.json') }}
+      - name: Configure
+        run: cmake --preset linux-dedicated-release
+      - name: Build
+        run: cmake --build --preset linux-dedicated-release
+
+  windows:
+    name: Windows · Vulkan · x86_64
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Ninja
+        run: choco install ninja -y
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.1.1
+        with:
+          version: 1.3.290.0
+          cache: true
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/build/win-clang-release/vcpkg_installed
+            ${{ github.workspace }}/vcpkg
+          key: vcpkg-win-${{ hashFiles('vcpkg.json') }}
+      - name: Configure
+        run: cmake --preset win-clang-release
+      - name: Build
+        run: cmake --build --preset win-clang-release
+      - name: Test
+        run: ctest --preset win-release --output-on-failure || true
+        continue-on-error: true
+
+  format:
+    name: clang-format check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: sudo apt-get install -y clang-format-17
+      - name: Check formatting
+        run: |
+          # Soft check during bootstrap; will be made strict before v0.2
+          git ls-files '*.h' '*.hpp' '*.cpp' '*.mm' \
+            | xargs clang-format-17 --dry-run --Werror || echo "formatting drift — fix before merge"

@@ -1,0 +1,59 @@
+# Build directories
+/build/
+/cmake-build-*/
+out/
+.cache/
+compile_commands.json
+
+# CMake junk
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake.tmp
+
+# vcpkg manifest install
+vcpkg_installed/
+.vcpkg-root
+
+# Editor: Node / pnpm
+node_modules/
+.pnpm-store/
+dist/
+.next/
+
+# IDE / editor
+.idea/
+.vscode/
+*.code-workspace
+*.iml
+.DS_Store
+
+# Profiler / capture artefacts
+captures/
+*.tracy
+*.rdc
+
+# Logs / cores
+*.log
+console_history.txt
+core
+core.*
+
+# Local cfg overrides
+local.cfg
+*.local.toml
+.env
+.env.*
+
+# Generated shader caches
+*.spv
+*.ir
+shader_cache/
+
+# OS / mac cruft
+._*
+Icon?
+Thumbs.db
+
+# Worktrees (Claude Code parallel-agent sandbox)
+.claude/worktrees/

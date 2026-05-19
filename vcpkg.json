@@ -1,0 +1,42 @@
+{
+  "name": "psynder-gx",
+  "version-string": "0.1.0",
+  "description": "GPU-accelerated competitive FPS engine — Vulkan + native Metal, C++23",
+  "license": "MIT OR Apache-2.0",
+  "dependencies": [
+    "fmt",
+    "zstd",
+    "lua",
+    "freetype",
+    "vulkan-headers",
+    "vulkan-loader",
+    "vulkan-memory-allocator",
+    "volk",
+    "spirv-cross",
+    "spirv-headers",
+    "glslang",
+    "shaderc",
+    "tinygltf",
+    "stb",
+    "meshoptimizer",
+    "ktx"
+  ],
+  "features": {
+    "tracy": {
+      "description": "Tracy profiler integration",
+      "dependencies": ["tracy"]
+    },
+    "tests": {
+      "description": "Unit tests + bench harness",
+      "dependencies": ["catch2"]
+    },
+    "tools": {
+      "description": "Offline tools (lm_cook_gx, lm_bake_gx)",
+      "dependencies": ["embree"]
+    },
+    "rmlui": {
+      "description": "RmlUi HTML/CSS subset for player HUDs",
+      "dependencies": ["rmlui"]
+    }
+  }
+}
