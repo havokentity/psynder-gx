@@ -792,28 +792,25 @@ PSY_FORCEINLINE i32x8 broadcast_i32x8(psynder::i32 s) noexcept {
 // f32x16 is always defined (both native and fallback branches) so generic
 // templates / tests compile everywhere; callers must gate on dispatch tier.
 
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__)) && !defined(_MSC_VER)
-// ── Native x86-64 wide path (Clang/GCC only) ─────────────────────────────
-// __m512 is not defined unless the TU is compiled with -mavx512f — but we
-// deliberately do NOT add that flag here.  The type is available via
-// <immintrin.h> when the __attribute__((target)) fires.  We therefore use an
-// opaque 64-byte aligned storage in the header and expose __m512 only inside
-// Simd_avx512.cpp (which includes this header after defining the attribute).
-// The real f32x16 storage struct is defined in Simd_avx512.cpp's local scope;
-// the public type below is the composed fallback — Simd_avx512.cpp provides
-// the fast non-inline implementations that shadow the inline fallbacks.
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__)) && !defined(_MSC_VER) && defined(PSYNDER_AVX512_ENABLED)
+// ── Native x86-64 wide path (Clang/GCC only, AVX-512 build-enabled) ──────
+// f32x16 keeps a two-AVX2-halves struct in the header (NOT an opaque
+// 64-byte buffer) because __m512 cannot be spelled at file scope without a
+// TU-wide -mavx512f flag, which we deliberately avoid. Simd_avx512.cpp
+// composes __m512 inside each target-attributed function body from the
+// `.lo.v` / `.hi.v` __m256 members — that is why this branch requires AVX2
+// (PSYNDER_ENABLE_AVX2 → __AVX__ → f32x8 has a `.v` member). The CMake
+// option guard in engine/simd/CMakeLists.txt enforces the AVX2 prerequisite.
 //
-// Concretely: the struct stays as two-halves everywhere (safe on all CPUs).
-// The AVX-512 TU overrides the batched functions with wider implementations
-// that the linker will prefer when the translation unit is linked in.
+// The kernels below are out-of-line declarations only; Simd_avx512.cpp
+// provides the definitions, each carrying
+// __attribute__((target("avx512f,avx512bw,avx512vl"))) so AVX-512
+// instructions are emitted ONLY inside those function bodies.
 // Dispatch.cpp gates all calls to the wide-16 path on Tier::Avx512.
 struct f32x16 {
     f32x8 lo, hi;
 };
 
-// Declarations for the AVX-512 wide kernels defined in Simd_avx512.cpp.
-// Each definition carries __attribute__((target("avx512f,avx512bw,avx512vl")))
-// so AVX-512 instructions are emitted ONLY inside those function bodies.
 f32x16       add16(f32x16 a, f32x16 b) noexcept;
 f32x16       sub16(f32x16 a, f32x16 b) noexcept;
 f32x16       mul16(f32x16 a, f32x16 b) noexcept;

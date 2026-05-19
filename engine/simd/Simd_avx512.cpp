@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Psynder — AVX-512 wide-path kernel implementations. Lane 03 owns.
 //
-// Each function is decorated with __attribute__((target("avx512f,avx512bw,vl")))
+// Each function is decorated with __attribute__((target("avx512f,avx512bw,avx512vl")))
 // so the compiler emits AVX-512 instructions ONLY inside these function bodies.
 // The rest of psynder_simd compiles at the x86-64 baseline (SSE4.2) or the
 // AVX2 fast path — no TU-wide -mavx512f flag is used. This is the fix for the
@@ -15,8 +15,12 @@
 //
 // Runtime gate: callers must check psynder::simd::current_tier() == Tier::Avx512
 // (or rely on Dispatch.cpp's batched entry points) before invoking these.
+//
+// Build gate: PSYNDER_AVX512_ENABLED is set by the CMake option
+// PSYNDER_ENABLE_AVX512. When OFF, this TU collapses to nothing and the
+// composed fallback in Simd_internal.h is used everywhere.
 
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__)) && !defined(_MSC_VER)
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__)) && !defined(_MSC_VER) && defined(PSYNDER_AVX512_ENABLED)
 
 #include "Simd_internal.h"
 

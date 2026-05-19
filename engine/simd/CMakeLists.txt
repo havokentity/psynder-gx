@@ -35,6 +35,20 @@ if(PSYNDER_ARCH_X64 AND NOT MSVC)
     # unlocks the intrinsics locally. PSYNDER_ENABLE_AVX512 is kept as a
     # CMake option so downstream consumers can query whether the wide path
     # was requested, but it no longer adds a compiler flag.
+    #
+    # Dependency: AVX-512 requires AVX2 because Simd_avx512.cpp uses
+    # `f32x8::v` (the __m256 native layout) directly to compose / split
+    # __m512 values. With AVX2 disabled, `__AVX__` is undefined and `f32x8`
+    # falls back to a two-__m128-halves struct that does NOT have a `.v`
+    # member, so Simd_avx512.cpp would fail to compile. Refuse the combo
+    # outright rather than silently producing a broken build.
+    if(PSYNDER_ENABLE_AVX512 AND NOT PSYNDER_ENABLE_AVX2)
+        message(FATAL_ERROR
+            "PSYNDER_ENABLE_AVX512=ON requires PSYNDER_ENABLE_AVX2=ON — "
+            "the AVX-512 wide path composes __m512 from two __m256 halves "
+            "exposed via f32x8::v, which only exists when __AVX__ is defined. "
+            "Either also enable AVX2, or disable AVX-512.")
+    endif()
     if(PSYNDER_ENABLE_AVX512)
         target_compile_definitions(psynder_simd PUBLIC PSYNDER_AVX512_ENABLED)
     endif()
