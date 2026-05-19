@@ -188,6 +188,7 @@ if(NOT PSYNDER_GX_DEDICATED_SERVER)
 endif()
 
 add_subdirectory(engine/world)
+add_subdirectory(engine/worldstate)
 add_subdirectory(engine/physics)
 
 if(NOT PSYNDER_GX_DEDICATED_SERVER)
