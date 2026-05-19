@@ -21,6 +21,7 @@ if(NOT PSYNDER_GX_DEDICATED_SERVER)
         LinuxWayland.cpp
         LinuxX11.cpp
         LinuxEvdev.cpp
+        LinuxAudio.cpp
     )
 endif()
 
@@ -123,6 +124,41 @@ if(PSYNDER_PLATFORM_LINUX)
             target_link_libraries(psynder_platform_linux PUBLIC
                 ${XKBCOMMON_LIBRARIES}
             )
+        endif()
+
+        # ── Audio device enumeration (lane 14 plumbing) ──────────────────────
+        # Priority: PipeWire > PulseAudio > ALSA stub.
+        # apt: libpipewire-0.3-dev  |  libpulse-dev  (both are in the apt list)
+        pkg_check_modules(PIPEWIRE libpipewire-0.3)
+        pkg_check_modules(PULSE    libpulse)
+
+        if(PIPEWIRE_FOUND)
+            target_include_directories(psynder_platform_linux PRIVATE
+                ${PIPEWIRE_INCLUDE_DIRS}
+            )
+            target_link_libraries(psynder_platform_linux PUBLIC
+                ${PIPEWIRE_LIBRARIES}
+            )
+            target_compile_definitions(psynder_platform_linux PRIVATE
+                PSYNDER_LINUX_AUDIO_PIPEWIRE=1
+            )
+            message(STATUS "[platform-linux] Audio backend: PipeWire (${PIPEWIRE_VERSION})")
+        elseif(PULSE_FOUND)
+            target_include_directories(psynder_platform_linux PRIVATE
+                ${PULSE_INCLUDE_DIRS}
+            )
+            target_link_libraries(psynder_platform_linux PUBLIC
+                ${PULSE_LIBRARIES}
+            )
+            target_compile_definitions(psynder_platform_linux PRIVATE
+                PSYNDER_LINUX_AUDIO_PULSE=1
+            )
+            message(STATUS "[platform-linux] Audio backend: PulseAudio (${PULSE_VERSION})")
+        else()
+            target_compile_definitions(psynder_platform_linux PRIVATE
+                PSYNDER_LINUX_AUDIO_ALSA_STUB=1
+            )
+            message(STATUS "[platform-linux] Audio backend: ALSA stub (no PipeWire/PulseAudio found)")
         endif()
 
         # ── Vulkan (surface extensions) ────────────────────────────────────
