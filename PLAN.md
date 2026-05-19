@@ -20,6 +20,12 @@
 - **Acceptance criteria are milestone-gated** per `DESIGN-PSYNDER-GX.md` §13. M0 (animated clear color on all 3 OSes from one binary) is the immediate target. M1 (textured triangle), M2 (PBR sphere) follow.
 - **Out of scope for the "few days" sprint:** RT shadows (M5), netcode (M6), vehicles + destruction (M7), voice + AoI (M8), 1.0 polish (M9). These get **public-header stubs + module skeletons** in Wave B so M5+ can fill them in later.
 
+### Plan revisions (post-bootstrap, 2026-05-19)
+
+- **Sister-project trust level (user clarification):** Psynder is software-rendered AND CURRENTLY UNTESTED. Vendored Psynder code BUILDS but its runtime correctness has not been verified. Treat vendored Psynder modules as starting points for adaptation, not as canonical truth. Lane agents must add their own smoke / unit tests where lane-relevant rather than assume Psynder's behavior is correct.
+- **Separate `psy-*` shared-module repos (user clarification):** OK as a follow-up. The DESIGN §5.4 separate-repo architecture remains the long-term aim. For this build sprint, the monorepo approach stays; refactoring to separate repos is a post-M0 task that can be done once the lane public-header contracts have settled.
+- **Wave A execution pivot:** The first 8 parallel spawn hit the API rate limit immediately (the user's daily quota); the foundation lanes were instead integrated by the orchestrator directly on `main`. Wave A delivered: 3 GX cooker public-header contracts (TextureCookerGx / MeshletCookerGx / ShaderCookerGx) + GxStubs.cpp + raymarcher-deferred-removal note. The 6 vendor-only foundation lanes (core, math, simd, jobs, scene, world-bsp) were validated by the Phase 0 build check; no further work needed. Wave B will fire agents after the API rate limit resets, in smaller batches to avoid re-tripping the limit.
+
 ---
 
 ## 1. Honest scope: what "a few days" actually buys

@@ -1,6 +1,17 @@
-// SPDX-License-Identifier: MIT
-// Psynder — outdoor heightmap world. Two backends (CDLOD mesh + heightmap
-// raymarch) per ADR-008. Lane 11 owns.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Psynder-GX — outdoor heightmap world.
+//
+// **Psynder-GX deviation (ADR-GX-008):** the `HeightmapRaymarch` backend
+// below is DEPRECATED for Psynder-GX. GX is GPU-driven; CDLOD-mesh
+// rasterized through psy::render::pipeline is the only outdoor path.
+// The raymarcher code is retained in this lane for Wave-0 compat only,
+// to keep the vendored Psynder layer linkable. Lane 13 in a follow-up
+// pass removes the raymarcher; lane 09 (render-pipeline) never wires
+// `HeightmapRaymarch` into the GPU draw stream.
+//
+// Notes carried from sister Psynder: two backends (CDLOD mesh + heightmap
+// raymarch) per ADR-008 in the Psynder design. Lane 13 owns this dir in
+// Psynder-GX (lane 11 in Psynder).
 
 #pragma once
 
