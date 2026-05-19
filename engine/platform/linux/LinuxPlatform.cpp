@@ -174,8 +174,11 @@ public:
     }
 
     // Surface accessors for lane 07 (gpu) to call create_vulkan_surface_wayland.
-    wl_display* wayland_display() const { return handle_ ? handle_->display  : nullptr; }
-    wl_surface* wayland_surface() const { return handle_ ? handle_->surface  : nullptr; }
+    // Fully-qualify with `::` so name lookup picks the global C types from
+    // wayland-client.h, not any forward decl that might end up shadowing
+    // them in the psynder::platform namespace.
+    ::wl_display* wayland_display() const { return handle_ ? handle_->display  : nullptr; }
+    ::wl_surface* wayland_surface() const { return handle_ ? handle_->surface  : nullptr; }
 
 private:
     linux_platform::WaylandWindowHandle* handle_;
