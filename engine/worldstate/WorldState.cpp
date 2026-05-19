@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <vector>
 
 namespace psynder::worldstate {
 
@@ -73,8 +74,11 @@ PSY_FORCEINLINE void lerp_one(const EntityRecord& a,
     out->vel_y = a.vel_y + (b.vel_y - a.vel_y) * t;
     out->vel_z = a.vel_z + (b.vel_z - a.vel_z) * t;
     // Bitfield flags don't lerp; snap to the nearer endpoint, ties → `a` so
-    // the result stays deterministic across re-runs.
-    out->flags = (t < 0.5f) ? a.flags : b.flags;
+    // the result stays deterministic across re-runs.  Use `t <= 0.5f` so
+    // exact ties pick `a` per the header contract — the previous strict-`<`
+    // form picked `b` on tie, which contradicted the documented rule
+    // (Copilot PR #14 review).
+    out->flags = (t <= 0.5f) ? a.flags : b.flags;
 }
 
 }  // namespace
@@ -82,10 +86,17 @@ PSY_FORCEINLINE void lerp_one(const EntityRecord& a,
 // ──────────────────────────────────────────────────────────────────────────
 void write_world_state(std::span<const EntityRecord> in,
                        std::span<u8>                 out) noexcept {
+    // Asserts catch contract violations in debug; runtime guards prevent
+    // out-of-bounds memcpy in release.  `assert` compiles out in release —
+    // before adding the explicit early-return, a caller that passed a
+    // wrong-sized `out` would have written past the end of the buffer
+    // (Copilot PR #14 review).
     assert(in.size() <= kMaxEntities &&
            "world-state entity_count exceeds kMaxEntities");
     assert(out.size() == compute_world_state_bytes(in.size()) &&
            "write_world_state out buffer wrong size");
+    if (in.size() > kMaxEntities)                                 return;
+    if (out.size() != compute_world_state_bytes(in.size()))       return;
 
     WorldStateHeader hdr{};
     hdr.magic        = kWorldStateMagic;
@@ -140,31 +151,51 @@ bool interpolate_world_state(std::span<const u8> a,
     // deliberate per the public-header contract.
     const f32 ct = std::clamp(t, 0.0f, 1.0f);
 
-    // Always copy the header from `a` first; lerp only touches the records.
-    // Doing this before the loop means an early exit (n == 0) still produces
-    // a valid output buffer.
-    std::memcpy(out.data(), a.data(), sizeof(WorldStateHeader));
-
     const usize n = na;
-    if (n == 0) return true;
 
-    const auto* a_recs = reinterpret_cast<const EntityRecord*>(
-        a.data() + sizeof(WorldStateHeader));
-    const auto* b_recs = reinterpret_cast<const EntityRecord*>(
-        b.data() + sizeof(WorldStateHeader));
-    auto* out_recs = reinterpret_cast<EntityRecord*>(
-        out.data() + sizeof(WorldStateHeader));
+    // Read records into local aligned storage via memcpy — the input spans
+    // are not guaranteed to be 4-byte-aligned (a caller may slice a UDP
+    // packet at an arbitrary offset), and a reinterpret_cast<EntityRecord*>
+    // on misaligned bytes is UB on strict-align architectures (Copilot PR
+    // #14 review).  EntityRecord is 40 bytes × kMaxEntities (4096) =
+    // 160 KiB worst case, which is fine on the stack at our 64-player
+    // budget; heap-allocate above kMaxEntities — but we already reject
+    // those in read_world_state_header above, so the static vector sizing
+    // suffices.  Use std::vector to keep the buffer off the stack and
+    // satisfy worst-case sizing without a constexpr cap.
+    std::vector<EntityRecord> a_recs(n);
+    std::vector<EntityRecord> b_recs(n);
+    if (n != 0) {
+        std::memcpy(a_recs.data(),
+                    a.data() + sizeof(WorldStateHeader),
+                    n * sizeof(EntityRecord));
+        std::memcpy(b_recs.data(),
+                    b.data() + sizeof(WorldStateHeader),
+                    n * sizeof(EntityRecord));
+    }
 
     // First pass — validate that every entity in `a` has a partner in `b`
-    // with matching archetype. We do this up front (not inline with the
-    // lerp) so a mismatch produces `out` undisturbed past the header rather
-    // than a partially-lerped buffer that the caller might mistake for
-    // success.
+    // with matching archetype.  Do this BEFORE writing anything to `out` so
+    // the LagCompAdapter promise ("out_bytes undisturbed on failure") is
+    // honoured even for the n==0 trivial-success path (Copilot PR #14
+    // review).  Previously the header was written before the validation
+    // pass; on a mismatch `out` was left with a valid header but no
+    // records, which lane 18 callers could mistake for success.
     for (usize i = 0; i < n; ++i) {
-        if (!find_match(b_recs, n, a_recs[i].entity_id, a_recs[i].archetype_hash)) {
+        if (!find_match(b_recs.data(), n,
+                        a_recs[i].entity_id, a_recs[i].archetype_hash)) {
             return false;
         }
     }
+
+    // Validation passed — now commit the header to `out`.
+    std::memcpy(out.data(), a.data(), sizeof(WorldStateHeader));
+    if (n == 0) return true;
+
+    // Records are blended into a contiguous staging vector then memcpy'd
+    // back to `out` — this matches the input-side memcpy and stays
+    // unaligned-safe.
+    std::vector<EntityRecord> out_recs(n);
 
     // Per-entity lerp. The body has no shared state, so the parallel path
     // is a straight parallel_for; no atomics, no barriers, no false sharing
@@ -174,7 +205,7 @@ bool interpolate_world_state(std::span<const u8> a,
             const EntityRecord& ai = a_recs[i];
             // Re-find in `b` — records-out-of-order is allowed per contract.
             const EntityRecord* bi = find_match(
-                b_recs, n, ai.entity_id, ai.archetype_hash);
+                b_recs.data(), n, ai.entity_id, ai.archetype_hash);
             // find_match cannot fail here: the validation loop above proved
             // every entity has a partner. Defensive null-check anyway —
             // costs one predictable branch per entity and prevents a UB
@@ -192,6 +223,11 @@ bool interpolate_world_state(std::span<const u8> a,
         const usize grain = std::max<usize>(1, kParallelEntityThreshold / 2);
         psynder::jobs::JobSystem::Get().parallel_for(0, n, grain, body);
     }
+
+    // Commit the blended records to `out` via memcpy (unaligned-safe).
+    std::memcpy(out.data() + sizeof(WorldStateHeader),
+                out_recs.data(),
+                n * sizeof(EntityRecord));
     return true;
 }
 

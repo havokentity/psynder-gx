@@ -26,11 +26,15 @@ namespace psynder::worldstate {
 // Sized for lane 18's OpaqueWorldState.size field (std::size_t bytes).
 //
 // Returns true on success and writes `out_size` bytes of interpolated state
-// into `out_bytes`. Returns false (and leaves `out_bytes` undisturbed) on:
+// into `out_bytes`.  Returns false on:
 //   * mismatched buffer sizes between `a_bytes`, `b_bytes`, `out_bytes`
 //   * either input failing header validation
 //   * entity layouts that don't match (id or archetype mismatch)
-// Lane 18 should fall back to its nearest-bracket pick on false.
+//
+// On false, `out_bytes` is left UNDISTURBED — the header write is deferred
+// until after all validation passes, so a failed call can be retried with
+// a different b/t without first wiping `out`.  Lane 18 should fall back to
+// its nearest-bracket pick on false.
 inline bool lerp_for_lagcomp(const void* a_bytes, std::size_t a_size,
                              const void* b_bytes, std::size_t b_size,
                              float       t,

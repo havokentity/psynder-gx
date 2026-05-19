@@ -89,7 +89,10 @@ static_assert(sizeof(WorldStateHeader) == 16,
 //     yaw-aligned. (Aim ray is reconstructed separately from the shot packet.)
 //   * Velocity is m/s in world space.
 //   * `flags` is a free 32 bits for the game layer (alive bit, ducking bit,
-//     etc.); the lerp passes it through unchanged from snapshot `a`.
+//     etc.).  Bitfields don't lerp — the interpolator snaps to whichever
+//     side of the bracket `t` is closer to, with exact ties (t == 0.5)
+//     resolving to `a` for determinism.  See the `interpolate_world_state`
+//     contract below for the precise rule.
 // ──────────────────────────────────────────────────────────────────────────
 struct EntityRecord {
     u32 entity_id;        //  0..4
@@ -171,15 +174,17 @@ bool read_world_state_header(std::span<const u8> bytes,
 //   * `t` is clamped to [0, 1] internally; callers may pass values outside
 //     this range without corrupting `out`, but the result is the clamped lerp.
 //
-// On any contract violation returns false and `out` is left in an undefined
-// state (the producer is expected to discard).
+// On any contract violation returns false and `out` is left UNDISTURBED —
+// the header write is deferred until after the validation pass succeeds,
+// so a failing call doesn't poison the destination buffer.  Callers may
+// retry with a different `b` / `t` without first re-clearing `out`.
 //
 // Lerp rules:
 //   * pos.x / pos.y / pos.z, yaw_y, vel.x / vel.y / vel.z — linear lerp.
 //   * entity_id and archetype_hash are copied from `a` (must match `b`).
 //   * flags is copied from whichever side of the bracket `t` is closer to
-//     (snap, not blend, because bitfields don't lerp). At t == 0.5 we take
-//     from `a` to keep the result deterministic.
+//     (snap, not blend, because bitfields don't lerp).  At t == 0.5 we
+//     take from `a` to keep the result deterministic (`(t <= 0.5f) ? a : b`).
 //
 // Threading: serial below `kParallelEntityThreshold`; otherwise dispatched
 // through `psynder::jobs::JobSystem::parallel_for`. Each entity is independent
