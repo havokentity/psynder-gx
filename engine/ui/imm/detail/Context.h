@@ -1,20 +1,31 @@
-// SPDX-License-Identifier: MIT
-// Psynder — immediate-mode UI per-frame context. Lane 16.
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// The IMM lives in a single global context (DESIGN.md §10.6 explicitly
-// keeps the surface "small"). The context tracks: the active framebuffer
-// for the frame, pointer input state, the active+hot widget IDs, and a
-// short ring of perf samples used by `graph()`.
+// engine/ui/imm/detail/Context.h
+//
+// Lane 21 — immediate-mode UI per-frame context.
+//
+// The IMM lives in a single global context (DESIGN §10.6).  The context
+// tracks: the active GPU CmdBuffer + viewport dimensions for the frame,
+// pointer input state, the active+hot widget IDs, and a short ring of perf
+// samples used by `graph()`.
 //
 // The context is exposed via internal headers; the public `Imm.h` surface
-// hides it behind free-function wrappers. The test suite includes this
+// hides it behind free-function wrappers.  The test suite includes this
 // header directly to drive button hit-tests without engine boot.
+//
+// GX change from Psynder Wave-A: `target` was `render::Framebuffer*`;
+// it is now `gpu::CmdBuffer*` + viewport float dimensions.  Drawing
+// primitives no longer write pixels directly — they push geometry into
+// `GpuBatch` (see GpuBatch.h) which is flushed once at end_frame().
 
 #pragma once
 
+#include "GpuBatch.h"
+
 #include "core/Types.h"
 #include "math/Math.h"
-#include "render/Framebuffer.h"
+#include "gpu/PublicGpu.h"
+#include "shader/PublicShader.h"
 
 #include <array>
 #include <cstdint>
@@ -33,20 +44,23 @@ struct InputState {
     constexpr bool just_released() const noexcept { return !mouse_down && mouse_down_prev; }
 };
 
-// Bag of state the imm context carries across the frame. Per DESIGN.md
-// §3.4 no shared_ptr / no per-frame new-delete — this is a plain POD held
-// as a function-local static.
+// Bag of state the imm context carries across the frame.  Per DESIGN §3.4
+// no shared_ptr / no per-frame new-delete — this is a plain POD held as a
+// function-local static.
 struct Context {
-    render::Framebuffer* target = nullptr;
-    InputState           input{};
+    // Viewport width / height in pixels. Set by begin_frame.
+    f32 vp_width  = 0.0f;
+    f32 vp_height = 0.0f;
 
-    // Hot = under the cursor, active = pressed/dragging. Identifiers are
-    // fingerprinted from widget position + label. We keep them as u64 for
-    // headroom in case Lane 18 adds nested panels later.
+    InputState input{};
+
+    // Hot = under the cursor, active = pressed/dragging.  Identifiers are
+    // fingerprinted from widget position + label.  We keep them as u64 for
+    // headroom in case Lane 22 adds nested panels later.
     u64 hot_id    = 0;
     u64 active_id = 0;
 
-    // Ring buffer for the perf graph. Filled in by `graph()`.
+    // Ring buffer for the perf graph. Filled by `graph()`.
     std::array<f32, kPerfGraphSamples> perf_samples{};
     u32                                 perf_head    = 0;
     u32                                 perf_count   = 0;
@@ -60,9 +74,7 @@ inline Context& context() noexcept {
 }
 
 // Cheap FNV-1a-ish fingerprint of position + label, stable across frames
-// so the hot/active tracking works correctly. We don't need cryptographic
-// strength — only collision avoidance among the handful of overlay
-// widgets a frame ever draws.
+// so the hot/active tracking works correctly.
 inline u64 widget_id(math::Vec2 pos,
                      math::Vec2 size,
                      const char* label,
@@ -72,7 +84,6 @@ inline u64 widget_id(math::Vec2 pos,
     u64 h = kFnvOffset;
     auto mix_f32 = [&h](f32 v) {
         std::uint32_t bits = 0;
-        // Bit-cast without UB — memcpy is the std-blessed channel.
         std::memcpy(&bits, &v, sizeof(bits));
         for (int byte = 0; byte < 4; ++byte) {
             h ^= (bits >> (byte * 8)) & 0xFFu;
@@ -87,7 +98,6 @@ inline u64 widget_id(math::Vec2 pos,
         h ^= static_cast<u8>(label[i]);
         h *= kFnvPrime;
     }
-    // Force a non-zero result so 0 stays sentinel for "no widget".
     return h == 0 ? 1ULL : h;
 }
 

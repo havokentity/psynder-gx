@@ -1,8 +1,13 @@
-// SPDX-License-Identifier: MIT
-// Psynder — internal widget logic + hit-test helpers. Lane 16.
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Pure functions; no global state lives here. The button() public API
-// drives these via the Context singleton.
+// engine/ui/imm/detail/Widgets.h
+//
+// Lane 21 — internal widget logic + hit-test helpers.
+//
+// GX change from Psynder Wave-A: the `render::Framebuffer& fb` parameter
+// has been removed from all draw helpers — drawing now goes through the
+// GpuBatch.  `draw_button` no longer takes a framebuffer argument.
+// render/Framebuffer.h is NOT included here.
 
 #pragma once
 
@@ -13,17 +18,11 @@
 
 #include "core/Types.h"
 #include "math/Math.h"
-#include "render/Framebuffer.h"
 
 #include <string_view>
 
 namespace psynder::ui::imm::detail {
 
-// Axis-aligned rectangle hit-test. `pos` is the top-left corner; `size`
-// must be positive. Edges are inclusive on the min side and exclusive on
-// the max side — matches the half-open convention `filled_rect()` uses
-// when it rasterizes the rect, so a click on the rightmost pixel still
-// lands inside the visible region.
 inline bool hit_test(math::Vec2 pos,
                      math::Vec2 size,
                      math::Vec2 point) noexcept {
@@ -32,9 +31,6 @@ inline bool hit_test(math::Vec2 pos,
            point.y >= pos.y && point.y < pos.y + size.y;
 }
 
-// Default colour palette (matches DESIGN.md's debug-overlay convention —
-// dark slate panels with cyan accents). Channel order = RRGGBBAA per
-// Pixel.h documentation.
 struct Theme {
     u32 button_normal  = rgba(0x28, 0x2C, 0x34);
     u32 button_hot     = rgba(0x3E, 0x44, 0x4E);
@@ -57,10 +53,6 @@ inline const Theme& theme() noexcept {
     return t;
 }
 
-// Returns true on "this frame, the user just released the mouse inside
-// the button" — same trigger semantics Dear ImGui uses. Mutates the
-// context's hot/active IDs so a chain of buttons gives consistent input
-// routing (only one can be hot or active at a time).
 inline bool button_logic(Context& ctx,
                          math::Vec2 pos,
                          math::Vec2 size,
@@ -81,7 +73,6 @@ inline bool button_logic(Context& ctx,
     return triggered;
 }
 
-// Pick the right fill colour for the current widget state.
 inline u32 button_fill_colour(const Context& ctx, u64 id) noexcept {
     const Theme& th = theme();
     if (ctx.active_id == id) return th.button_active;
@@ -89,16 +80,13 @@ inline u32 button_fill_colour(const Context& ctx, u64 id) noexcept {
     return th.button_normal;
 }
 
-// Render a button skin into the framebuffer at `pos` with `size`. The
-// label is centred vertically; horizontally it's left-padded so common
-// short labels stay readable when widgets are stacked tightly.
-inline void draw_button(render::Framebuffer& fb,
-                        math::Vec2 pos,
+// Draw a button skin into the batch (no framebuffer param).
+inline void draw_button(math::Vec2 pos,
                         math::Vec2 size,
                         std::string_view label,
                         u32 fill_colour) noexcept {
-    filled_rect(fb, pos, size, fill_colour);
-    rect_outline(fb, pos, size, theme().button_border);
+    filled_rect(pos, size, fill_colour);
+    rect_outline(pos, size, theme().button_border);
     if (!label.empty()) {
         const i32 text_w = static_cast<i32>(text_width(label));
         const i32 text_h = static_cast<i32>(kGlyphHeight);
@@ -106,7 +94,7 @@ inline void draw_button(render::Framebuffer& fb,
                      + (static_cast<i32>(size.x) - text_w) / 2;
         const i32 ty = static_cast<i32>(pos.y)
                      + (static_cast<i32>(size.y) - text_h) / 2;
-        draw_text(fb, tx, ty, label, theme().label_text);
+        draw_text(tx, ty, label, theme().label_text);
     }
 }
 
