@@ -63,7 +63,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-17 ninja-build pkg-config \
-            libwayland-dev wayland-protocols libx11-dev libxkbcommon-dev \
+            libwayland-dev libwayland-bin wayland-protocols \
+            libx11-dev libxkbcommon-dev \
             libxcb1-dev libxcb-randr0-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxi-dev libgl1-mesa-dev libpipewire-0.3-dev \
             libpulse-dev libasound2-dev libudev-dev libevdev-dev \

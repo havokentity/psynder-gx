@@ -134,7 +134,7 @@ public:
             auto delta = linux_platform::evdev_poll_mouse(evdev_);
             mouse_.dx += delta.dx;
             mouse_.dy += delta.dy;
-            mouse_.scroll_v += delta.scroll_v;
+            mouse_.wheel += delta.wheel;
         }
     }
 
@@ -195,7 +195,7 @@ public:
             auto delta = linux_platform::evdev_poll_mouse(evdev_);
             mouse_.dx += delta.dx;
             mouse_.dy += delta.dy;
-            mouse_.scroll_v += delta.scroll_v;
+            mouse_.wheel += delta.wheel;
         }
     }
 
@@ -257,7 +257,7 @@ public:
     void sync_mouse_from_delta(const linux_platform::RawMouseDelta& d) {
         mouse_.dx += d.dx;
         mouse_.dy += d.dy;
-        mouse_.scroll_v += d.scroll_v;
+        mouse_.wheel += d.wheel;
     }
 
 private:

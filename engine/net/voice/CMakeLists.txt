@@ -19,6 +19,16 @@ set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 
+# Opus's CMake auto-enables x86 SSE/SSSE3/SSE4.1 source files on x86 but
+# doesn't pass the corresponding `-msse4.1` / `-mssse3` flags to clang-cl
+# on Windows — the SSE intrinsics then fail "_mm_shuffle_epi8 requires
+# target feature ssse3, but compiled without support for ssse3". The C
+# reference path is identical bit-for-bit (Opus is deterministic by
+# spec), so we disable intrinsics across the matrix until we either
+# upstream a fix or per-TU-pin the features. Voice is M8 work; the
+# perf hit on encode/decode here is irrelevant until then.
+set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)
+
 FetchContent_MakeAvailable(opus)
 
 # ─── Lane target ─────────────────────────────────────────────────────────

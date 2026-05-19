@@ -60,18 +60,39 @@ if(PSYNDER_PLATFORM_LINUX)
         )
 
         # xdg-shell generated protocol header.
-        # The build system (root CMakeLists) should run wayland-scanner and
-        # place the generated header + C source in
-        # ${CMAKE_BINARY_DIR}/generated/xdg-shell/.
-        # We add the generated include dir here; if the directory is missing,
-        # the build will fail with a clear missing-header error rather than a
-        # silent wrong-code compile.
-        #
-        # NEEDS PC VALIDATION: confirm wayland-scanner target exists in root
-        # CMakeLists or add a find_program(WAYLAND_SCANNER) here.
+        # Real header comes from wayland-scanner running over xdg-shell.xml
+        # shipped in wayland-protocols. Without this, the hand-written stub
+        # in this dir is incomplete and linking fails.
+        find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
+        pkg_get_variable(WL_PROTO_DIR wayland-protocols pkgdatadir)
+        set(_xdg_xml      "${WL_PROTO_DIR}/stable/xdg-shell/xdg-shell.xml")
+        set(_xdg_gen_dir  "${CMAKE_CURRENT_BINARY_DIR}/generated/xdg-shell")
+        set(_xdg_header   "${_xdg_gen_dir}/xdg-shell-client-protocol.h")
+        set(_xdg_csource  "${_xdg_gen_dir}/xdg-shell-protocol.c")
+        file(MAKE_DIRECTORY "${_xdg_gen_dir}")
+        add_custom_command(
+            OUTPUT  "${_xdg_header}"
+            COMMAND "${WAYLAND_SCANNER}" client-header "${_xdg_xml}" "${_xdg_header}"
+            DEPENDS "${_xdg_xml}"
+            COMMENT "[platform-linux] wayland-scanner → xdg-shell-client-protocol.h"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT  "${_xdg_csource}"
+            COMMAND "${WAYLAND_SCANNER}" private-code  "${_xdg_xml}" "${_xdg_csource}"
+            DEPENDS "${_xdg_xml}"
+            COMMENT "[platform-linux] wayland-scanner → xdg-shell-protocol.c"
+            VERBATIM
+        )
+        target_sources(psynder_platform_linux PRIVATE
+            "${_xdg_header}"
+            "${_xdg_csource}"
+        )
+        # Generated header dir comes FIRST so the real header shadows the
+        # in-tree stub at engine/platform/linux/xdg-shell-client-protocol.h.
         target_include_directories(psynder_platform_linux PRIVATE
-            ${CMAKE_BINARY_DIR}/generated/xdg-shell
-            ${CMAKE_CURRENT_SOURCE_DIR}  # fallback: hand-placed header
+            "${_xdg_gen_dir}"
+            ${CMAKE_CURRENT_SOURCE_DIR}
         )
 
         # ── XCB (X11 fallback) ────────────────────────────────────────────
