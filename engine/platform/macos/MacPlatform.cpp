@@ -21,6 +21,7 @@
 
 #include "platform/Platform.h"
 #include "platform/macos/PublicPlatformMacos.h"
+#include "platform/macos/MacosPlatform_internal.h"
 
 #include <atomic>
 #include <cstdint>
@@ -71,8 +72,18 @@ private:
 
 class MacInput final : public Input {
 public:
-    bool key_down(KeyCode) const override    { return false; }   // TODO: NSEvent keyboard glue
-    bool key_pressed(KeyCode) const override { return false; }
+    bool key_down(KeyCode k) const override {
+        const auto idx = static_cast<std::size_t>(k);
+        const auto& ks = macos::keyboard_state();
+        if (idx == 0 || idx >= macos::kKeyCount) return false;
+        return ks.down[idx];
+    }
+    bool key_pressed(KeyCode k) const override {
+        const auto idx = static_cast<std::size_t>(k);
+        const auto& ks = macos::keyboard_state();
+        if (idx == 0 || idx >= macos::kKeyCount) return false;
+        return ks.pressed[idx];
+    }
     const MouseState& mouse() const override {
         // Fold IOKit raw mouse into the legacy MouseState. Each call to
         // mouse_delta_raw() snapshots-and-resets, so we accumulate into

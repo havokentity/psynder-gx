@@ -92,7 +92,16 @@ void request_close(Window*);
 // main thread before invoking lane 07's begin_frame. Resets the per-frame
 // raw-mouse delta accumulator (so the value returned by mouse_delta_raw
 // always covers the interval between consecutive pump_events calls).
+// Also clears the per-frame edge-triggered key-pressed state and records
+// new keyboard transitions into the keyboard state (see key_down/key_pressed).
 void pump_events();
+
+// Register a window to receive Esc-key close signals. When Escape is pressed
+// during pump_events, request_close(w) is called on the registered window.
+// run_loop() sets this automatically; call it directly when driving the event
+// loop manually. Pass nullptr to disarm. Returns the previously registered
+// window (for save/restore in nested run loops).
+Window* set_esc_close_target(Window* w);
 
 // Convenience wrapper: pump_events + invoke `frame()` until the window
 // reports should_close. Most samples call this. `frame_user` is forwarded

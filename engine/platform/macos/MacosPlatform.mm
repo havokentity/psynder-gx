@@ -35,6 +35,7 @@
 #import <IOKit/hid/IOHIDKeys.h>
 
 #include "MacosPlatform_internal.h"
+#include "MacosKeyMap.h"
 
 #include <algorithm>
 #include <atomic>
@@ -52,6 +53,29 @@ namespace psynder::platform::macos {
 RawMouseState& raw_mouse_state() {
     static RawMouseState s;
     return s;
+}
+
+// ─── Keyboard state (main-thread-only) ──────────────────────────────────
+static KeyboardState g_keyboard_state;
+
+const KeyboardState& keyboard_state() {
+    return g_keyboard_state;
+}
+
+void keyboard_begin_frame() {
+    // Clear the edge-triggered pressed[] array so only transitions THIS
+    // frame come through. Called at the top of pump_events().
+    __builtin_memset(g_keyboard_state.pressed, 0, sizeof(g_keyboard_state.pressed));
+}
+
+void keyboard_event(psynder::platform::KeyCode key, bool is_down) {
+    const auto idx = static_cast<std::size_t>(key);
+    if (idx == 0 || idx >= kKeyCount) return;  // Unknown or out-of-range
+    if (is_down && !g_keyboard_state.down[idx]) {
+        // 0→1 transition: set edge-triggered pressed flag.
+        g_keyboard_state.pressed[idx] = true;
+    }
+    g_keyboard_state.down[idx] = is_down;
 }
 
 // ─── NSApp lazy bootstrap ───────────────────────────────────────────────
@@ -418,7 +442,22 @@ void request_close(Window* w) {
     if (w) w->should_close.store(true, std::memory_order_relaxed);
 }
 
+// Active window pointer for Esc → request_close. Set by run_loop; apps that
+// drive their own event loop should call set_esc_close_target() after
+// create_window if they want keyboard-Esc to dismiss the window.
+static Window* g_esc_close_target = nullptr;
+
+Window* set_esc_close_target(Window* w) {
+    Window* prev = g_esc_close_target;
+    g_esc_close_target = w;
+    return prev;
+}
+
 void pump_events() {
+    // Clear edge-triggered pressed[] at frame boundary BEFORE dispatching
+    // new events so pressed[] reflects only this frame's transitions.
+    keyboard_begin_frame();
+
     @autoreleasepool {
         NSEvent* event;
         do {
@@ -426,14 +465,50 @@ void pump_events() {
                                        untilDate:[NSDate distantPast]
                                           inMode:NSDefaultRunLoopMode
                                          dequeue:YES];
-            if (event) [NSApp sendEvent:event];
-        } while (event);
+            if (!event) break;
+
+            const NSEventType type = event.type;
+
+            if (type == NSEventTypeKeyDown || type == NSEventTypeKeyUp) {
+                // keyCode is a uint16_t virtual keycode (HIToolbox constants).
+                const uint16_t raw_vk = event.keyCode;
+                const platform::KeyCode kc = vk_to_keycode(raw_vk);
+                const bool is_down = (type == NSEventTypeKeyDown);
+                keyboard_event(kc, is_down);
+                // Esc: signal the active window to close.
+                if (is_down && kc == platform::KeyCode::Escape && g_esc_close_target) {
+                    request_close(g_esc_close_target);
+                }
+            } else if (type == NSEventTypeFlagsChanged) {
+                // Modifier keys use FlagsChanged instead of KeyDown/KeyUp.
+                // Determine down/up by testing the relevant modifier flag.
+                const uint16_t raw_vk = event.keyCode;
+                const platform::KeyCode kc = vk_to_keycode(raw_vk);
+                const NSEventModifierFlags mods = event.modifierFlags;
+                bool is_down = false;
+                // Map each modifier virtual keycode to its flag bit.
+                switch (raw_vk) {
+                    case vk::kLeftShift:  case vk::kRightShift:
+                        is_down = (mods & NSEventModifierFlagShift)   != 0; break;
+                    case vk::kLeftCtrl:   case vk::kRightCtrl:
+                        is_down = (mods & NSEventModifierFlagControl) != 0; break;
+                    case vk::kLeftAlt:    case vk::kRightAlt:
+                        is_down = (mods & NSEventModifierFlagOption)  != 0; break;
+                    default: break;
+                }
+                keyboard_event(kc, is_down);
+            }
+
+            [NSApp sendEvent:event];
+        } while (true);
         [NSApp updateWindows];
     }
 }
 
 std::uint64_t run_loop(Window* window, FrameCallback frame, void* frame_user) {
     if (!window) return 0;
+    // Register the window so Esc fires request_close from inside pump_events.
+    Window* prev_target = set_esc_close_target(window);
     using clock = std::chrono::steady_clock;
     auto last = clock::now();
     std::uint64_t frames = 0;
@@ -445,6 +520,7 @@ std::uint64_t run_loop(Window* window, FrameCallback frame, void* frame_user) {
         if (frame) frame(frame_user, window, dt);
         ++frames;
     }
+    set_esc_close_target(prev_target);
     return frames;
 }
 
