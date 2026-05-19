@@ -75,6 +75,8 @@ struct CharacterInput {
     bool  lean_right = false;
 };
 void character_tick(CharacterController*, const CharacterInput&, float dt);
-void character_get_transform(const CharacterController*, float out_pos[3], float out_yaw_deg);
+// out_yaw_deg may be null if the caller doesn't need yaw; otherwise it
+// receives the character's current facing in degrees (0 = +Z).
+void character_get_transform(const CharacterController*, float out_pos[3], float* out_yaw_deg);
 
 } // namespace psynder::physics
