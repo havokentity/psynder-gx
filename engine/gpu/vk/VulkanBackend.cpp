@@ -657,10 +657,18 @@ void VulkanBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
 
     if (!w->encoded_clear) {
         // Encode the animated clear pass.
+        // NOTE: we call the CORE Vulkan 1.3 dynamic-rendering entry points
+        // (vkCmdBeginRendering, no KHR suffix). The KHR variants are only
+        // populated by volk when VK_KHR_dynamic_rendering is listed in the
+        // device's ppEnabledExtensionNames — we instead enabled the core
+        // 1.3 feature via VkPhysicalDeviceVulkan13Features::dynamicRendering
+        // in create_logical_device_(). Calling vkCmdBeginRenderingKHR on a
+        // driver that only exposes the core entry (RTX 50-series, latest
+        // NVIDIA) crashes (0xC0000005) because the volk table slot is null.
         barrier_to_color_attachment(f.cb, sc_images_[image_index_]);
 
-        VkRenderingAttachmentInfoKHR color{};
-        color.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+        VkRenderingAttachmentInfo color{};
+        color.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         color.imageView   = sc_views_[image_index_];
         color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -674,14 +682,14 @@ void VulkanBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
             1.0f
         }};
 
-        VkRenderingInfoKHR ri{};
-        ri.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+        VkRenderingInfo ri{};
+        ri.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
         ri.renderArea.extent    = sc_extent_;
         ri.layerCount           = 1;
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments    = &color;
-        vkCmdBeginRenderingKHR(f.cb, &ri);
-        vkCmdEndRenderingKHR(f.cb);
+        vkCmdBeginRendering(f.cb, &ri);
+        vkCmdEndRendering(f.cb);
 
         barrier_to_present(f.cb, sc_images_[image_index_]);
         w->encoded_clear = true;
