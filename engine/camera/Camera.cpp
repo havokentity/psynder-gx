@@ -12,7 +12,9 @@
 
 #include "math/Math.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace psynder::camera {
 namespace {
@@ -35,14 +37,21 @@ inline f32 clamp_finite(f32 v, f32 lo, f32 hi) noexcept {
     return v;
 }
 
-// Wrap an angle into [-180, +180]. Uses subtraction (not std::remainder)
-// so the result is deterministic across libstdc++ / libc++ / MSVC STL.
+// Wrap an angle into [-180, +180].  Constant-time floor-based wrap (no
+// while-loop) — for very large finite inputs the earlier while-loop form
+// took O(|v|/360) iterations, which a single mouse-X spike could stretch
+// into a multi-millisecond stall (Copilot PR #13 review).  Floor-form is
+// O(1) and uses the same -fno-fast-math / /fp:strict arithmetic as the
+// rest of the TU, so it stays deterministic on a given platform/libm.
+//
+// NaN guard returns 0 — a NaN escaping into yaw would poison every
+// downstream matrix; 0 is a defensible fallback (neutral heading) and
+// matches the clamp_finite recovery strategy used elsewhere here.
 inline f32 wrap_deg_180(f32 v) noexcept {
+    if (!(v == v)) return 0.0f;            // NaN → neutral heading
     // Fast path: already in range.
     if (v >= -180.0f && v <= 180.0f) return v;
-    while (v > 180.0f)  v -= 360.0f;
-    while (v < -180.0f) v += 360.0f;
-    return v;
+    return v - std::floor((v + 180.0f) / 360.0f) * 360.0f;
 }
 
 inline math::Vec3 to_vec3(const f32 p[3]) noexcept {
@@ -108,22 +117,44 @@ inline Basis basis_from_angles(f32 yaw_deg, f32 pitch_deg) noexcept {
 // ─── update_camera ───────────────────────────────────────────────────────
 
 void update_camera(CameraState& cam, const CameraInput& in) noexcept {
+    // 0) Sanitise inputs against NaN / Inf BEFORE they touch cam.* —
+    //    otherwise a single bad frame (timer glitch, uninitialised input,
+    //    network desync) poisons the camera's position and every
+    //    subsequent matrix.  Non-finite values become 0; negatives are
+    //    kept where they're semantically valid (axes ±, deltas ±) but
+    //    pruned to 0 where they're not (dt_sec ≥ 0, speed ≥ 0).  No
+    //    upper-bound clamping — the caller's responsible for a sensible
+    //    dt; the engine doesn't second-guess a long frame (e.g. unit-
+    //    test scenarios deliberately use dt = 1 s).  Copilot PR #13
+    //    review caught the missing sanitisation.
+    auto finite_or_zero = [](f32 v) noexcept -> f32 {
+        return (v == v && v != std::numeric_limits<f32>::infinity()
+                       && v != -std::numeric_limits<f32>::infinity()) ? v : 0.0f;
+    };
+    const f32 dt          = std::max(0.0f, finite_or_zero(in.dt_sec));
+    const f32 fwd_axis    = clamp_finite(in.forward_axis, -1.0f, 1.0f);
+    const f32 strafe_axis = clamp_finite(in.strafe_axis,  -1.0f, 1.0f);
+    const f32 up_axis     = clamp_finite(in.up_axis,      -1.0f, 1.0f);
+    const f32 speed       = std::max(0.0f, finite_or_zero(in.move_speed_m_s));
+    const f32 yaw_delta   = finite_or_zero(in.yaw_delta_deg);
+    const f32 pitch_delta = finite_or_zero(in.pitch_delta_deg);
+
     // 1) Integrate look. Pitch is sign-flipped when invert_pitch is set.
     const f32 pitch_sign = in.invert_pitch ? -1.0f : 1.0f;
-    cam.yaw_deg   = wrap_deg_180(cam.yaw_deg + in.yaw_delta_deg);
-    cam.pitch_deg = clamp_finite(cam.pitch_deg + pitch_sign * in.pitch_delta_deg,
+    cam.yaw_deg   = wrap_deg_180(cam.yaw_deg + yaw_delta);
+    cam.pitch_deg = clamp_finite(cam.pitch_deg + pitch_sign * pitch_delta,
                                  -89.0f, 89.0f);
 
-    // 2) Defensive clamp on the integrated yaw — wrap_deg_180 handles the
-    //    common case, but a NaN input would bypass it; clamp_finite turns
-    //    NaN → -180 so the matrices stay finite.
+    // 2) Defensive clamp on the integrated yaw — wrap_deg_180 already
+    //    handles the common case and the NaN case (returns 0); the extra
+    //    clamp here is belt-and-braces against a future refactor.
     cam.yaw_deg = clamp_finite(cam.yaw_deg, -180.0f, 180.0f);
 
     // 3) Move along the yaw-rotated basis. We deliberately use the FULL
     //    basis (which includes pitch tilt on the forward vector) for
-    //    forward/strafe — this is the classic "flying camera" feel that
-    //    matches sample-02's needs. Sample 06 (jet-pack) can flip
-    //    `up_axis` for vertical thrust.
+    //    forward/strafe — this is the "flying camera" feel that matches
+    //    sample-02's needs. Sample 06 (jet-pack) can flip `up_axis` for
+    //    vertical thrust.
     //
     //    For an FPS-on-the-ground camera the caller can zero the y
     //    component of forward after the call, or just request
@@ -133,11 +164,11 @@ void update_camera(CameraState& cam, const CameraInput& in) noexcept {
     // velocity_local = (strafe, up, forward)  in local axes
     // velocity_world = strafe*right + up*world_up + forward*forward
     const math::Vec3 world_up{ 0.0f, 1.0f, 0.0f };
-    math::Vec3 vel = math::mul(b.right,   in.strafe_axis  * in.move_speed_m_s);
-    vel = math::add(vel, math::mul(b.forward, in.forward_axis * in.move_speed_m_s));
-    vel = math::add(vel, math::mul(world_up,  in.up_axis      * in.move_speed_m_s));
+    math::Vec3 vel = math::mul(b.right,   strafe_axis * speed);
+    vel = math::add(vel, math::mul(b.forward, fwd_axis * speed));
+    vel = math::add(vel, math::mul(world_up,  up_axis  * speed));
 
-    const math::Vec3 dp = math::mul(vel, in.dt_sec);
+    const math::Vec3 dp = math::mul(vel, dt);
     cam.position[0] += dp.x;
     cam.position[1] += dp.y;
     cam.position[2] += dp.z;

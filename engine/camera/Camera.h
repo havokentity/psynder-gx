@@ -7,11 +7,13 @@
 // consume.
 //
 // Design (DOTS-friendly):
-//   - CameraState is a POD struct owned by the CALLER. No globals, no
-//     singletons. update_camera / view_matrix / proj_matrix are pure
-//     functions; they take a const-ref or ref to a caller-owned struct.
-//     This makes multi-camera / split-screen / multi-view trivially
-//     parallel — drive N CameraStates from N JobSystem workers.
+//   - CameraState is a POD struct owned by the CALLER.  No globals, no
+//     singletons.  The API is stateless aside from the caller-owned
+//     CameraState reference — `update_camera` mutates the passed-in struct
+//     in place; `view_matrix` / `proj_matrix` / `view_proj_matrix` only
+//     read it.  No hidden side effects, no statics, no thread-local
+//     scratch.  This makes multi-camera / split-screen / multi-view
+//     trivially parallel — drive N CameraStates from N JobSystem workers.
 //   - No virtual, no RTTI, no std::shared_ptr. Trivially-copyable.
 //   - Per-frame input is FILTERED, normalized deltas (not raw NSEvent /
 //     XInput / Win32-WM). The caller (sample or game code) is responsible
@@ -32,15 +34,24 @@
 //   - Pitch is rotation around the camera's local right axis, in DEGREES,
 //     CLAMPED to [-89, +89] (no gimbal flip, no looking straight up/down).
 //       Positive pitch tilts the look-vector toward +Y (look up).
-//   - 1 world-unit = 1 metre. move_speed_m_s is metres-per-second of
-//     ground/world-space velocity along the yaw-rotated basis.
+//   - 1 world-unit = 1 metre.  move_speed_m_s is metres-per-second of
+//     world-space velocity along the FULL yaw+pitch-rotated basis (the
+//     "flying camera" model — forward gains a Y component when looking
+//     up/down).  For an FPS-on-the-ground feel where forward stays
+//     horizontal, the caller can zero `up_axis` and ground-clamp
+//     `position[1]` after the call.  Sample 06 (jet-pack) intentionally
+//     keeps the flying-camera path.
 //
 // Determinism: this TU is compiled with `-fno-fast-math -ffp-contract=off`
 // (Clang/GCC) or `/fp:strict` (MSVC) so the view+proj matrices are bit-
-// identical across host machines. Lockstep determinism is mandated by
-// DESIGN-PSYNDER-GX.md §14 for any subsystem touching simulation state;
-// the camera transform feeds frustum culling and gameplay raycasts, so it
-// MUST be deterministic.
+// identical across runs of the SAME platform / libm / STL combo.  Cross-
+// platform bit-identity is NOT claimed — `std::sin` / `std::cos` /
+// `std::tan` are implementation-defined and macOS libm, glibc, and MSVCRT
+// disagree at sub-ulp precision (Copilot PR #13 review).  Lockstep
+// determinism for true cross-host replay would need a project-owned
+// polynomial trig kernel; that's M5 work paired with the demo-replay
+// validator.  The current guarantee — same-platform bit-identical — is
+// sufficient for in-session frustum culling + raycast determinism.
 
 #pragma once
 
@@ -85,10 +96,15 @@ struct CameraInput {
     bool invert_pitch     = false;  // for users who want "plane sim" pitch
 };
 
-// ─── Update / matrix builders (pure functions) ──────────────────────────
+// ─── Update / matrix builders (stateless aside from CameraState) ────────
 // Integrate yaw/pitch from per-frame deltas (with clamp + wrap), then move
-// position along the yaw-rotated forward/right/up basis. Position grows by
-// `velocity_local_rotated * dt`.
+// position along the FULL yaw+pitch-rotated forward/right/up basis (flying-
+// camera feel — forward gains a Y component when pitching up/down).  See
+// the file header's Conventions block for the FPS-on-the-ground variation.
+// Position grows by `velocity_local_rotated * dt`.
+//
+// All inputs are sanitised against NaN/Inf: non-finite axes / deltas /
+// speed become 0; non-finite dt becomes 0 (no integration this frame).
 //
 // NOT thread-safe on a single CameraState, but a different CameraState per
 // thread is perfectly safe — that's the multi-view path.
