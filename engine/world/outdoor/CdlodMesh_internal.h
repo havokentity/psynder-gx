@@ -19,27 +19,27 @@
 
 #pragma once
 
+#include "world/outdoor/GpuVertex_internal.h"
 #include "world/outdoor/Heightmap_internal.h"
 #include "world/outdoor/Terrain.h"
 
 #include "core/Types.h"
 #include "math/Math.h"
-#include "render/raster/Raster.h"
 
 #include <cstddef>
 #include <vector>
 
 namespace psynder::world::outdoor::detail {
 
-// A single CDLOD chunk's mesh. Stored in the same Vertex / index layout the
-// rasterizer's DrawItem expects (lane 07).
+// A single CDLOD chunk's mesh. Stored in the OutdoorVertex / index layout
+// that lane 09 (render-pipeline) will consume via its GPU draw stream.
 struct CdlodChunk {
-    u32                                       chunk_x = 0;   // grid coord
-    u32                                       chunk_z = 0;
-    u32                                       lod     = 0;   // 0 = leaf
-    std::vector<render::raster::Vertex>       vertices;
-    std::vector<u32>                          indices;
-    math::Aabb                                bounds;
+    u32                          chunk_x = 0;   // grid coord
+    u32                          chunk_z = 0;
+    u32                          lod     = 0;   // 0 = leaf
+    std::vector<OutdoorVertex>   vertices;
+    std::vector<u32>             indices;
+    math::Aabb                   bounds;
 };
 
 // Build a single leaf-level chunk. The chunk covers texels
@@ -92,7 +92,7 @@ inline CdlodChunk build_chunk(const HeightmapDesc& h,
             if (wy < y_min) y_min = wy;
             if (wy > y_max) y_max = wy;
 
-            render::raster::Vertex v{};
+            OutdoorVertex v{};
             v.position     = math::Vec3{ wx, wy, wz };
             v.normal       = normal_at_texel(h, x, z);
             // UV is texel-relative for the colormap.
