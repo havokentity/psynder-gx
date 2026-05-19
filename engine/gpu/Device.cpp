@@ -83,7 +83,18 @@ void end_frame(Device* d) {
 
 CmdBuffer* cmd_open(Device* d) {
     if (!d || !d->backend) return nullptr;
-    return d->backend->cmd_open(d);
+    CmdBuffer* cb = d->backend->cmd_open(d);
+    if (cb) {
+        // Stamp the owning device so the encoder dispatchers can find
+        // the backend without the user threading Device* through every
+        // call. Reset transient encoder state on every cmd_open.
+        cb->set_owner(d);
+        cb->encoded_user_render = false;
+        cb->index_buffer        = nullptr;
+        cb->index_buffer_offset = 0;
+        cb->index_buffer_u32    = 0;
+    }
+    return cb;
 }
 
 void cmd_submit(Device* d, CmdBuffer* cb) {
@@ -166,5 +177,105 @@ void refit_tlas(Device* d, AccelerationStructure* a) {
 // types are forward-declared there and given empty bodies inline here.
 // When lane 10 ships, it'll fill these in by filing an Issue for an
 // agreed-upon contract change.
+
+// ─── Render-encoder dispatchers ─────────────────────────────────────────
+//
+// All entry points route through the backend's encoder vtable. Each
+// dispatch validates that the CmdBuffer has an owning device (set when
+// cmd_open() returned it from the backend) and that the backend pointer
+// is live. Once a render pass has begun, cmd_submit() will detect
+// cmd->encoded_user_render == true and skip the M0 default auto-clear.
+
+namespace {
+inline Backend* backend_for(CmdBuffer* cb) {
+    if (!cb || !cb->owner() || !cb->owner()->backend) return nullptr;
+    return cb->owner()->backend;
+}
+} // namespace
+
+void begin_render(CmdBuffer* cb, const RenderPassDesc& desc) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    cb->encoded_user_render = true; // suppresses M0 auto-clear in cmd_submit
+    be->begin_render(cb, desc);
+}
+
+void end_render(CmdBuffer* cb) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->end_render(cb);
+}
+
+void set_viewport(CmdBuffer* cb, const Viewport& vp) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->set_viewport(cb, vp);
+}
+
+void set_scissor(CmdBuffer* cb, const Scissor& sc) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->set_scissor(cb, sc);
+}
+
+void bind_pipeline(CmdBuffer* cb, ::psynder::shader::PipelineHandle h) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->bind_pipeline(cb, h);
+}
+
+void bind_vertex_buffer(CmdBuffer* cb, std::uint32_t binding,
+                        Buffer* buf, std::uint64_t offset) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->bind_vertex_buffer(cb, binding, buf, offset);
+}
+
+void bind_index_buffer(CmdBuffer* cb, Buffer* buf,
+                       IndexType type, std::uint64_t offset) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    // Cache on the CmdBuffer so Metal can consume it at draw_indexed time.
+    cb->index_buffer        = buf;
+    cb->index_buffer_offset = offset;
+    cb->index_buffer_u32    = (type == IndexType::U32) ? 1 : 0;
+    be->bind_index_buffer(cb, buf, type, offset);
+}
+
+void push_constants(CmdBuffer* cb, const void* data,
+                    std::uint32_t size, std::uint32_t stage_mask) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    if (size > kMaxPushConstantBytes) {
+        // Hard cap per the public-header contract. Drop the call rather
+        // than truncate (truncated state is a worse failure than a
+        // visible "no push constants" symptom).
+        std::fprintf(stderr,
+                     "[psy::gpu] push_constants: size=%u exceeds kMaxPushConstantBytes=%u; dropped\n",
+                     size, kMaxPushConstantBytes);
+        return;
+    }
+    be->push_constants(cb, data, size, stage_mask);
+}
+
+void draw(CmdBuffer* cb, std::uint32_t vc, std::uint32_t ic,
+          std::uint32_t fv, std::uint32_t fi) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->draw(cb, vc, ic, fv, fi);
+}
+
+void draw_indexed(CmdBuffer* cb, std::uint32_t ic, std::uint32_t inst,
+                  std::uint32_t fi, std::int32_t vo, std::uint32_t fii) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->draw_indexed(cb, ic, inst, fi, vo, fii);
+}
+
+void dispatch(CmdBuffer* cb, std::uint32_t gx, std::uint32_t gy, std::uint32_t gz) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->dispatch(cb, gx, gy, gz);
+}
 
 } // namespace psynder::gpu

@@ -118,6 +118,17 @@ struct CmdBuffer : RefCountedBase {
     // base. cmd_submit downcasts internally.
     bool open    {false};
     bool submitted {false};
+    // The render-encoder API (begin_render / end_render / draw / dispatch)
+    // bumps this whenever a backend has taken the user's render pass over
+    // from the M0 auto-clear path. cmd_submit reads it to decide whether
+    // to encode its default animated clear.
+    bool encoded_user_render {false};
+    // Cached index-buffer binding (Metal draw_indexed needs it at draw
+    // time; Vulkan bakes the binding via vkCmdBindIndexBuffer immediately).
+    // The fields are written by bind_index_buffer.
+    Buffer*       index_buffer        {nullptr};
+    std::uint64_t index_buffer_offset {0};
+    std::uint8_t  index_buffer_u32    {0}; // 0=U16, 1=U32
 };
 
 // ─── Device — opaque to other lanes, defined here for the backend ───────
@@ -164,6 +175,21 @@ public:
     virtual AccelerationStructure* create_blas(Device*, const BlasDesc&) { return nullptr; }
     virtual AccelerationStructure* create_tlas(Device*, const TlasDesc&) { return nullptr; }
     virtual void                   refit_tlas (Device*, AccelerationStructure*) {}
+
+    // ─── Render-encoder API (lane09-001 unblock) ────────────────────────
+    // Default impls are no-ops so a backend that hasn't wired the encoder
+    // yet still links and the M0 auto-clear behavior stays intact.
+    virtual void begin_render(CmdBuffer*, const RenderPassDesc&) {}
+    virtual void end_render  (CmdBuffer*) {}
+    virtual void set_viewport(CmdBuffer*, const Viewport&) {}
+    virtual void set_scissor (CmdBuffer*, const Scissor&)  {}
+    virtual void bind_pipeline      (CmdBuffer*, ::psynder::shader::PipelineHandle) {}
+    virtual void bind_vertex_buffer (CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) {}
+    virtual void bind_index_buffer  (CmdBuffer*, Buffer*, IndexType, std::uint64_t) {}
+    virtual void push_constants     (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) {}
+    virtual void draw         (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {}
+    virtual void draw_indexed (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) {}
+    virtual void dispatch     (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t) {}
 
     // Deferred destroy entry — called by Handle<T>::~Handle once refcount
     // hits zero and the GPU has retired the resource.
