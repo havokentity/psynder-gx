@@ -34,6 +34,7 @@ void SpatialIndex::clear() noexcept {
     grid_.clear();
     scratch_.clear();
     scene_bounds_ = aabb_empty();
+    scene_diagonal_ = 0.0f;
     cell_size_ = 1.0f;
     sap_dirty_ = true;
     grid_dirty_ = true;
@@ -71,6 +72,7 @@ void SpatialIndex::rebuild(std::span<const Entity> entities,
 
     bvh_.build(std::span<const math::Aabb>{aabbs_}, params.bvh_leaf_size);
     scene_bounds_ = bvh_.bounds();
+    scene_diagonal_ = scene_diagonal(scene_bounds_);
     sap_dirty_ = true;
     grid_dirty_ = true;
 }
@@ -89,6 +91,7 @@ void SpatialIndex::refit(std::span<const math::Aabb> aabbs) {
     aabbs_.assign(aabbs.begin(), aabbs.end());
     bvh_.refit(std::span<const math::Aabb>{aabbs_});
     scene_bounds_ = bvh_.bounds();
+    scene_diagonal_ = scene_diagonal(scene_bounds_);
     sap_dirty_ = true;
     grid_dirty_ = true;
 }
@@ -115,9 +118,10 @@ void SpatialIndex::map_indices(std::vector<Entity>& out) const {
 }
 
 void SpatialIndex::query_ray(const Ray& ray, std::vector<Entity>& out) {
-    out.clear();
-    if (empty())
+    if (empty()) {
+        out.clear();
         return;
+    }
     last_backend_ = Backend::Bvh;
     scratch_.clear();
     bvh_.query_ray(ray, scratch_);
@@ -125,9 +129,10 @@ void SpatialIndex::query_ray(const Ray& ray, std::vector<Entity>& out) {
 }
 
 void SpatialIndex::query_frustum(const Frustum& fr, std::vector<Entity>& out) {
-    out.clear();
-    if (empty())
+    if (empty()) {
+        out.clear();
         return;
+    }
     last_backend_ = Backend::Bvh;
     scratch_.clear();
     bvh_.query_frustum(fr, scratch_);
@@ -135,11 +140,12 @@ void SpatialIndex::query_frustum(const Frustum& fr, std::vector<Entity>& out) {
 }
 
 void SpatialIndex::query_sphere(math::Vec3 center, f32 radius, std::vector<Entity>& out) {
-    out.clear();
-    if (empty())
+    if (empty()) {
+        out.clear();
         return;
+    }
     scratch_.clear();
-    const bool compact = 2.0f * radius <= kCompactQueryFraction * scene_diagonal(scene_bounds_);
+    const bool compact = 2.0f * radius <= kCompactQueryFraction * scene_diagonal_;
     if (compact) {
         ensure_grid();
         last_backend_ = Backend::Grid;
@@ -152,13 +158,14 @@ void SpatialIndex::query_sphere(math::Vec3 center, f32 radius, std::vector<Entit
 }
 
 void SpatialIndex::query_aabb(const math::Aabb& box, std::vector<Entity>& out) {
-    out.clear();
-    if (empty())
+    if (empty()) {
+        out.clear();
         return;
+    }
     scratch_.clear();
     const math::Vec3 e = aabb_extent(box);
     const f32 max_ext = std::max({e.x, e.y, e.z});
-    const bool compact = max_ext <= kCompactQueryFraction * scene_diagonal(scene_bounds_);
+    const bool compact = max_ext <= kCompactQueryFraction * scene_diagonal_;
     if (compact) {
         ensure_grid();
         last_backend_ = Backend::Grid;

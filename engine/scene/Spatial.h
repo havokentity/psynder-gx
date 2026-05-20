@@ -343,6 +343,7 @@ class SpatialIndex {
     UniformGrid grid_;
     std::vector<u32> scratch_;  ///< reusable index buffer for accelerator queries
     math::Aabb scene_bounds_ = aabb_empty();
+    f32 scene_diagonal_ = 0.0f;  ///< cached length of scene_bounds_ extent (query routing)
     f32 cell_size_ = 1.0f;
     bool sap_dirty_ = true;
     bool grid_dirty_ = true;
