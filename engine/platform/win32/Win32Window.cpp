@@ -145,13 +145,16 @@ Win32Window::Win32Window(const WindowDesc& desc)
     // at startup (see the WM_NCCREATE hwnd_ bind in static_wnd_proc).
     {
         RECT wr{}, cr2{};
-        ::GetWindowRect(hwnd_, &wr);
-        ::GetClientRect(hwnd_, &cr2);
         POINT tl{0, 0};
-        ::ClientToScreen(hwnd_, &tl);
-        PSY_LOG_INFO("[win32] client={}x{} non-client frame: top={}px side={}px",
-                     static_cast<int>(cr2.right),    static_cast<int>(cr2.bottom),
-                     static_cast<int>(tl.y - wr.top), static_cast<int>(tl.x - wr.left));
+        if (::GetWindowRect(hwnd_, &wr) && ::GetClientRect(hwnd_, &cr2) &&
+            ::ClientToScreen(hwnd_, &tl)) {
+            PSY_LOG_INFO("[win32] client={}x{} non-client frame: top={}px side={}px",
+                         static_cast<int>(cr2.right),    static_cast<int>(cr2.bottom),
+                         static_cast<int>(tl.y - wr.top), static_cast<int>(tl.x - wr.left));
+        } else {
+            PSY_LOG_WARN("[win32] frame-sanity: window-rect query failed (err={})",
+                         static_cast<unsigned>(::GetLastError()));
+        }
     }
 }
 
@@ -273,7 +276,8 @@ LRESULT CALLBACK Win32Window::static_wnd_proc(
 {
     if (msg == WM_NCCREATE) {
         auto* cs   = reinterpret_cast<CREATESTRUCTW*>(lparam);
-        auto* self = reinterpret_cast<Win32Window*>(cs->lpCreateParams);
+        auto* self = cs ? reinterpret_cast<Win32Window*>(cs->lpCreateParams)
+                        : nullptr;
         // Bind the real HWND before the first WM_NCCALCSIZE. wnd_proc() routes
         // unhandled messages to DefWindowProcW(hwnd_, ...) using the member
         // handle, but during CreateWindowExW the ctor has not yet assigned
@@ -281,8 +285,14 @@ LRESULT CALLBACK Win32Window::static_wnd_proc(
         // creation-time WM_NCCALCSIZE hit DefWindowProcW(NULL, ...), which
         // reserves no non-client area — the client filled the whole window and
         // no caption/border was drawn (the "borderless window" bug).
-        self->hwnd_ = hwnd;
-        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        //
+        // self is normally the Win32Window* we passed as CreateWindowExW's
+        // lpParam; guard anyway so a foreign WM_NCCREATE (null lParam / not
+        // our pointer) can't crash creation — fall through to DefWindowProcW.
+        if (self) {
+            self->hwnd_ = hwnd;
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
         return ::DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     auto* self = reinterpret_cast<Win32Window*>(
