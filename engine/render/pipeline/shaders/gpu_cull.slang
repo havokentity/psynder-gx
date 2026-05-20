@@ -36,13 +36,18 @@ struct DrawIndexedIndirect {
     uint first_instance;
 };
 
-cbuffer CullParams : register(b0) {
-    float4x4 g_view_proj;
-    float4   g_frustum_planes[6];   // (nx, ny, nz, d)
-    uint     g_instance_count;
-    uint     g_hiz_mip_count;
-    uint     g_padding[2];
+// Push-constants — must match the layout of CullPushConstants in
+// engine/render/pipeline/GpuCull.cpp (4 × u32 = 16 bytes).  view_proj and
+// the 6 frustum planes are NOT in the push range yet; they will land via
+// a per-view UBO in M3 once lane 07 grows the descriptor-set API.  Until
+// then the scaffold body skips the actual frustum / HiZ test (see below),
+// so the matrices' absence doesn't affect the SCAFFOLD's visible output.
+struct CullParams {
+    uint g_instance_count;
+    uint g_hiz_mip_count;
+    uint g_padding[2];
 };
+[[vk::push_constant]] ConstantBuffer<CullParams> g_pc;
 
 StructuredBuffer<InstanceDesc>      g_instances     : register(t1);
 RWStructuredBuffer<uint>            g_visible_index : register(u2);
@@ -54,7 +59,7 @@ RWStructuredBuffer<DrawIndexedIndirect> g_indirect  : register(u3);
 [shader("compute")]
 void cs_cull(uint3 did : SV_DispatchThreadID) {
     uint inst = did.x;
-    if (inst >= g_instance_count) return;
+    if (inst >= g_pc.g_instance_count) return;
 
     InstanceDesc d = g_instances[inst];
 
@@ -66,7 +71,7 @@ void cs_cull(uint3 did : SV_DispatchThreadID) {
     InterlockedAdd(g_visible_index[0], 1, slot);
     g_visible_index[1 + slot] = inst;
 
-    if (slot < g_instance_count) {
+    if (slot < g_pc.g_instance_count) {
         DrawIndexedIndirect cmd;
         cmd.index_count    = 3;   // SCAFFOLD: hardcoded for the M1 triangle
         cmd.instance_count = 1;
