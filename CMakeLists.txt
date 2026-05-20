@@ -28,13 +28,19 @@ option(PSYNDER_GX_ENABLE_TRACY        "Enable Tracy profiler integration (debug 
 option(PSYNDER_GX_ENABLE_SANITIZERS   "Enable ASan + UBSan (debug Linux/Mac only)"               OFF)
 option(PSYNDER_GX_ENABLE_AVX2         "Build x86-64 AVX2 fast-path kernels"                       ON)
 option(PSYNDER_GX_ENABLE_AVX512       "Build x86-64 AVX-512 wide-path kernels (opportunistic)"    ON)
-# AVX-512 is ON by default now that lane 03-simd uses per-function target
+# AVX-512 is ON by default because lane 03-simd uses per-function target
 # attributes (__attribute__((target("avx512f,avx512bw,avx512vl")))) on every
 # wide kernel in Simd_avx512.cpp.  The compiler only emits AVX-512 inside
 # those decorated functions; auto-vectorisation elsewhere stays at the SSE4.2
-# / AVX2 baseline.  The SIGILL on non-AVX-512 CPUs is therefore closed.
-# Runtime gating via Dispatch.cpp (Tier::Avx512) remains in place so a binary
-# built with this ON runs correctly on Westmere / pre-Ice-Lake hosts too.
+# / AVX2 baseline, and Dispatch.cpp gates every call on the runtime tier
+# (Tier::Avx512, from CpuFeatures::avx512f) — so a binary built with this ON
+# still runs correctly on pre-Ice-Lake / non-AVX-512 hosts.
+#
+# SCOPE: this flag governs ONLY the simd lane's runtime-dispatched kernels.
+# It must NOT be forwarded to third-party libraries that have no runtime ISA
+# dispatch (they would emit AVX-512 unconditionally and SIGILL on CPUs without
+# it). Jolt is the cautionary case — see engine/physics/core/CMakeLists.txt,
+# which deliberately pins Jolt's USE_AVX512 OFF and caps it at AVX2.
 option(PSYNDER_GX_ENABLE_LTO          "Link-time optimization for release builds"                 ON)
 option(PSYNDER_GX_ENABLE_RT           "Enable hardware ray-tracing pipeline (RTX 20+, RDNA2+, M3+)" ON)
 option(PSYNDER_GX_ENABLE_MESH_SHADERS "Enable mesh-shader pipeline (Turing+, RDNA2+, M3+)"        ON)
