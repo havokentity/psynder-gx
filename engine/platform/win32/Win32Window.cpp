@@ -137,6 +137,22 @@ Win32Window::Win32Window(const WindowDesc& desc)
                  static_cast<std::uint64_t>(actual_style),
                  static_cast<std::uint64_t>(actual_ex_style),
                  static_cast<std::uint64_t>(WS_OVERLAPPEDWINDOW));
+
+    // Frame-sanity log: a correctly-chromed WS_OVERLAPPEDWINDOW reserves a
+    // non-client caption (~31px @96dpi) + side/bottom borders, so the client
+    // ends up smaller than the window. top/side == 0 means no chrome was
+    // drawn — this line makes a future borderless-window regression obvious
+    // at startup (see the WM_NCCREATE hwnd_ bind in static_wnd_proc).
+    {
+        RECT wr{}, cr2{};
+        ::GetWindowRect(hwnd_, &wr);
+        ::GetClientRect(hwnd_, &cr2);
+        POINT tl{0, 0};
+        ::ClientToScreen(hwnd_, &tl);
+        PSY_LOG_INFO("[win32] client={}x{} non-client frame: top={}px side={}px",
+                     static_cast<int>(cr2.right),    static_cast<int>(cr2.bottom),
+                     static_cast<int>(tl.y - wr.top), static_cast<int>(tl.x - wr.left));
+    }
 }
 
 Win32Window::~Win32Window() {
@@ -258,6 +274,14 @@ LRESULT CALLBACK Win32Window::static_wnd_proc(
     if (msg == WM_NCCREATE) {
         auto* cs   = reinterpret_cast<CREATESTRUCTW*>(lparam);
         auto* self = reinterpret_cast<Win32Window*>(cs->lpCreateParams);
+        // Bind the real HWND before the first WM_NCCALCSIZE. wnd_proc() routes
+        // unhandled messages to DefWindowProcW(hwnd_, ...) using the member
+        // handle, but during CreateWindowExW the ctor has not yet assigned
+        // hwnd_ (it is set only after the call returns). Without this, the
+        // creation-time WM_NCCALCSIZE hit DefWindowProcW(NULL, ...), which
+        // reserves no non-client area — the client filled the whole window and
+        // no caption/border was drawn (the "borderless window" bug).
+        self->hwnd_ = hwnd;
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         return ::DefWindowProcW(hwnd, msg, wparam, lparam);
     }
