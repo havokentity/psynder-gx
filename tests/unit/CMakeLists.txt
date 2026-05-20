@@ -18,6 +18,7 @@ if(TARGET Catch2::Catch2WithMain)
         psynder_asset psynder_audio psynder_net psynder_net_voice
         psynder_ui_imm
         psynder_gpu
+        psynder_camera
     )
     # psynder_editor_core is only built when the editor is enabled.
     if(TARGET psynder_editor_core)

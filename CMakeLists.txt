@@ -179,6 +179,9 @@ add_subdirectory(engine/simd)
 add_subdirectory(engine/jobs)
 add_subdirectory(engine/asset)
 add_subdirectory(engine/scene)
+# camera depends only on core+math; safe to add this early so dependent
+# lanes (samples, render) can `target_link_libraries(... psynder_camera)`.
+add_subdirectory(engine/camera)
 
 # GPU + shader come before the renderer subdirs that depend on them
 if(NOT PSYNDER_GX_DEDICATED_SERVER)
