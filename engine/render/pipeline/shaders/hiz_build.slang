@@ -18,12 +18,17 @@
 // mip-sliced texture-view array). This compiles + sanity-checks the
 // HLSL/Slang surface; lane 09's M3 finishes the encode plumbing.
 
-cbuffer HizParams : register(b0) {
+// Push-constants — must match the layout of HizPushConstants in
+// engine/render/pipeline/Hiz.cpp (4 × u32 = 16 bytes).  Vulkan honours the
+// [[vk::push_constant]] decoration directly; Metal lowers it to the
+// reserved push-constant buffer slot via slangc.
+struct HizParams {
     uint g_src_mip;
     uint g_dst_mip;
     uint g_src_width;
     uint g_src_height;
 };
+[[vk::push_constant]] ConstantBuffer<HizParams> g_pc;
 
 Texture2D<float>   g_src_depth : register(t1);   // mip N or pre-pass depth
 RWTexture2D<uint>  g_dst_hiz   : register(u2);   // mip N+1 in pyramid
@@ -33,7 +38,7 @@ RWTexture2D<uint>  g_dst_hiz   : register(u2);   // mip N+1 in pyramid
 void cs_downsample(uint3 did : SV_DispatchThreadID) {
     uint2 dst = did.xy;
     uint2 src = dst * 2u;
-    if (src.x >= g_src_width || src.y >= g_src_height) return;
+    if (src.x >= g_pc.g_src_width || src.y >= g_pc.g_src_height) return;
 
     // Sample 2×2 source region, take the conservative-max for occlusion.
     float d00 = g_src_depth.Load(int3(src + uint2(0, 0), 0));

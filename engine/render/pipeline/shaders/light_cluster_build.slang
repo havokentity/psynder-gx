@@ -29,14 +29,19 @@ struct ClusterAabb {
     float4 max_xyz_pad;
 };
 
-cbuffer PerView : register(b0) {
-    float4x4 g_view_matrix;
-    float4x4 g_proj_matrix;
-    uint     g_cluster_x;
-    uint     g_cluster_y;
-    uint     g_cluster_z;
-    uint     g_light_count;
+// Push-constants — must match the layout of ClusterPushConstants in
+// engine/render/pipeline/LightCluster.cpp (4 × u32 = 16 bytes).  The view
+// and projection matrices are NOT in the push range; they will land via
+// a per-view UBO in M3 once lane 07 grows the descriptor-set API.  Until
+// then the scaffold only needs the cluster grid dimensions to validate
+// the workgroup count.
+struct ClusterParams {
+    uint g_cluster_x;
+    uint g_cluster_y;
+    uint g_cluster_z;
+    uint g_light_count;
 };
+[[vk::push_constant]] ConstantBuffer<ClusterParams> g_pc;
 
 StructuredBuffer<Light>       g_lights        : register(t1);
 StructuredBuffer<ClusterAabb> g_cluster_aabbs : register(t2);
@@ -48,7 +53,7 @@ RWStructuredBuffer<uint>      g_cluster_light_index  : register(u4);
 void cs_build(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
     // One group per cluster (scaffold layout).
     uint cluster_id = gid.x;
-    uint total_clusters = g_cluster_x * g_cluster_y * g_cluster_z;
+    uint total_clusters = g_pc.g_cluster_x * g_pc.g_cluster_y * g_pc.g_cluster_z;
     if (cluster_id >= total_clusters) return;
 
     // SCAFFOLD: write a zero header so the fragment shader iterates no

@@ -68,7 +68,7 @@ public:
         HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 private:
-    LRESULT wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam);
+    LRESULT wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
     // Raw-input registration — one mouse device with RIDEV_NOLEGACY off
     // (we still want the legacy WM_MOUSEMOVE for cursor position).
