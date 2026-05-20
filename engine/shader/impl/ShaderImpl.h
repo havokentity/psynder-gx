@@ -48,6 +48,10 @@ struct CachedPipeline {
     // True once the PSO has been constructed + handed off to lane 07's
     // registration shim. On hot-reload we recompile + re-register.
     bool                 pso_registered = false;
+    // Cached vertex-input layout from the original create_graphics call.
+    // Hot-reload re-passes this so the rebuilt PSO keeps the same vertex
+    // descriptor (attr_count == 0 == default-layout fallback). POD-by-value.
+    VertexInputDesc      vertex_input{};
 };
 
 // ─── Registry (global singleton for this translation unit) ────────────────

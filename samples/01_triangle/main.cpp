@@ -294,12 +294,11 @@ bool init_resources(psynder::gpu::Device* dev,
 
     // ── Texture ────────────────────────────────────────────────────────
     //
-    // Lane 07's PublicGpu.h create_texture() takes a TextureDesc but does
-    // NOT yet expose an "initial_data" upload path. We allocate the
-    // handle so refcount + descriptor flow works for the cmd_encoder
-    // shim; once lane 07 grows a public-API texture upload (filed as
-    // sample01-001 in INTEGRATION.txt), the same call site picks up the
-    // checkerboard.
+    // The baked 24x24 sRGB checkerboard is uploaded synchronously via the
+    // M1 initial_data path: lane 07 stages it through a host-visible buffer
+    // and a one-shot transfer (UNDEFINED → TRANSFER_DST → SHADER_READ_ONLY),
+    // leaving the VkImageView ready for bind_texture(). sRGB so the sampler
+    // decodes to linear and the sRGB swapchain re-encodes on store.
     {
         g::TextureDesc td{};
         td.width  = kTextureWidth;
@@ -311,21 +310,14 @@ bool init_resources(psynder::gpu::Device* dev,
         td.usage  = static_cast<std::uint32_t>(g::TextureUsage::Sampled)
                   | static_cast<std::uint32_t>(g::TextureUsage::TransferDst);
         td.heap   = g::HeapKind::DeviceLocal;
+        td.initial_data      = kTexture.bytes;
+        td.initial_data_size = kTextureBytes;
         td.debug_name = "sample_01_triangle_tex";
         out.texture = g::create_texture(dev, td);
     }
     if (!out.texture) {
         std::fputs("[sample_01_triangle] create_texture failed\n", stderr);
         return false;
-    }
-    // Touch the texture buffer so the static array isn't stripped by the
-    // linker when there's no runtime upload path. This is a no-op load
-    // through a volatile pointer; it costs one byte of object code and
-    // keeps the constexpr texture data available the moment lane 07
-    // ships a public-API upload (see sample01-001 in INTEGRATION.txt).
-    {
-        volatile std::uint8_t first_byte = kTexture.bytes[0];
-        (void)first_byte;
     }
 
     // ── Sampler ────────────────────────────────────────────────────────
@@ -346,6 +338,24 @@ bool init_resources(psynder::gpu::Device* dev,
         gp.depth_format       = 0;          // no depth attachment in M1
         gp.enable_depth_write = false;
         gp.enable_blend       = false;
+
+        // Vertex layout. The buffer is the engine-canonical 48-byte stride
+        // (pos/normal/uv/color); this unlit shader consumes only pos/uv/color,
+        // so we declare three attributes whose offsets (0/24/32) step over the
+        // unused normal. Attribute index == the shader's input location, so
+        // the order must match VSInput in triangle_textured.slang:
+        // position(0)/uv(1)/color(2). Declaring the normal would leave its
+        // location unconsumed and trip a validation warning.
+        namespace sh = psynder::shader;
+        sh::VertexInputDesc& vi = gp.vertex_input;
+        vi.binding_count            = 1;
+        vi.bindings[0].stride       = static_cast<std::uint16_t>(sizeof(Vertex));
+        vi.bindings[0].input_rate   = sh::VertexInputRate::Vertex;
+        vi.attr_count               = 3;
+        vi.attrs[0] = { sh::VertexAttrSemantic::Position,  sh::VertexAttrFormat::Float32x3, 0, 0  };
+        vi.attrs[1] = { sh::VertexAttrSemantic::TexCoord0, sh::VertexAttrFormat::Float32x2, 0, 24 };
+        vi.attrs[2] = { sh::VertexAttrSemantic::Color0,    sh::VertexAttrFormat::Float32x4, 0, 32 };
+
         out.pipeline = psynder::shader::create_graphics(gp);
     }
     if (!out.pipeline.valid()) {
@@ -425,6 +435,13 @@ void release_resources(SampleResources& r) {
 
     if (r.pipeline.valid()) {
         g::bind_pipeline(cb, r.pipeline);
+        // Bind the sampled texture + sampler as descriptor set 0 (matches the
+        // shader's [[vk::binding(0,0)]] image + [[vk::binding(1,0)]] sampler).
+        // Must follow bind_pipeline: the backend resolves the set against the
+        // currently-bound pipeline layout.
+        if (r.texture && r.sampler) {
+            g::bind_texture(cb, /*slot=*/0, r.texture.get(), r.sampler.get());
+        }
     }
 
     // Push-constants — 128 bytes covers the mvp block + reserved padding.

@@ -146,6 +146,12 @@ bool compile_to_spirv(
     cmd += "-stage ";     cmd += stage_name_slang(stage); cmd += " ";
     cmd += "-profile glsl_450 ";
     cmd += "-target spirv ";
+    // Keep the SPIR-V OpEntryPoint named after the slang entry (e.g. "vs_main")
+    // rather than slang's default rename to "main", so it matches the pName
+    // lane 08 passes to vkCreateGraphicsPipelines (GraphicsPipelineDesc
+    // .entry_point_vs/fs). Without this the PSO build fails with
+    // VUID-VkPipelineShaderStageCreateInfo-pName-00707 ("entry point not found").
+    cmd += "-fvk-use-entrypoint-name ";
     cmd += "-o \""; cmd += out_file; cmd += "\" 2>&1";
 
     std::string log_out;
@@ -277,9 +283,10 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
     auto& reg = impl::PipelineRegistry::get();
 
     impl::CachedPipeline entry;
-    entry.slang_path = desc.slang_path;
-    entry.entry_vs   = vs_ep;
-    entry.entry_fs   = fs_ep;
+    entry.slang_path   = desc.slang_path;
+    entry.entry_vs     = vs_ep;
+    entry.entry_fs     = fs_ep;
+    entry.vertex_input = desc.vertex_input;  // cached for hot-reload re-PSO
 
     std::string log_vs, log_fs;
     bool vs_ok = compile_stage_for_active_backend(
@@ -305,8 +312,13 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
     // Construct the API-native PSO + register with lane 07. The call must
     // happen OUTSIDE reg.mu because the backend implementations grab their
     // own mutex (e.g. Vulkan's g_ctx_mu) and we never want nested locking.
+    //
+    // desc.vertex_input is forwarded by-value-via-const-ref. attr_count==0
+    // (the default-constructed sentinel) triggers the DefaultVertexLayout
+    // fallback inside the backend — preserves every pre-lane-09 callsite.
     const bool pso_ok = impl::create_and_register_graphics_pso(
-        entry.id, entry.spirv_vs, entry.spirv_fs, vs_ep, fs_ep);
+        entry.id, entry.spirv_vs, entry.spirv_fs, vs_ep, fs_ep,
+        desc.vertex_input);
     entry.pso_registered = pso_ok;
     if (!pso_ok) {
         // The handle id is still valid; lane 07's bind_pipeline path will
@@ -438,15 +450,20 @@ void hot_reload_changed()
         // snapshot ids + entries under the lock, recompile outside, then
         // re-publish blobs back into the map under the lock.
         struct PipeSnap {
-            std::uint32_t id;
-            std::string   entry_vs, entry_fs, entry_cs;
+            std::uint32_t   id;
+            std::string     entry_vs, entry_fs, entry_cs;
+            VertexInputDesc vertex_input;
         };
         std::vector<PipeSnap> targets;
         {
             std::lock_guard<std::mutex> lock(reg.mu);
             for (auto& [id, cached] : reg.pipelines) {
                 if (cached.slang_path != w.path) continue;
-                targets.push_back({id, cached.entry_vs, cached.entry_fs, cached.entry_cs});
+                targets.push_back({id,
+                                   cached.entry_vs,
+                                   cached.entry_fs,
+                                   cached.entry_cs,
+                                   cached.vertex_input});
             }
         }
 
@@ -489,7 +506,8 @@ void hot_reload_changed()
             if (any_gfx && gfx_ok) {
                 impl::create_and_register_graphics_pso(
                     t.id, new_vs, new_fs,
-                    t.entry_vs.c_str(), t.entry_fs.c_str());
+                    t.entry_vs.c_str(), t.entry_fs.c_str(),
+                    t.vertex_input);
             }
             if (!t.entry_cs.empty() && !new_cs.empty()) {
                 impl::create_and_register_compute_pso(

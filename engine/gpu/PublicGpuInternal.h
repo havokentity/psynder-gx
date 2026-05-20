@@ -186,6 +186,7 @@ public:
     virtual void bind_pipeline      (CmdBuffer*, ::psynder::shader::PipelineHandle) {}
     virtual void bind_vertex_buffer (CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) {}
     virtual void bind_index_buffer  (CmdBuffer*, Buffer*, IndexType, std::uint64_t) {}
+    virtual void bind_texture       (CmdBuffer*, std::uint32_t, Texture*, Sampler*) {}
     virtual void push_constants     (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) {}
     virtual void draw         (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {}
     virtual void draw_indexed (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) {}

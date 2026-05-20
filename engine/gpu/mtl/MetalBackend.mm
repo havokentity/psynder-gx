@@ -114,6 +114,7 @@ public:
     void bind_pipeline     (CmdBuffer*, ::psynder::shader::PipelineHandle) override;
     void bind_vertex_buffer(CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) override;
     void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t) override;
+    void bind_texture      (CmdBuffer*, std::uint32_t, Texture*, Sampler*) override;
     void push_constants    (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) override;
     void draw        (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override;
     void draw_indexed(CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) override;
@@ -445,16 +446,20 @@ Buffer* MetalBackend::create_buffer(Device* /*dev*/, const BufferDesc& /*desc*/)
 // ─── Format → bytes_per_pixel + MTLPixelFormat helpers ──────────────────
 //
 // Restricted to the M1 supported set per the PublicGpu.h contract on
-// TextureDesc::initial_data. SRGB variants intentionally absent — the
-// SRGB-typed Metal formats use the same byte layout (4 bpp) as their
-// Unorm peers, but lane 07's M1 brief defers SRGB upload to M3 because
-// the gamma channel decision belongs to the asset cooker (lane 09).
+// TextureDesc::initial_data: the uncompressed 8-bit-per-channel formats
+// (Unorm + sRGB). sRGB-typed Metal formats share the byte layout (4 bpp) of
+// their Unorm peers; the sampler decodes sRGB→linear on read so display-
+// authored texels light the shader in linear space. The cooker-owned gamma
+// decision (lane 09) only governs *compressed* BC*/ASTC* uploads, which stay
+// deferred to M3.
 namespace {
 
 inline std::uint32_t bytes_per_pixel_for_upload(Format f) {
     switch (f) {
         case Format::Rgba8Unorm: return 4u;
+        case Format::Rgba8Srgb:  return 4u;
         case Format::Bgra8Unorm: return 4u;
+        case Format::Bgra8Srgb:  return 4u;
         case Format::R8Unorm:    return 1u;
         default:                 return 0u; // not supported on the M1 upload path
     }
@@ -463,7 +468,9 @@ inline std::uint32_t bytes_per_pixel_for_upload(Format f) {
 inline MTLPixelFormat to_mtl_pixel_format_for_upload(Format f) {
     switch (f) {
         case Format::Rgba8Unorm: return MTLPixelFormatRGBA8Unorm;
+        case Format::Rgba8Srgb:  return MTLPixelFormatRGBA8Unorm_sRGB;
         case Format::Bgra8Unorm: return MTLPixelFormatBGRA8Unorm;
+        case Format::Bgra8Srgb:  return MTLPixelFormatBGRA8Unorm_sRGB;
         case Format::R8Unorm:    return MTLPixelFormatR8Unorm;
         default:                 return MTLPixelFormatInvalid;
     }
@@ -487,7 +494,7 @@ Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) 
         const std::uint32_t bpp = bytes_per_pixel_for_upload(desc.format);
         const MTLPixelFormat mtl_fmt = to_mtl_pixel_format_for_upload(desc.format);
         if (bpp == 0 || mtl_fmt == MTLPixelFormatInvalid) {
-            std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Bgra8Unorm/R8Unorm)\n", stderr);
+            std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Rgba8Srgb/Bgra8Unorm/Bgra8Srgb/R8Unorm)\n", stderr);
             delete tex;
             return nullptr;
         }
@@ -930,6 +937,22 @@ void MetalBackend::bind_index_buffer(CmdBuffer* cmd, Buffer* buf,
     c->index_mtl        = mb->handle;
     c->index_mtl_type   = (type == IndexType::U32) ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
     c->index_mtl_offset = offset;
+}
+
+void MetalBackend::bind_texture(CmdBuffer* cmd, std::uint32_t slot,
+                                Texture* tex, Sampler* samp) {
+    auto* c = static_cast<MtlCmdBuf*>(cmd);
+    if (!c || !c->encoder || !tex || !samp) return;
+    id<MTLTexture>      mtl_tex  = static_cast<MtlTexture*>(tex)->handle;
+    id<MTLSamplerState> mtl_samp = static_cast<MtlSampler*>(samp)->handle;
+    if (!mtl_tex || !mtl_samp) return;
+    // Metal keeps textures + samplers in argument tables separate from the
+    // buffer table (kVertexBufferSlot0 / kPushConstantSlot), so `slot` maps
+    // straight to the fragment texture + sampler index. slang lowers
+    // register(tN)/register(sN) to [[texture(N)]]/[[sampler(N)]], matching the
+    // Vulkan [[vk::binding(N,0)]] the textured-triangle shader declares.
+    [c->encoder setFragmentTexture:mtl_tex      atIndex:(NSUInteger)slot];
+    [c->encoder setFragmentSamplerState:mtl_samp atIndex:(NSUInteger)slot];
 }
 
 void MetalBackend::push_constants(CmdBuffer* cmd, const void* data,

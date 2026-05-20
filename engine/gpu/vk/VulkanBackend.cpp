@@ -159,6 +159,7 @@ public:
     void bind_pipeline     (CmdBuffer*, ::psynder::shader::PipelineHandle) override;
     void bind_vertex_buffer(CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) override;
     void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t) override;
+    void bind_texture      (CmdBuffer*, std::uint32_t, Texture*, Sampler*) override;
     void push_constants    (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) override;
     void draw        (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override;
     void draw_indexed(CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) override;
@@ -179,6 +180,13 @@ private:
     bool create_per_frame_(Device* dev);
     void destroy_swapchain_();
     void destroy_per_frame_();
+    // Deferred-destroy: free every queued resource whose last-live frame is
+    // <= through_frame (the GPU has retired it). Pass UINT64_MAX after a
+    // vkDeviceWaitIdle to drain unconditionally.
+    void reclaim_retired_(std::uint64_t through_frame);
+    // Destroy the VkPipelines + VkPipelineLayouts lane 08 registered into the
+    // bind shim. Called from shutdown() once the GPU is idle.
+    void destroy_registered_pipelines_();
 
     VkInstance        instance_       = VK_NULL_HANDLE;
     VkSurfaceKHR      surface_        = VK_NULL_HANDLE;
@@ -187,17 +195,27 @@ private:
     std::uint32_t     gfx_queue_idx_  = 0;
     VkQueue           gfx_queue_      = VK_NULL_HANDLE;
 
+    VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
+    bool                     validation_on_   = false;
+
     VkSwapchainKHR    swapchain_      = VK_NULL_HANDLE;
     VkFormat          sc_format_      = VK_FORMAT_B8G8R8A8_UNORM;
     VkExtent2D        sc_extent_      = {0, 0};
     std::vector<VkImage>     sc_images_;
     std::vector<VkImageView> sc_views_;
+    // Render-finished semaphore is PER SWAPCHAIN IMAGE (not per frame-in-
+    // flight): vkQueuePresentKHR(image i) waits on the semaphore the submit for
+    // image i signalled, and that semaphore must not be reused until that
+    // present completes. vkAcquireNextImageKHR won't return an image whose
+    // present is still pending, so indexing by image index is the safe,
+    // canonical pattern (a per-frame render-finished semaphore has a reuse
+    // hazard once swapchain image count > frames-in-flight).
+    std::vector<VkSemaphore> sc_render_done_;
 
     struct PerFrame {
         VkCommandPool   pool      = VK_NULL_HANDLE;
         VkCommandBuffer cb        = VK_NULL_HANDLE;
         VkSemaphore     img_avail = VK_NULL_HANDLE;
-        VkSemaphore     rdr_done  = VK_NULL_HANDLE;
         VkFence         in_flight = VK_NULL_HANDLE;
         VkCmdBuf        wrapper   {};
     };
@@ -206,12 +224,133 @@ private:
     std::uint32_t frame_slot_   = 0;
     std::uint32_t image_index_  = 0;
 
+    // ─── Deferred-destroy queue ─────────────────────────────────────────────
+    // destroy_resource() enqueues here tagged with the frame index in which
+    // the resource was last live, instead of deleting inline (the GPU may
+    // still be reading it from an in-flight command buffer). Entries are
+    // reclaimed once the owning frame has retired — proven by the per-slot
+    // fence wait in begin_frame, or a vkDeviceWaitIdle on resize/shutdown.
+    // Mutex-guarded: Handle<T> may drop its last reference from a JobSystem
+    // worker thread, off the render thread.
+    struct PendingDestroy { RefCountedBase* res = nullptr; std::uint64_t frame = 0; };
+    std::vector<PendingDestroy> pending_destroy_;
+    std::mutex                  pending_destroy_mu_;
+    // Frame index of the submission that last used each in-flight slot; read
+    // back after that slot's fence signals to advance gpu_completed_frame_.
+    std::array<std::uint64_t, kFramesInFlight> slot_frame_{};
+    std::uint64_t               gpu_completed_frame_ = 0;
+
     char          device_name_buf_[256] = {0};
     bool          surface_attached_     = false;
     bool          swapchain_ready_      = false;
+    bool          device_lost_          = false;
 };
 
 Backend* make_vulkan_backend() { return new (std::nothrow) VulkanBackend(); }
+
+// ─── M1 texture descriptor infra (lane 07-owned) ────────────────────────────
+// The M1 textured-triangle fragment shader samples one texture + sampler
+// (set 0: binding 0 = sampled image, binding 1 = sampler). Lane 07 owns the
+// matching descriptor-set layout + a small pool; lane 08 reuses the same layout
+// for its pipeline layout via psynder_gx_vk_m1_texture_set_layout() (identically
+// defined set layouts are Vulkan-compatible, so the set allocated here binds
+// cleanly to lane 08's pipeline). Process-global like the pipeline shim
+// (single-device assumption). M2's reflected, multi-set allocator supersedes it.
+namespace {
+
+VkDevice              g_desc_device   = VK_NULL_HANDLE;
+VkDescriptorSetLayout g_m1_set_layout = VK_NULL_HANDLE;
+VkDescriptorPool      g_desc_pool     = VK_NULL_HANDLE;
+
+struct TexSetEntry { VkImageView view; VkSampler smp; VkDescriptorSet set; };
+constexpr std::uint32_t kMaxTexSets = 64;
+TexSetEntry   g_tex_sets[kMaxTexSets] = {};
+std::uint32_t g_tex_set_count = 0;
+
+void ensure_m1_descriptor_infra(VkDevice dev) {
+    if (g_desc_device == dev && g_m1_set_layout != VK_NULL_HANDLE) return;
+    g_desc_device = dev;
+
+    VkDescriptorSetLayoutBinding b[2] = {};
+    b[0].binding = 0; b[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    b[0].descriptorCount = 1; b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    b[1].binding = 1; b[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    b[1].descriptorCount = 1; b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo lci{};
+    lci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    lci.bindingCount = 2; lci.pBindings = b;
+    if (vkCreateDescriptorSetLayout(dev, &lci, nullptr, &g_m1_set_layout) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] m1 descriptor set layout creation failed\n", stderr);
+        g_m1_set_layout = VK_NULL_HANDLE;
+        return;
+    }
+    VkDescriptorPoolSize ps[2] = {};
+    ps[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; ps[0].descriptorCount = kMaxTexSets;
+    ps[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;       ps[1].descriptorCount = kMaxTexSets;
+    VkDescriptorPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pci.maxSets = kMaxTexSets; pci.poolSizeCount = 2; pci.pPoolSizes = ps;
+    if (vkCreateDescriptorPool(dev, &pci, nullptr, &g_desc_pool) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] m1 descriptor pool creation failed\n", stderr);
+        vkDestroyDescriptorSetLayout(dev, g_m1_set_layout, nullptr);
+        g_m1_set_layout = VK_NULL_HANDLE;
+    }
+}
+
+void destroy_m1_descriptor_infra() {
+    if (g_desc_device == VK_NULL_HANDLE) return;
+    if (g_desc_pool)     vkDestroyDescriptorPool(g_desc_device, g_desc_pool, nullptr);
+    if (g_m1_set_layout) vkDestroyDescriptorSetLayout(g_desc_device, g_m1_set_layout, nullptr);
+    g_desc_pool = VK_NULL_HANDLE; g_m1_set_layout = VK_NULL_HANDLE; g_desc_device = VK_NULL_HANDLE;
+    g_tex_set_count = 0;
+    for (auto& e : g_tex_sets) e = {};
+}
+
+// Allocate-or-reuse a descriptor set for (view, sampler). The M1 texture is
+// static, so a set is written once and re-bound each frame (no in-flight
+// descriptor update). Returns VK_NULL_HANDLE if the infra isn't ready.
+VkDescriptorSet m1_tex_descriptor_set(VkDevice dev, VkImageView view, VkSampler smp) {
+    if (g_m1_set_layout == VK_NULL_HANDLE || g_desc_pool == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    for (std::uint32_t i = 0; i < g_tex_set_count; ++i)
+        if (g_tex_sets[i].view == view && g_tex_sets[i].smp == smp) return g_tex_sets[i].set;
+    if (g_tex_set_count >= kMaxTexSets) return VK_NULL_HANDLE;
+
+    VkDescriptorSetAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = g_desc_pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &g_m1_set_layout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(dev, &ai, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+
+    VkDescriptorImageInfo img{}; img.imageView = view; img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo smi{}; smi.sampler = smp;
+    VkWriteDescriptorSet w[2] = {};
+    w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[0].dstSet = set; w[0].dstBinding = 0;
+    w[0].descriptorCount = 1; w[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; w[0].pImageInfo = &img;
+    w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[1].dstSet = set; w[1].dstBinding = 1;
+    w[1].descriptorCount = 1; w[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; w[1].pImageInfo = &smi;
+    vkUpdateDescriptorSets(dev, 2, w, 0, nullptr);
+
+    g_tex_sets[g_tex_set_count++] = { view, smp, set };
+    return set;
+}
+
+} // anonymous
+
+// Lane 08 reuses this exact set layout for its graphics pipeline layout (see
+// the M1 descriptor-infra note above). Returns null until the device is up.
+extern "C" void* psynder_gx_vk_m1_texture_set_layout() {
+    return reinterpret_cast<void*>(g_m1_set_layout);
+}
+
+// Lane 08 (shader) builds its deferred VkPipelines from this context hook
+// (defined in engine/shader/PipelineCreateVulkan.cpp). Publishing the device +
+// swapchain format here drains lane 08's deferred-pipeline queue so
+// bind_pipeline can resolve a PipelineHandle — without it every draw no-ops.
+// extern "C" so we don't pull in the shader lane's headers. (This is the
+// "Lane 07 will gain a one-line call into this" follow-up noted in that file.)
+extern "C" void psynder_gx_shader_push_vk_context(void* vk_device,
+                                                  void* vk_physical_device,
+                                                  std::uint32_t swapchain_color_format);
 
 // ─── init / shutdown ────────────────────────────────────────────────────
 bool VulkanBackend::init(Device* dev) {
@@ -241,6 +380,18 @@ bool VulkanBackend::init(Device* dev) {
         swapchain_ready_ = true;
     }
 
+    // Build the M1 texture set layout BEFORE handing lane 08 the device:
+    // its pipeline layouts query psynder_gx_vk_m1_texture_set_layout() while
+    // draining the deferred-pipeline queue inside the push below.
+    ensure_m1_descriptor_infra(device_);
+
+    // Hand lane 08 the live device + swapchain color format so its deferred
+    // graphics/compute pipelines build and register into our bind-shim.
+    psynder_gx_shader_push_vk_context(
+        reinterpret_cast<void*>(device_),
+        reinterpret_cast<void*>(phys_),
+        static_cast<std::uint32_t>(sc_format_));
+
     std::printf("[psy::gpu::vk] init: device=\"%s\" rt=%d mesh=%d surface=%d swap=%d\n",
                 device_name_buf_, (int)dev->supports_rt, (int)dev->supports_mesh,
                 (int)surface_attached_, (int)swapchain_ready_);
@@ -250,6 +401,13 @@ bool VulkanBackend::init(Device* dev) {
 void VulkanBackend::shutdown(Device* /*dev*/) {
     if (device_) {
         vkDeviceWaitIdle(device_);
+        // GPU is idle — tear down every device child BEFORE vkDestroyDevice or
+        // the validation layer flags leaks. Order matters: free the descriptor
+        // pool (its sets reference the M1 sampler + image views) before
+        // reclaiming the deferred-destroy resources that own those objects.
+        destroy_registered_pipelines_();   // lane-08 VkPipeline + VkPipelineLayout
+        destroy_m1_descriptor_infra();      // descriptor pool + sets + set layout
+        reclaim_retired_(UINT64_MAX);        // buffers / textures / samplers
         destroy_per_frame_();
         destroy_swapchain_();
         vkDestroyDevice(device_, nullptr);
@@ -259,11 +417,54 @@ void VulkanBackend::shutdown(Device* /*dev*/) {
         vkDestroySurfaceKHR(instance_, surface_, nullptr);
         surface_ = VK_NULL_HANDLE;
     }
+    if (debug_messenger_ && instance_) {
+        vkDestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
+        debug_messenger_ = VK_NULL_HANDLE;
+    }
     if (instance_) {
         vkDestroyInstance(instance_, nullptr);
         instance_ = VK_NULL_HANDLE;
     }
 }
+
+namespace {
+// Validation / debug-utils message sink. Routes layer messages to stderr with
+// a severity tag; returns VK_FALSE so the offending call still proceeds (we
+// want the VkResult too, not an abort). Used both as the vkCreateInstance
+// pNext (captures create/destroy-time messages) and as the persistent
+// messenger.
+VKAPI_ATTR VkBool32 VKAPI_CALL debug_utils_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT /*types*/,
+    const VkDebugUtilsMessengerCallbackDataEXT* data,
+    void* /*user*/) {
+    const char* sev =
+        (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)   ? "ERROR" :
+        (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ? "WARN"  : "INFO";
+    std::fprintf(stderr, "[vk-validation %s] %s\n",
+                 sev, (data && data->pMessage) ? data->pMessage : "(no message)");
+    return VK_FALSE;
+}
+
+bool instance_layer_available(const char* name) {
+    std::uint32_t n = 0;
+    vkEnumerateInstanceLayerProperties(&n, nullptr);
+    std::vector<VkLayerProperties> props(n);
+    if (n) vkEnumerateInstanceLayerProperties(&n, props.data());
+    for (auto const& p : props) if (std::strcmp(p.layerName, name) == 0) return true;
+    return false;
+}
+
+void fill_debug_messenger_ci(VkDebugUtilsMessengerCreateInfoEXT& ci) {
+    ci.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    ci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
+                       | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    ci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+                   | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+                   | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    ci.pfnUserCallback = debug_utils_callback;
+}
+} // anonymous
 
 // ─── Instance ───────────────────────────────────────────────────────────
 bool VulkanBackend::create_instance_(Device* dev) {
@@ -288,10 +489,26 @@ bool VulkanBackend::create_instance_(Device* dev) {
 #  endif
 #endif
 
+    // Validation: on when the app asks (DeviceDesc.enable_validation) or the
+    // PSYNDER_GX_VK_VALIDATION env var is set — the env var lets us flip it on
+    // a release build with no recompile. Only enable if the layer is actually
+    // installed (Vulkan SDK); otherwise warn and run unvalidated.
     std::vector<const char*> layers;
-    if (dev->desc.enable_validation) {
-        layers.push_back("VK_LAYER_KHRONOS_validation");
+    const bool want_validation =
+        dev->desc.enable_validation || (std::getenv("PSYNDER_GX_VK_VALIDATION") != nullptr);
+    if (want_validation) {
+        if (instance_layer_available("VK_LAYER_KHRONOS_validation")) {
+            layers.push_back("VK_LAYER_KHRONOS_validation");
+            exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            validation_on_ = true;
+        } else {
+            std::fputs("[psy::gpu::vk] validation requested but VK_LAYER_KHRONOS_validation "
+                       "is not installed (need the Vulkan SDK); continuing without it\n", stderr);
+        }
     }
+
+    VkDebugUtilsMessengerCreateInfoEXT dbg_ci{};
+    if (validation_on_) fill_debug_messenger_ci(dbg_ci);
 
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -300,9 +517,23 @@ bool VulkanBackend::create_instance_(Device* dev) {
     ci.ppEnabledExtensionNames = exts.data();
     ci.enabledLayerCount       = static_cast<std::uint32_t>(layers.size());
     ci.ppEnabledLayerNames     = layers.data();
+    // Chain the messenger CI so messages emitted during vkCreateInstance /
+    // vkDestroyInstance are captured too.
+    ci.pNext                   = validation_on_ ? &dbg_ci : nullptr;
 
     VK_CHECK(vkCreateInstance(&ci, nullptr, &instance_));
     volkLoadInstance(instance_);
+
+    // Persistent messenger for the rest of the instance lifetime.
+    if (validation_on_) {
+        if (vkCreateDebugUtilsMessengerEXT(instance_, &dbg_ci, nullptr, &debug_messenger_) != VK_SUCCESS) {
+            std::fputs("[psy::gpu::vk] vkCreateDebugUtilsMessengerEXT failed; validation is on "
+                       "but messages won't be routed\n", stderr);
+            debug_messenger_ = VK_NULL_HANDLE;
+        } else {
+            std::fputs("[psy::gpu::vk] validation layer + debug messenger ENABLED\n", stderr);
+        }
+    }
     return true;
 }
 
@@ -561,12 +792,16 @@ bool VulkanBackend::create_swapchain_(Device* dev, std::uint32_t w, std::uint32_
     }
     sc_format_ = chosen.format;
 
-    VkExtent2D extent {
-        std::max(caps.minImageExtent.width,  std::min(caps.maxImageExtent.width,  w)),
-        std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, h))
-    };
-    if (extent.width == 0 || extent.height == 0) {
+    // The surface dictates the extent on Win32 / Wayland: when currentExtent is
+    // not the 0xFFFFFFFF sentinel we MUST use it verbatim (creating the
+    // swapchain at any other size is a validation error / undefined). Only when
+    // the surface defers to the app (sentinel) do we clamp the requested size.
+    VkExtent2D extent;
+    if (caps.currentExtent.width != 0xFFFFFFFFu) {
         extent = caps.currentExtent;
+    } else {
+        extent.width  = std::max(caps.minImageExtent.width,  std::min(caps.maxImageExtent.width,  w));
+        extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, h));
     }
     sc_extent_ = extent;
     dev->swapchain_width  = extent.width;
@@ -617,6 +852,18 @@ bool VulkanBackend::create_swapchain_(Device* dev, std::uint32_t w, std::uint32_
         vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         VK_CHECK(vkCreateImageView(device_, &vci, nullptr, &sc_views_[i]));
     }
+
+    // One render-finished semaphore per swapchain image (see member comment).
+    // Recreated here because the image count can change across a resize; the
+    // caller (resize_swapchain) has already vkDeviceWaitIdle'd, so destroying
+    // the old set is safe.
+    for (auto s : sc_render_done_) vkDestroySemaphore(device_, s, nullptr);
+    sc_render_done_.assign(cnt, VK_NULL_HANDLE);
+    for (std::uint32_t i = 0; i < cnt; ++i) {
+        VkSemaphoreCreateInfo ssci{};
+        ssci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VK_CHECK(vkCreateSemaphore(device_, &ssci, nullptr, &sc_render_done_[i]));
+    }
     return true;
 }
 
@@ -638,7 +885,7 @@ bool VulkanBackend::create_per_frame_(Device* /*dev*/) {
         VkSemaphoreCreateInfo sci{};
         sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         VK_CHECK(vkCreateSemaphore(device_, &sci, nullptr, &f.img_avail));
-        VK_CHECK(vkCreateSemaphore(device_, &sci, nullptr, &f.rdr_done));
+        // Render-finished semaphore is per-swapchain-image (create_swapchain_).
 
         VkFenceCreateInfo fci{};
         fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -654,7 +901,6 @@ bool VulkanBackend::create_per_frame_(Device* /*dev*/) {
 void VulkanBackend::destroy_per_frame_() {
     for (auto& f : frames_) {
         if (f.in_flight) vkDestroyFence(device_, f.in_flight, nullptr);
-        if (f.rdr_done)  vkDestroySemaphore(device_, f.rdr_done,  nullptr);
         if (f.img_avail) vkDestroySemaphore(device_, f.img_avail, nullptr);
         if (f.pool)      vkDestroyCommandPool(device_, f.pool, nullptr);
         // Reset fields explicitly: `f = {}` would copy-assign PerFrame which
@@ -665,7 +911,6 @@ void VulkanBackend::destroy_per_frame_() {
         f.pool      = VK_NULL_HANDLE;
         f.cb        = VK_NULL_HANDLE;
         f.img_avail = VK_NULL_HANDLE;
-        f.rdr_done  = VK_NULL_HANDLE;
         f.in_flight = VK_NULL_HANDLE;
         // f.wrapper intentionally left in place — it's a no-op shell that
         // doesn't own any GPU resources itself (the cb above is the owner).
@@ -673,6 +918,8 @@ void VulkanBackend::destroy_per_frame_() {
 }
 
 void VulkanBackend::destroy_swapchain_() {
+    for (auto s : sc_render_done_) vkDestroySemaphore(device_, s, nullptr);
+    sc_render_done_.clear();
     for (auto v : sc_views_) vkDestroyImageView(device_, v, nullptr);
     sc_views_.clear();
     sc_images_.clear();
@@ -683,19 +930,36 @@ void VulkanBackend::destroy_swapchain_() {
 }
 
 // ─── Frame loop ─────────────────────────────────────────────────────────
-bool VulkanBackend::begin_frame(Device* /*dev*/) {
+bool VulkanBackend::begin_frame(Device* dev) {
+    if (device_lost_)      return false;
     if (!swapchain_ready_) return true;
 
     auto& f = frames_[frame_slot_];
-    vkWaitForFences  (device_, 1, &f.in_flight, VK_TRUE, UINT64_MAX);
-    vkResetFences    (device_, 1, &f.in_flight);
-    vkResetCommandPool(device_, f.pool, 0);
+    vkWaitForFences(device_, 1, &f.in_flight, VK_TRUE, UINT64_MAX);
 
+    // The slot's fence is signalled ⇒ the submission that last used this slot
+    // has retired on the GPU. Advance the completed-frame watermark and reclaim
+    // any deferred-destroy resources whose last-live frame is now behind it.
+    if (slot_frame_[frame_slot_] > gpu_completed_frame_)
+        gpu_completed_frame_ = slot_frame_[frame_slot_];
+    reclaim_retired_(gpu_completed_frame_);
+
+    // Acquire BEFORE resetting the fence. If the acquire fails (OUT_OF_DATE on
+    // a resize), we bail without having reset the fence — so it stays signalled
+    // and the next begin_frame on this slot won't deadlock in vkWaitForFences.
+    // (A signalled fence + early-out was the original hang-on-resize bug.)
     VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
                                        f.img_avail, VK_NULL_HANDLE,
                                        &image_index_);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
-        // Caller should call resize_swapchain; skip this frame.
+        // Surface no longer matches the swapchain; rebuild and skip this frame.
+        // The acquire failed, so img_avail was not signalled and is reusable.
+        resize_swapchain(dev, dev->swapchain_width, dev->swapchain_height);
+        return false;
+    }
+    if (r == VK_ERROR_DEVICE_LOST) {
+        std::fputs("[psy::gpu::vk] vkAcquireNextImageKHR: VK_ERROR_DEVICE_LOST — halting render\n", stderr);
+        device_lost_ = true;
         return false;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
@@ -703,10 +967,18 @@ bool VulkanBackend::begin_frame(Device* /*dev*/) {
         return false;
     }
 
+    // Acquire succeeded — this frame WILL submit + signal the fence, so it is
+    // now safe to reset it.
+    vkResetFences(device_, 1, &f.in_flight);
+    vkResetCommandPool(device_, f.pool, 0);
+
     VkCommandBufferBeginInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(f.cb, &bi);
+    if (vkBeginCommandBuffer(f.cb, &bi) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] vkBeginCommandBuffer failed\n", stderr);
+        return false;
+    }
 
     f.wrapper.encoded_clear = false;
     f.wrapper.open       = true;
@@ -800,7 +1072,19 @@ void VulkanBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
         w->encoded_clear = true;
     }
 
-    vkEndCommandBuffer(f.cb);
+    if (vkEndCommandBuffer(f.cb) != VK_SUCCESS) {
+        // We never submit, so sc_render_done_[image_index_] will not be
+        // signalled. end_frame() presents waiting on that semaphore, which
+        // would hang forever — halt rendering gracefully instead (begin_frame
+        // and end_frame both early-out on device_lost_). Leave the fence
+        // unsignalled-but-reset: the next begin_frame on this slot resets it
+        // again before reuse, and device_lost_ stops us reaching that path.
+        std::fputs("[psy::gpu::vk] vkEndCommandBuffer failed — entering device-lost (skipping present)\n", stderr);
+        device_lost_ = true;
+        w->open      = false;
+        w->submitted = false;
+        return;
+    }
 
     VkPipelineStageFlags wait_stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si{};
@@ -811,41 +1095,99 @@ void VulkanBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
     si.commandBufferCount   = 1;
     si.pCommandBuffers      = &f.cb;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores    = &f.rdr_done;
-    vkQueueSubmit(gfx_queue_, 1, &si, f.in_flight);
+    // Signal the render-finished semaphore for THIS image (present waits on it).
+    si.pSignalSemaphores    = &sc_render_done_[image_index_];
+    VkResult sr = vkQueueSubmit(gfx_queue_, 1, &si, f.in_flight);
+    if (sr != VK_SUCCESS) {
+        // ANY submit failure means sc_render_done_[image_index_] is never
+        // signalled; presenting on it in end_frame would stall forever. Halt
+        // rendering gracefully (device-lost) rather than hang. We do NOT mark
+        // the frame submitted, so end_frame skips present for it.
+        std::fprintf(stderr,
+                     "[psy::gpu::vk] vkQueueSubmit failed: %s — entering device-lost\n",
+                     result_str(sr));
+        device_lost_ = true;
+        w->open      = false;
+        w->submitted = false;
+        return;
+    }
+    // Record which frame this slot's fence now gates so begin_frame can
+    // advance the GPU-completed watermark when it waits on the fence.
+    slot_frame_[frame_slot_] = dev->current_frame_index;
     w->open      = false;
     w->submitted = true;
 }
 
 void VulkanBackend::end_frame(Device* dev) {
-    if (!swapchain_ready_) return;
-    auto& f = frames_[frame_slot_];
+    if (!swapchain_ready_ || device_lost_) return;
 
     VkPresentInfoKHR pi{};
     pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores    = &f.rdr_done;
+    pi.pWaitSemaphores    = &sc_render_done_[image_index_];
     pi.swapchainCount     = 1;
     pi.pSwapchains        = &swapchain_;
     pi.pImageIndices      = &image_index_;
 
     VkResult r = vkQueuePresentKHR(gfx_queue_, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
-        // resize on next frame
         resize_swapchain(dev, dev->swapchain_width, dev->swapchain_height);
+    } else if (r == VK_ERROR_DEVICE_LOST) {
+        std::fputs("[psy::gpu::vk] vkQueuePresentKHR: VK_ERROR_DEVICE_LOST — halting render\n", stderr);
+        device_lost_ = true;
+    } else if (r != VK_SUCCESS) {
+        std::fprintf(stderr, "[psy::gpu::vk] vkQueuePresentKHR failed: %s\n", result_str(r));
     }
     frame_slot_ = (frame_slot_ + 1) % kFramesInFlight;
 }
 
 void VulkanBackend::resize_swapchain(Device* dev, std::uint32_t w, std::uint32_t h) {
-    if (!swapchain_ready_) return;
+    if (surface_ == VK_NULL_HANDLE || device_ == VK_NULL_HANDLE || device_lost_) return;
+
+    // The surface's currentExtent is authoritative on Win32 / Wayland; fall
+    // back to the requested size only when the surface defers to the app.
+    VkSurfaceCapabilitiesKHR caps{};
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys_, surface_, &caps) != VK_SUCCESS) return;
+    const VkExtent2D want = (caps.currentExtent.width != 0xFFFFFFFFu)
+        ? caps.currentExtent
+        : VkExtent2D{ w, h };
+
+    // Minimized (0-area): a 0-extent swapchain is invalid, so tear it down and
+    // pause rendering until a non-zero size returns.
+    if (want.width == 0 || want.height == 0) {
+        if (swapchain_ready_) {
+            vkDeviceWaitIdle(device_);
+            destroy_swapchain_();
+            swapchain_ready_ = false;
+        }
+        return;
+    }
+
+    // No actual change while healthy → don't rebuild. The game loop calls this
+    // every frame; recreating the swapchain 60x/s would be a perf disaster and
+    // churn GPU memory. (Only resize on a real size change or after
+    // OUT_OF_DATE/SUBOPTIMAL forced us here.)
+    if (swapchain_ready_ && want.width == sc_extent_.width && want.height == sc_extent_.height) {
+        return;
+    }
+
     vkDeviceWaitIdle(device_);
-    create_swapchain_(dev, w, h);
+    // Device is idle here — flush any pending deferred-destroys unconditionally
+    // rather than waiting for a future begin_frame to advance the watermark.
+    reclaim_retired_(UINT64_MAX);
+    // Per-frame objects (pools / cb / img_avail / fences) are size-independent
+    // and survive a resize or a minimize; only the swapchain + its per-image
+    // semaphores are rebuilt here. This also restores rendering after a
+    // minimize tore the swapchain down.
+    if (create_swapchain_(dev, want.width, want.height)) {
+        swapchain_ready_ = true;
+    }
 }
 
 // ─── Resource creation ──────────────────────────────────────────────────
 //
-// Buffers / samplers remain minimal M0-stubs until lane 07 grows them out.
+// Samplers remain a minimal M0-stub; buffers now allocate a real VkBuffer +
+// VkDeviceMemory (see create_buffer below — defined after find_memory_type).
 // create_texture now wires the M1 upload path: when TextureDesc::initial_data
 // is non-null we allocate a real VkImage, a host-visible staging VkBuffer,
 // memcpy the source bytes in, and copy them onto the image with the
@@ -854,8 +1196,30 @@ void VulkanBackend::resize_swapchain(Device* dev, std::uint32_t w, std::uint32_t
 // before returning so the texture is ready by the time the Handle reaches
 // the caller. The staging buffer is destroyed immediately after the wait.
 
-Buffer*  VulkanBackend::create_buffer (Device*, const BufferDesc&)  { return new (std::nothrow) VkBufferRes(); }
-Sampler* VulkanBackend::create_sampler(Device*)                     { return new (std::nothrow) VkSamplerRes(); }
+// create_buffer() + ~VkBufferRes() are defined below, after the
+// find_memory_type() helper they depend on.
+Sampler* VulkanBackend::create_sampler(Device*) {
+    auto* s = new (std::nothrow) VkSamplerRes();
+    if (!s) return nullptr;
+    if (device_ == VK_NULL_HANDLE) return s; // headless: null handle, no crash
+    VkSamplerCreateInfo sci{};
+    sci.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sci.magFilter    = VK_FILTER_LINEAR;
+    sci.minFilter    = VK_FILTER_LINEAR;
+    sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.maxLod       = VK_LOD_CLAMP_NONE;
+    sci.borderColor  = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    if (vkCreateSampler(device_, &sci, nullptr, &s->handle) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_sampler: vkCreateSampler failed\n", stderr);
+        delete s;
+        return nullptr;
+    }
+    s->device_for_destroy = device_;
+    return s;
+}
 void*    VulkanBackend::buffer_map  (Buffer* b) { return static_cast<VkBufferRes*>(b)->mapped; }
 void     VulkanBackend::buffer_unmap(Buffer*) {}
 
@@ -869,7 +1233,9 @@ namespace {
 inline std::uint32_t vk_bytes_per_pixel_for_upload(Format f) {
     switch (f) {
         case Format::Rgba8Unorm: return 4u;
+        case Format::Rgba8Srgb:  return 4u;
         case Format::Bgra8Unorm: return 4u;
+        case Format::Bgra8Srgb:  return 4u;
         case Format::R8Unorm:    return 1u;
         default:                 return 0u;
     }
@@ -878,7 +1244,12 @@ inline std::uint32_t vk_bytes_per_pixel_for_upload(Format f) {
 inline VkFormat to_vk_format_for_upload(Format f) {
     switch (f) {
         case Format::Rgba8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
+        // sRGB sampled images: the hardware decodes sRGB→linear on read, so
+        // display-authored texels (e.g. the sample's checkerboard) light the
+        // shader in linear space and round-trip correctly to an sRGB swapchain.
+        case Format::Rgba8Srgb:  return VK_FORMAT_R8G8B8A8_SRGB;
         case Format::Bgra8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
+        case Format::Bgra8Srgb:  return VK_FORMAT_B8G8R8A8_SRGB;
         case Format::R8Unorm:    return VK_FORMAT_R8_UNORM;
         default:                 return VK_FORMAT_UNDEFINED;
     }
@@ -900,6 +1271,88 @@ inline std::uint32_t find_memory_type(VkPhysicalDevice phys,
 
 } // anonymous
 
+// Real VkBuffer + VkDeviceMemory backing (replaces the M0 stub). BufferDesc
+// carries no initial_data, so HostVisible buffers are filled by the caller via
+// buffer_map() (the M1 vertex/index path); other heaps get device-local memory.
+// (~VkBufferRes() is defined further down alongside ~VkTextureRes() in the
+// psynder::gpu block — an out-of-class dtor must live in the class's namespace,
+// not the inner vk_be one.)
+Buffer* VulkanBackend::create_buffer(Device*, const BufferDesc& d) {
+    auto* buf = new (std::nothrow) VkBufferRes();
+    if (!buf) return nullptr;
+    // Headless / zero-size: keep the M0 contract (null handle, no crash; a
+    // draw that binds it simply no-ops).
+    if (d.size_bytes == 0 || device_ == VK_NULL_HANDLE) return buf;
+
+    VkBufferUsageFlags usage =
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (has_usage(d.usage, BufferUsage::Vertex))   usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (has_usage(d.usage, BufferUsage::Index))    usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (has_usage(d.usage, BufferUsage::Uniform))  usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (has_usage(d.usage, BufferUsage::Storage))  usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (has_usage(d.usage, BufferUsage::Indirect)) usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+
+    VkBufferCreateInfo bci{};
+    bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size        = d.size_bytes;
+    bci.usage       = usage;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bci, nullptr, &buf->handle) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_buffer: vkCreateBuffer failed\n", stderr);
+        delete buf;
+        return nullptr;
+    }
+
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(device_, buf->handle, &req);
+
+    // BufferDesc has no initial_data, so every buffer is filled by the caller
+    // via buffer_map() — pick a HOST_VISIBLE type so the map succeeds. For a
+    // DeviceLocal heap, prefer DEVICE_LOCAL|HOST_VISIBLE (ReBAR / unified
+    // memory — e.g. the RTX 5090 exposes this; fast for CPU write + GPU read),
+    // falling back to plain host-visible. (A device-local-only buffer with a
+    // staging upload is the M2+ path, once buffers carry initial_data.)
+    constexpr VkMemoryPropertyFlags kHostVis =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    std::uint32_t mt = UINT32_MAX;
+    if (d.heap != HeapKind::HostVisible) {
+        mt = find_memory_type(phys_, req.memoryTypeBits,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | kHostVis);
+    }
+    if (mt == UINT32_MAX) {
+        mt = find_memory_type(phys_, req.memoryTypeBits, kHostVis);
+    }
+    if (mt == UINT32_MAX) {
+        std::fputs("[psy::gpu::vk] create_buffer: no host-visible memory type\n", stderr);
+        vkDestroyBuffer(device_, buf->handle, nullptr);
+        buf->handle = VK_NULL_HANDLE;
+        delete buf;
+        return nullptr;
+    }
+
+    VkMemoryAllocateInfo mai{};
+    mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = mt;
+    if (vkAllocateMemory(device_, &mai, nullptr, &buf->mem) != VK_SUCCESS) {
+        std::fputs("[psy::gpu::vk] create_buffer: vkAllocateMemory failed\n", stderr);
+        vkDestroyBuffer(device_, buf->handle, nullptr);
+        buf->handle = VK_NULL_HANDLE;
+        delete buf;
+        return nullptr;
+    }
+    vkBindBufferMemory(device_, buf->handle, buf->mem, 0);
+
+    // Persistently map (every buffer is host-visible + coherent — no flush
+    // needed) so buffer_map() returns the pointer at zero per-call cost; the
+    // dtor unmaps.
+    if (vkMapMemory(device_, buf->mem, 0, VK_WHOLE_SIZE, 0, &buf->mapped) != VK_SUCCESS) {
+        buf->mapped = nullptr;
+    }
+    buf->device_for_destroy = device_;
+    return buf;
+}
+
 Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
     auto* tex = new (std::nothrow) VkTextureRes();
     if (!tex) return nullptr;
@@ -916,7 +1369,7 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
     const std::uint32_t bpp = vk_bytes_per_pixel_for_upload(desc.format);
     const VkFormat vk_fmt   = to_vk_format_for_upload(desc.format);
     if (bpp == 0 || vk_fmt == VK_FORMAT_UNDEFINED) {
-        std::fputs("[psy::gpu::vk] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Bgra8Unorm/R8Unorm)\n", stderr);
+        std::fputs("[psy::gpu::vk] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Rgba8Srgb/Bgra8Unorm/Bgra8Srgb/R8Unorm)\n", stderr);
         delete tex;
         return nullptr;
     }
@@ -1208,10 +1661,32 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
 }
 
 void VulkanBackend::destroy_resource(RefCountedBase* res) {
-    // The virtual ~VkTextureRes() releases its own Vulkan handles via the
-    // cached device_for_destroy pointer (no RTTI / downcast needed here —
+    // Defer the delete: the GPU may still reference `res` from an in-flight
+    // command buffer (e.g. a buffer/texture/sampler bound in the last 1-2
+    // submitted frames). Tag with the owning device's current frame index —
+    // conservative but correct, since a resource whose handle is gone can't be
+    // bound by any *future* frame — and reclaim once that frame has retired.
+    // The virtual ~VkTextureRes()/~VkBufferRes()/~VkSamplerRes() releases the
+    // Vulkan handles when we eventually delete (no RTTI / downcast needed —
     // see VulkanBackend.h for the rationale).
-    delete res;
+    if (!res) return;
+    Device* dev = res->owner();
+    const std::uint64_t frame = dev ? dev->current_frame_index : 0;
+    std::lock_guard<std::mutex> lock(pending_destroy_mu_);
+    pending_destroy_.push_back({res, frame});
+}
+
+void VulkanBackend::reclaim_retired_(std::uint64_t through_frame) {
+    std::lock_guard<std::mutex> lock(pending_destroy_mu_);
+    std::size_t w = 0;
+    for (std::size_t r = 0; r < pending_destroy_.size(); ++r) {
+        if (pending_destroy_[r].frame <= through_frame) {
+            delete pending_destroy_[r].res; // virtual dtor frees Vulkan objects
+        } else {
+            pending_destroy_[w++] = pending_destroy_[r];
+        }
+    }
+    pending_destroy_.resize(w);
 }
 
 // ─── Test-only: mip-0 readback ─────────────────────────────────────────
@@ -1417,6 +1892,23 @@ VkTextureRes::~VkTextureRes() {
     handle = VK_NULL_HANDLE;
     mem    = VK_NULL_HANDLE;
 }
+
+VkBufferRes::~VkBufferRes() {
+    if (device_for_destroy != VK_NULL_HANDLE) {
+        if (mapped) vkUnmapMemory  (device_for_destroy, mem);
+        if (handle) vkDestroyBuffer(device_for_destroy, handle, nullptr);
+        if (mem)    vkFreeMemory   (device_for_destroy, mem, nullptr);
+    }
+    mapped = nullptr;
+    handle = VK_NULL_HANDLE;
+    mem    = VK_NULL_HANDLE;
+}
+
+VkSamplerRes::~VkSamplerRes() {
+    if (device_for_destroy != VK_NULL_HANDLE && handle != VK_NULL_HANDLE)
+        vkDestroySampler(device_for_destroy, handle, nullptr);
+    handle = VK_NULL_HANDLE;
+}
 } // namespace psynder::gpu
 
 namespace psynder::gpu {
@@ -1461,6 +1953,20 @@ static Entry* find_locked(std::uint32_t id) {
 }
 
 } // namespace vk_pipeline_shim
+
+void VulkanBackend::destroy_registered_pipelines_() {
+    if (device_ == VK_NULL_HANDLE) return;
+    namespace s = vk_pipeline_shim;
+    std::lock_guard<std::mutex> _(s::g_mu);
+    for (std::uint32_t i = 0; i < s::g_count; ++i) {
+        if (s::g_entries[i].pipeline != VK_NULL_HANDLE)
+            vkDestroyPipeline(device_, s::g_entries[i].pipeline, nullptr);
+        if (s::g_entries[i].layout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(device_, s::g_entries[i].layout, nullptr);
+        s::g_entries[i] = {};
+    }
+    s::g_count = 0;
+}
 
 } // namespace vk_be
 
@@ -1712,6 +2218,27 @@ void VulkanBackend::bind_index_buffer(CmdBuffer* cmd, Buffer* buf,
     vkCmdBindIndexBuffer(w->cb, h, (VkDeviceSize)offset, it);
 }
 
+void VulkanBackend::bind_texture(CmdBuffer* cmd, std::uint32_t slot,
+                                 Texture* tex, Sampler* samp) {
+    auto* w = static_cast<VkCmdBuf*>(cmd);
+    if (!w || !w->cb || !tex || !samp) return;
+    if (w->bound_pipeline_layout == VK_NULL_HANDLE) {
+        // No pipeline bound yet — the layout that the set binds against is
+        // unknown. bind_pipeline already logs on an unknown handle; stay quiet.
+        return;
+    }
+    VkImageView view = static_cast<VkTextureRes*>(tex)->view;
+    VkSampler   smp  = static_cast<VkSamplerRes*>(samp)->handle;
+    if (view == VK_NULL_HANDLE || smp == VK_NULL_HANDLE) return;
+
+    // M1: the sampled-image + sampler pair is descriptor set `slot` (the
+    // sample binds slot 0, matching the shader's [[vk::binding(_,0)]] set).
+    VkDescriptorSet set = m1_tex_descriptor_set(device_, view, smp);
+    if (set == VK_NULL_HANDLE) return;
+    vkCmdBindDescriptorSets(w->cb, w->bound_bind_point, w->bound_pipeline_layout,
+                            slot, 1, &set, 0, nullptr);
+}
+
 void VulkanBackend::push_constants(CmdBuffer* cmd, const void* data,
                                    std::uint32_t size, std::uint32_t stage_mask) {
     auto* w = static_cast<VkCmdBuf*>(cmd);
@@ -1728,9 +2255,11 @@ void VulkanBackend::push_constants(CmdBuffer* cmd, const void* data,
     if (stage_mask & 4u /*Compute*/)  vk_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
     if (stage_mask & 8u /*Mesh*/)     vk_stages |= VK_SHADER_STAGE_MESH_BIT_EXT;
     if (vk_stages == 0) {
-        // Caller passed an unknown mask — default to ALL_GRAPHICS so the
-        // user sees their data go somewhere.
-        vk_stages = VK_SHADER_STAGE_ALL_GRAPHICS;
+        // Caller passed an unknown mask — default to VERTEX|FRAGMENT, which is
+        // what M1 graphics pipeline layouts declare their push range over.
+        // (ALL_GRAPHICS would add tess/geometry stages absent from the range
+        // and trip VUID-vkCmdPushConstants-offset-01795.)
+        vk_stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     }
     vkCmdPushConstants(w->cb, w->bound_pipeline_layout, vk_stages, 0, size, data);
 }
