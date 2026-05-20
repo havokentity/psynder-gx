@@ -181,7 +181,7 @@ TEST_CASE("audio: bus gain_linear 0.5 halves output on DC signal", "[audio][bus]
 // 3. Zipper-free gain ramp
 // ───────────────────────────────────────────────────────────────────────
 
-TEST_CASE("audio: gain ramp 1.0 → 0.0 has bounded first-derivative", "[audio][bus]") {
+TEST_CASE("audio: gain ramp 1.0 -> 0.0 has bounded first-derivative", "[audio][bus]") {
     BusMixer mixer;
     constexpr u32 kFrames = 512;  // >= kRampSamples (256) so ramp completes
     REQUIRE(mixer.init(48000u, kFrames));

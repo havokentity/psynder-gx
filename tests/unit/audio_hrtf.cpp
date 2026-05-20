@@ -19,7 +19,7 @@ TEST_CASE("audio: HRTF ITD is zero on-axis", "[audio][hrtf]") {
     REQUIRE(std::fabs(itd) < 1e-6f);
 }
 
-TEST_CASE("audio: HRTF ITD at +90° matches Woodworth formula", "[audio][hrtf]") {
+TEST_CASE("audio: HRTF ITD at +90 deg matches Woodworth formula", "[audio][hrtf]") {
     using namespace psynder::audio::detail;
     // Woodworth: ITD = r/c * (sin θ + θ)
     // At θ = π/2 → ITD = r/c * (1 + π/2) ≈ 0.0875 / 343 * 2.5708 ≈ 6.56e-4 s
@@ -41,7 +41,7 @@ TEST_CASE("audio: HRTF ITD is anti-symmetric across the median plane", "[audio][
     }
 }
 
-TEST_CASE("audio: HRTF integer delays at 48 kHz at +90° give ~32 samples", "[audio][hrtf]") {
+TEST_CASE("audio: HRTF integer delays at 48 kHz at +90 deg give ~32 samples", "[audio][hrtf]") {
     using namespace psynder::audio::detail;
     // 6.56e-4 s * 48000 ≈ 31.5 → rounds to 32 samples.
     psynder::u32 left = 0, right = 0;
@@ -73,7 +73,7 @@ TEST_CASE("audio: minimal HRIR has correct delay slot wiring", "[audio][hrtf]") 
 // hit the expected invariants: median-plane sources have ~zero ITD,
 // pinna comb taps depend on elevation, distance attenuation is 1/r.
 
-TEST_CASE("audio: 2-D HRTF — median plane has zero ITD", "[audio][hrtf]") {
+TEST_CASE("audio: 2-D HRTF - median plane has zero ITD", "[audio][hrtf]") {
     using namespace psynder::audio::detail;
     // Source directly above the head → median plane.
     psynder::f32 itd = itd_seconds_2d(/*az=*/0.0f, /*el=*/+psynder::math::kHalfPi);
@@ -89,7 +89,7 @@ TEST_CASE("audio: 2-D HRTF — median plane has zero ITD", "[audio][hrtf]") {
     }
 }
 
-TEST_CASE("audio: 2-D HRTF — ITD shrinks as source elevates", "[audio][hrtf]") {
+TEST_CASE("audio: 2-D HRTF - ITD shrinks as source elevates", "[audio][hrtf]") {
     using namespace psynder::audio::detail;
     // Lateral source at +π/2 azimuth: horizontal-plane ITD is maximum.
     const psynder::f32 horiz = itd_seconds_2d(+psynder::math::kHalfPi, 0.0f);
