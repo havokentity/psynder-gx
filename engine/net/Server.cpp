@@ -40,7 +40,7 @@
 #  endif
 #  include <windows.h>
 #  include <timeapi.h>
-#  pragma comment(lib, "winmm")
+#  pragma comment(lib, "winmm.lib")
 #endif
 
 namespace psynder::net {
@@ -109,8 +109,14 @@ bool Server::start(const TickConfig& cfg, u16 bind_port) noexcept {
 
 void Server::stop() noexcept {
     if (!is_running()) return;
+    // Signal run_until_stop() to exit FIRST (matches the Server.h contract that
+    // stop() ends the loop), then tear down. Setting the atomic before closing
+    // the socket / dropping the timer resolution means a run loop on another
+    // thread breaks promptly instead of continuing to tick after teardown (and,
+    // on Windows, after timeEndPeriod has already lowered the timer res).
+    // start() resets stop_requested_ to false, so the Server stays reusable.
+    stop_requested_.store(true);
     socket_.close();
-    stop_requested_.store(false);
 #if defined(_WIN32)
     if (win_timer_period_set_) {
         timeEndPeriod(1);
