@@ -430,6 +430,13 @@ inline bool compile_map(const lmtools::MapFile& map,
         return false;
     };
 
+    // compile() can be driven programmatically, not just via the CLI (which
+    // already checks this), so guard against a non-positive scale that would
+    // flip/zero the geometry.
+    if (!(opts.scale > 0.0f)) {
+        return fail("scale must be positive");
+    }
+
     // ── Gather solid brushes (worldspawn + any brush-bearing entity) ──────
     const float world_extent = lmtools::map_world_extent(map) * std::max(opts.scale, 1.0f);
     std::vector<SolidBrush> brushes;

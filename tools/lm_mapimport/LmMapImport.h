@@ -129,6 +129,15 @@ inline bool import_map(const lmtools::MapFile& map,
                        std::vector<std::uint8_t>& blob,
                        ImportStats* out_stats,
                        std::string* out_error = nullptr) {
+    // import() can be driven programmatically, not just via the CLI (which
+    // already checks this), so guard against a non-positive scale.
+    if (!(opts.scale > 0.0f)) {
+        if (out_error != nullptr) {
+            *out_error = "scale must be positive";
+        }
+        return false;
+    }
+
     std::vector<std::uint8_t> body;
     std::uint32_t brush_total = 0;
     std::uint32_t face_total = 0;

@@ -702,8 +702,16 @@ inline bool bake(const Scene& scene,
                      max_dim,
                      max_dim);
     }
+    // If the content still overflows after the minimum-density re-pack (more
+    // patches than a max_dim x max_dim atlas can hold at 1px cells), fail
+    // rather than silently clamp the height and drop texels.
+    if (atlas_h > max_dim) {
+        return fail(
+            "lightmap atlas does not fit within the --max-atlas bound even at minimum density; "
+            "raise --max-atlas or reduce the surface count");
+    }
     const std::uint32_t width = std::min(std::max(packed_w, 1u), max_dim);
-    const std::uint32_t height = std::min(std::max(atlas_h, 1u), max_dim);
+    const std::uint32_t height = std::max(atlas_h, 1u);  // <= max_dim per the check above
 
     // ── Bake every patch texel ────────────────────────────────────────────
     std::vector<float> hdr(static_cast<std::size_t>(width) * height * 3u, 0.0f);
