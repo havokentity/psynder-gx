@@ -56,6 +56,7 @@
 #include "internal/Registry.h"
 #include "internal/Bindings.h"
 #include "internal/GxCvars.h"
+#include "internal/Repl.h"
 
 #include <mutex>
 #include <string>
@@ -139,6 +140,8 @@ bool Vm::start() {
     }
     detail::install_world_api(impl.lua.handle(), &impl.registry);
     detail::install_gx_cvars(impl.lua.handle());
+    detail::install_reflect_api(impl.lua.handle());
+    detail::install_repl(impl.lua.handle());
     impl.started = true;
     PSY_LOG_INFO("script: Vm started (Lua {}.{})", LUA_VERSION_MAJOR,
                  LUA_VERSION_MINOR);
@@ -151,6 +154,7 @@ void Vm::shutdown() {
         return;
     }
     detail::uninstall_gx_cvars();
+    detail::uninstall_repl();
     impl.registry.release_refs(impl.lua.handle());
     impl.lua.close();
     impl.started = false;
