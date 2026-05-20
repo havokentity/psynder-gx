@@ -173,7 +173,10 @@ TEST_CASE("march_packet8 leaves a partial-count tail untouched",
     desc.heights      = raw.data();
 
     std::array<pwod::RayMarchHit, 8> out{};
-    for (auto& o : out) o.hit = true;  // poison; padded lanes must be reset/ignored
+    for (auto& o : out) {
+        o.hit = true;       // poison
+        o.t   = -42.0f;     // distinctive sentinel
+    }
     std::array<pwod::HeightfieldRay, 3> rays{};
     rays[0] = {{4.0f, 40.0f, 4.0f}, psynder::math::normalize({0.5f, -0.8f, 0.2f})};
     rays[1] = {{8.0f, 40.0f, 8.0f}, psynder::math::normalize({0.3f, -0.9f, 0.3f})};
@@ -183,6 +186,14 @@ TEST_CASE("march_packet8 leaves a partial-count tail untouched",
     REQUIRE(out[0].hit);
     REQUIRE(out[1].hit);
     REQUIRE_FALSE(out[2].hit);  // up-ray, written by the kernel as no-hit
+
+    // Lanes >= count must be left exactly as the caller passed them — the
+    // kernel must never write past `count` (the poison sentinel survives).
+    for (std::size_t i = 3; i < 8; ++i) {
+        INFO("padded lane " << i);
+        REQUIRE(out[i].hit);
+        REQUIRE(out[i].t == -42.0f);
+    }
 }
 
 TEST_CASE("march_rays driver matches scalar march_ray for every ray",

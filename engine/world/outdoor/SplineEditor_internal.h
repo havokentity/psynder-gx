@@ -174,8 +174,12 @@ inline ArcTable build_arc_table(const SplineTrack& t, u32 samples_per_seg = 32) 
     math::Vec3 prev{0, 0, 0};
     bool       have = false;
     for (usize si = 0; si < seg_count; ++si) {
-        const u32 first = (si == 0) ? 0u : 1u;  // skip duplicate join sample
-        for (u32 k = first; k <= samples_per_seg; ++k) {
+        // Emit every segment's t == 0 sample, including the join (it is the
+        // same world point as the previous segment's t == 1, so it adds zero
+        // length). Keeping a sample at each segment start means a query that
+        // lands on a join brackets inside the owning segment rather than
+        // straddling two, so sample_at_arc_length interpolates correctly.
+        for (u32 k = 0; k <= samples_per_seg; ++k) {
             const f32        tt = static_cast<f32>(k) / static_cast<f32>(samples_per_seg);
             const math::Vec3 p  = bezier_eval(tab.segments[si], tt);
             if (have) cum += math::length(math::sub(p, prev));
@@ -233,8 +237,10 @@ inline TrackFrame sample_at_arc_length(const ArcTable& tab, f32 s) {
     const f32        ds   = b.s - a.s;
     const f32        frac = ds > 0.0f ? (s - a.s) / ds : 0.0f;
 
-    // A bracket usually lies inside one segment; at a join take the next
-    // segment's start (t ~ 0) so we never read a stale segment index.
+    // Every segment now carries its own t == 0 sample, so a bracket lies
+    // inside one segment. The cross-segment case is a defensive fallback: a's
+    // join point equals b's segment at t == 0, so interpolate 0 -> b.t with
+    // frac instead of dropping it (which would jump forward past the join).
     u32 seg;
     f32 tt;
     if (a.seg == b.seg) {
@@ -242,7 +248,7 @@ inline TrackFrame sample_at_arc_length(const ArcTable& tab, f32 s) {
         tt  = a.t + (b.t - a.t) * frac;
     } else {
         seg = b.seg;
-        tt  = b.t;
+        tt  = b.t * frac;
     }
 
     const SplineRoadSegment& sg = tab.segments[seg];
@@ -284,9 +290,15 @@ inline void auto_bank(SplineTrack& t, f32 max_bank_rad, f32 sensitivity = 1.0f) 
         return v;
     };
     const auto bank_at = [&](usize prev, usize cur, usize next) noexcept {
-        const math::Vec3 in  = math::normalize(math::sub(t.points[cur].position, t.points[prev].position));
-        const math::Vec3 out = math::normalize(math::sub(t.points[next].position, t.points[cur].position));
-        const f32        turn = math::cross(in, out).y;  // signed turn in the XZ ground plane
+        // Project the chords onto the XZ ground plane (zero Y) BEFORE
+        // normalising, so elevation changes don't rescale the turn measure.
+        // A purely vertical chord projects to zero -> normalize() returns it
+        // unchanged -> turn 0 -> no banking, which is the right default.
+        const math::Vec3 din  = math::sub(t.points[cur].position, t.points[prev].position);
+        const math::Vec3 dout = math::sub(t.points[next].position, t.points[cur].position);
+        const math::Vec3 in   = math::normalize(math::Vec3{din.x, 0.0f, din.z});
+        const math::Vec3 out  = math::normalize(math::Vec3{dout.x, 0.0f, dout.z});
+        const f32        turn = math::cross(in, out).y;  // signed XZ-plane turn
         return clamp_bank(turn * sensitivity);
     };
 

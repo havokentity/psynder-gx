@@ -14,10 +14,13 @@
 // is 16-bit (u16), address generation (texel index + corner fetch) stays
 // scalar — that is memory-bound regardless of width — while the filter math,
 // ray stepping, hit test, bisection refine, and LOD band selection are packed
-// 8-wide. Every kernel reproduces its scalar reference per lane bit-for-bit
-// (it uses the same op order — mul+add, never fused multiply-add — so packed
-// SSE/NEON lanes equal the scalar reference), which is what the unit test
-// pins.
+// 8-wide. Each kernel reproduces its scalar reference per lane to within
+// floating-point tolerance: the packet uses explicit mul+add (separate
+// intrinsic calls don't contract into an FMA), but the scalar reference may
+// be FMA-contracted by the compiler — psynder_simd enables FMA on AVX2 hosts
+// and this lane doesn't force -ffp-contract=off — so a lane can differ by
+// ~1 ULP. CDLOD LOD selection is integer and matches exactly. The unit test
+// pins this with a tight tolerance (and exact equality for LOD).
 //
 // Header-only so the unit test can exercise the kernels without linking the
 // world_outdoor static lib (tests/unit/CMakeLists.txt links a fixed lane set,
@@ -52,8 +55,9 @@ inline constexpr usize kChunkLodGrain            = 256;
 
 // ─── 8-wide bilinear height sample ───────────────────────────────────────
 // Eight world-XZ positions in metres → eight bilinear heights in metres.
-// Matches scalar `sample_bilinear` per lane: identical division / floor / frac
-// (scalar, per lane) and an identical mul+add lerp (packed). Border texels
+// Matches scalar `sample_bilinear` per lane to fp tolerance: identical
+// division / floor / frac (scalar, per lane) and a mul+add lerp (packed; the
+// scalar reference may be FMA-contracted — see the header note). Border texels
 // read 0 (the `sample_raw` convention), so out-of-map lanes return a flat
 // horizon just like the scalar path.
 PSY_FORCEINLINE simd::f32x8 sample_bilinear_x8(const HeightmapDesc& h, simd::f32x8 wx8,
@@ -165,7 +169,8 @@ inline void march_packet8(const HeightmapDesc& h, const HeightfieldRay* rays, u3
         const simd::mask8 hit_now = simd::mask_and(simd::cmp_le8(wy8, th8), active);
         if (simd::any_of(hit_now)) {
             // frac = clamp(dy_a / (dy_a - dy_b), 0, 1); denom <= 0 → 0. Same
-            // order as the scalar reference, so the refined t is bit-identical.
+            // order as the scalar reference, so the refined t matches it to
+            // fp tolerance (modulo FMA contraction — see the header note).
             const simd::f32x8 dy_a  = simd::sub8(prev_ry, prev_th);  // > 0 (above)
             const simd::f32x8 dy_b  = simd::sub8(wy8, th8);          // <= 0 (below)
             const simd::f32x8 denom = simd::sub8(dy_a, dy_b);
