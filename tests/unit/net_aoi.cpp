@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Psynder — lane 14 / net Area-Of-Interest filter tests.
 
+#include <array>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "net/Aoi.h"

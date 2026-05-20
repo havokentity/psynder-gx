@@ -33,6 +33,7 @@
 #  include "platform/win32/Win32Window.h"
 #elif defined(PSYNDER_GX_PLATFORM_LINUX)
 #  include "platform/Platform.h"
+#  include "platform/linux/PublicPlatformLinux.h"
 #endif
 
 namespace {
@@ -103,7 +104,16 @@ int main(int argc, char** argv) {
     std::uint64_t frame_idx = 0;
     while (!plat::should_close(win)) {
         plat::pump_events();
-        if (!psynder::gpu::begin_frame(dev)) continue;
+        if (!psynder::gpu::begin_frame(dev)) {
+            // begin_frame can fail on OUT_OF_DATE_KHR / similar Metal surface
+            // events (window resize, display change). Drive a swapchain
+            // resize before retrying — otherwise the loop spins on stale
+            // surface caps forever and the window appears frozen.
+            psynder::gpu::resize_swapchain(dev,
+                plat::drawable_width(win),
+                plat::drawable_height(win));
+            continue;
+        }
         if (auto* cmd = psynder::gpu::cmd_open(dev)) {
             psynder::gpu::cmd_submit(dev, cmd);
         }
@@ -186,7 +196,16 @@ int main(int argc, char** argv) {
     std::uint64_t frame_idx = 0;
     while (!win->should_close()) {
         win->poll_events();
-        if (!psynder::gpu::begin_frame(dev)) continue;
+        if (!psynder::gpu::begin_frame(dev)) {
+            // begin_frame can fail on OUT_OF_DATE_KHR (window resize, monitor
+            // mode change, sleep/wake). Drive a swapchain resize before
+            // retrying — otherwise the loop spins on stale surface caps
+            // forever and the window appears frozen.
+            psynder::gpu::resize_swapchain(dev,
+                win->window_width(),
+                win->window_height());
+            continue;
+        }
         if (auto* cmd = psynder::gpu::cmd_open(dev)) {
             psynder::gpu::cmd_submit(dev, cmd);
         }
@@ -210,18 +229,100 @@ int main(int argc, char** argv) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Linux — placeholder until lane 24 ⇄ lane 07 handle ABI lands
+// Linux — Vulkan swapchain on Wayland or X11/XCB via lane 24 + lane 07
 // ────────────────────────────────────────────────────────────────────────
 #elif defined(PSYNDER_GX_PLATFORM_LINUX)
 
 int main(int argc, char** argv) {
+    namespace plat      = psynder::platform;
+    namespace lin_plat  = psynder::platform::linux_platform;
     const Args args = parse(argc, argv);
-    std::printf("[sample_00_clear] platform=Linux  backend=Vulkan  smoke_frames=%d\n",
-                args.smoke_frames);
-    std::printf("[sample_00_clear] M0 visual demo pending Wayland/XCB handle ABI "
-                "between lane 24 and lane 07. The CI build proves the engine\n"
-                "                  libs compile on this platform; visual smoke "
-                "lands with the M1 / lane09-002 cmd-encoder API extension.\n");
+
+    if (!args.quiet) {
+        std::printf("[sample_00_clear] platform=Linux  backend=Vulkan  smoke_frames=%d\n",
+                    args.smoke_frames);
+        std::fflush(stdout);
+    }
+
+    plat::WindowDesc wdesc;
+    wdesc.title         = "Psynder-GX · sample_00_clear (M0)";
+    wdesc.window_width  = 1280;
+    wdesc.window_height = 720;
+
+    plat::Window* win = plat::create_window(wdesc);
+    if (!win) {
+        std::fprintf(stderr, "[sample_00_clear] failed to create Linux window "
+                              "(Wayland / XCB both unavailable)\n");
+        return 1;
+    }
+
+    // Obtain the typed handle (LinuxNativeWindowHandle*) for the Vulkan backend.
+    // Lane 24's create_window_impl populated this when it created the window.
+    const auto* lh = lin_plat::native_window_handle(win);
+    if (!lh) {
+        std::fprintf(stderr,
+            "[sample_00_clear] native_window_handle returned null — "
+            "window is not a graphical type or was not created by lane 24\n");
+        plat::destroy_window(win);
+        return 1;
+    }
+
+    psynder::gpu::DeviceDesc ddesc{};
+    ddesc.enable_validation    = false;
+    ddesc.enable_rt            = false;
+    ddesc.enable_mesh_shaders  = false;
+    // Cast LinuxNativeWindowHandle* to void* for DeviceDesc::native_window_handle.
+    // VulkanBackend::create_surface_() casts it back on the Linux path.
+    ddesc.native_window_handle = const_cast<psynder::gpu::LinuxNativeWindowHandle*>(lh);
+
+    psynder::gpu::Device* dev = psynder::gpu::create_device(ddesc);
+    if (!dev) {
+        std::fprintf(stderr,
+            "[sample_00_clear] psy::gpu::create_device failed "
+            "(check Vulkan runtime + ICD + Wayland/XCB WSI extension)\n");
+        plat::destroy_window(win);
+        return 1;
+    }
+    if (!args.quiet) {
+        std::printf("[sample_00_clear] device=%s  rt=%d  mesh=%d\n",
+                    psynder::gpu::device_name(dev),
+                    psynder::gpu::device_supports_rt(dev) ? 1 : 0,
+                    psynder::gpu::device_supports_mesh_shaders(dev) ? 1 : 0);
+        std::fflush(stdout);
+    }
+
+    std::uint64_t frame_idx = 0;
+    while (!win->should_close()) {
+        win->poll_events();
+        if (!psynder::gpu::begin_frame(dev)) {
+            // begin_frame can fail on OUT_OF_DATE_KHR (window resize, monitor
+            // mode change, sleep/wake). Drive a swapchain resize before
+            // retrying — otherwise the loop spins on stale surface caps
+            // forever and the window appears frozen.
+            psynder::gpu::resize_swapchain(dev,
+                win->window_width(),
+                win->window_height());
+            continue;
+        }
+        if (auto* cmd = psynder::gpu::cmd_open(dev)) {
+            psynder::gpu::cmd_submit(dev, cmd);
+        }
+        psynder::gpu::end_frame(dev);
+        psynder::gpu::resize_swapchain(dev,
+            win->window_width(),
+            win->window_height());
+        if (args.smoke_frames > 0 &&
+            ++frame_idx >= static_cast<std::uint64_t>(args.smoke_frames)) {
+            if (!args.quiet) {
+                std::printf("[sample_00_clear] smoke complete: %llu frames\n",
+                            static_cast<unsigned long long>(frame_idx));
+            }
+            break;
+        }
+    }
+
+    psynder::gpu::destroy_device(dev);
+    plat::destroy_window(win);
     return 0;
 }
 

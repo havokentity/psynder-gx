@@ -37,13 +37,27 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <new>
 
 namespace psynder::gpu {
 
 // ─── Concrete Metal-owning resource types ───────────────────────────────
+//
+// ARC is OFF for this TU (-fno-objc-arc). Any id<T> we hold must be
+// released when the wrapper is destroyed. The destructors below are
+// invoked via the virtual ~RefCountedBase chain from `destroy_resource()`
+// (the Backend method that calls `delete` on the resource pointer).
 struct MtlBuffer  : Buffer  { id<MTLBuffer>       handle = nil; void* mapped = nullptr; };
-struct MtlTexture : Texture { id<MTLTexture>      handle = nil; };
+struct MtlTexture : Texture {
+    id<MTLTexture> handle = nil;
+    ~MtlTexture() override {
+        if (handle) {
+            [handle release];
+            handle = nil;
+        }
+    }
+};
 struct MtlSampler : Sampler { id<MTLSamplerState> handle = nil; };
 struct MtlCmdBuf  : CmdBuffer {
     id<MTLCommandBuffer>          cb               = nil;
@@ -100,12 +114,17 @@ public:
     void bind_pipeline     (CmdBuffer*, ::psynder::shader::PipelineHandle) override;
     void bind_vertex_buffer(CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) override;
     void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t) override;
+    void bind_texture      (CmdBuffer*, std::uint32_t, Texture*, Sampler*) override;
     void push_constants    (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) override;
     void draw        (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override;
     void draw_indexed(CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) override;
     void dispatch    (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t) override;
 
     void destroy_resource(RefCountedBase* res) override;
+
+    // Test-only readback (see PublicGpuInternal.h Backend::texture_readback_mip0).
+    bool texture_readback_mip0(Texture* tex, void* out_dst_bytes,
+                               std::size_t dst_bytes_size) override;
 
 private:
     bool attach_layer_from_handle_(Device* dev, void* native_handle);
@@ -374,8 +393,14 @@ void MetalBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
         auto* c = static_cast<MtlCmdBuf*>(cmd);
         // Close any encoder the user left open. Render lanes that call
         // begin_render but forget end_render still get a valid submit.
+        // Render encoder carries an explicit [retain] from begin_render —
+        // balance it with [release] here on the forgotten-end_render path.
+        // (Compute encoders are opened-and-closed within a single dispatch()
+        // autoreleasepool scope and never persist across calls, so they
+        // need only endEncoding here, not release.)
         if (c->encoder) {
             [c->encoder endEncoding];
+            [c->encoder release];
             c->encoder = nil;
         }
         if (c->compute_encoder) {
@@ -408,18 +433,134 @@ void MetalBackend::resize_swapchain(Device* dev, std::uint32_t w, std::uint32_t 
     }
 }
 
-// ─── Resource creation — minimal stubs for M0 ───────────────────────────
+// ─── Resource creation ──────────────────────────────────────────────────
 //
-// Buffers / textures / samplers are not exercised by sample_00_clear.
-// We return concrete RefCountedBase-derived stub objects so Handle<T>
-// arithmetic works for callers (lane 09/21) that wire up paths against
-// the public surface but don't actually use the contents at M0.
+// Buffers / samplers remain minimal M0-stubs. create_texture now grows the
+// M1 upload path: when TextureDesc::initial_data != nullptr we allocate a
+// real id<MTLTexture> with shader-read usage and replaceRegion: the bytes
+// in place. Apple Silicon's unified memory means no staging buffer is
+// needed; the texture's backing storage is host-visible by default
+// (MTLStorageModeShared on M-series).
+//
+// When initial_data is null we preserve the existing M0 behaviour (return
+// a bare MtlTexture wrapper with handle == nil) so render lanes that only
+// need a handle for ABI plumbing continue to compile + link.
 Buffer* MetalBackend::create_buffer(Device* /*dev*/, const BufferDesc& /*desc*/) {
     return new (std::nothrow) MtlBuffer();
 }
-Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& /*desc*/) {
-    return new (std::nothrow) MtlTexture();
+
+// ─── Format → bytes_per_pixel + MTLPixelFormat helpers ──────────────────
+//
+// Restricted to the M1 supported set per the PublicGpu.h contract on
+// TextureDesc::initial_data: the uncompressed 8-bit-per-channel formats
+// (Unorm + sRGB). sRGB-typed Metal formats share the byte layout (4 bpp) of
+// their Unorm peers; the sampler decodes sRGB→linear on read so display-
+// authored texels light the shader in linear space. The cooker-owned gamma
+// decision (lane 09) only governs *compressed* BC*/ASTC* uploads, which stay
+// deferred to M3.
+namespace {
+
+inline std::uint32_t bytes_per_pixel_for_upload(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm: return 4u;
+        case Format::Rgba8Srgb:  return 4u;
+        case Format::Bgra8Unorm: return 4u;
+        case Format::Bgra8Srgb:  return 4u;
+        case Format::R8Unorm:    return 1u;
+        default:                 return 0u; // not supported on the M1 upload path
+    }
 }
+
+inline MTLPixelFormat to_mtl_pixel_format_for_upload(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm: return MTLPixelFormatRGBA8Unorm;
+        case Format::Rgba8Srgb:  return MTLPixelFormatRGBA8Unorm_sRGB;
+        case Format::Bgra8Unorm: return MTLPixelFormatBGRA8Unorm;
+        case Format::Bgra8Srgb:  return MTLPixelFormatBGRA8Unorm_sRGB;
+        case Format::R8Unorm:    return MTLPixelFormatR8Unorm;
+        default:                 return MTLPixelFormatInvalid;
+    }
+}
+
+} // anonymous
+
+Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) {
+    @autoreleasepool {
+        auto* tex = new (std::nothrow) MtlTexture();
+        if (!tex) return nullptr;
+
+        // Fast path: caller didn't supply initial data → preserve the
+        // existing M0 stub behaviour (no MTLTexture allocation, handle nil).
+        if (desc.initial_data == nullptr) {
+            return tex;
+        }
+
+        // Validate format. M1 supports a small allow-list; everything else
+        // (SRGB, compressed, depth, float) goes through the M3 path.
+        const std::uint32_t bpp = bytes_per_pixel_for_upload(desc.format);
+        const MTLPixelFormat mtl_fmt = to_mtl_pixel_format_for_upload(desc.format);
+        if (bpp == 0 || mtl_fmt == MTLPixelFormatInvalid) {
+            std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Rgba8Srgb/Bgra8Unorm/Bgra8Srgb/R8Unorm)\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+
+        // Validate dimensions + buffer size. mip-0-only contract.
+        if (desc.width == 0 || desc.height == 0) {
+            std::fputs("[psy::gpu::mtl] create_texture: initial_data given but width/height is 0\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+        const std::size_t expected = static_cast<std::size_t>(desc.width)
+                                   * static_cast<std::size_t>(desc.height)
+                                   * static_cast<std::size_t>(bpp);
+        if (desc.initial_data_size != expected) {
+            std::fprintf(stderr,
+                "[psy::gpu::mtl] create_texture: initial_data_size=%zu != expected %zu (%ux%u, %u bpp)\n",
+                desc.initial_data_size, expected, desc.width, desc.height, bpp);
+            delete tex;
+            return nullptr;
+        }
+
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:mtl_fmt
+                                         width:(NSUInteger)desc.width
+                                        height:(NSUInteger)desc.height
+                                     mipmapped:NO];
+        // Default usage = ShaderRead. Promote when the user asks for more
+        // via TextureUsage bits; storage / RT need explicit opt-in so the
+        // Metal driver can pick the optimal backing layout.
+        MTLTextureUsage usage = MTLTextureUsageShaderRead;
+        if (has_usage(desc.usage, TextureUsage::Storage))      usage |= MTLTextureUsageShaderWrite;
+        if (has_usage(desc.usage, TextureUsage::RenderTarget) ||
+            has_usage(desc.usage, TextureUsage::DepthStencil)) usage |= MTLTextureUsageRenderTarget;
+        td.usage = usage;
+        // Unified memory on Apple Silicon — replaceRegion: writes go
+        // straight to the texture's backing store, no staging buffer.
+        td.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> handle = [mtl_device_ newTextureWithDescriptor:td];
+        if (!handle) {
+            std::fputs("[psy::gpu::mtl] create_texture: newTextureWithDescriptor returned nil\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+
+        MTLRegion region = MTLRegionMake2D(0, 0,
+                                           (NSUInteger)desc.width,
+                                           (NSUInteger)desc.height);
+        const NSUInteger bytes_per_row =
+            (NSUInteger)desc.width * (NSUInteger)bpp;
+        [handle replaceRegion:region
+                  mipmapLevel:0
+                    withBytes:desc.initial_data
+                  bytesPerRow:bytes_per_row];
+
+        tex->handle = handle;
+        return tex;
+    }
+}
+
 Sampler* MetalBackend::create_sampler(Device* /*dev*/) {
     return new (std::nothrow) MtlSampler();
 }
@@ -435,6 +576,47 @@ void MetalBackend::buffer_unmap(Buffer* /*b*/) {
 void MetalBackend::destroy_resource(RefCountedBase* res) {
     // M0: synchronous destroy. M1+: defer-release to last_completed_frame.
     delete res;
+}
+
+// ─── Test-only: mip-0 readback ─────────────────────────────────────────
+//
+// Drains the texture's mip-0 contents back into a host-visible byte
+// buffer. NOT a public ABI — see PublicGpuInternal.h Backend::
+// texture_readback_mip0. Apple Silicon's unified memory makes this
+// trivial: replaceRegion-style writes are immediately visible to
+// getBytes:fromRegion:, no staging or fence wait needed.
+bool MetalBackend::texture_readback_mip0(Texture* base_tex,
+                                         void* out_dst_bytes,
+                                         std::size_t dst_bytes_size) {
+    if (!base_tex || !out_dst_bytes || dst_bytes_size == 0) return false;
+    auto* tex = static_cast<MtlTexture*>(base_tex);
+    if (!tex->handle) return false;
+
+    @autoreleasepool {
+        id<MTLTexture> h = tex->handle;
+        const NSUInteger w = h.width;
+        const NSUInteger hh = h.height;
+        // bpp inferred from the texture's MTLPixelFormat. We only handle
+        // the M1-supported set; anything else means the upload path also
+        // refused it so we shouldn't be reading it back.
+        NSUInteger bpp = 0;
+        switch (h.pixelFormat) {
+            case MTLPixelFormatRGBA8Unorm: bpp = 4; break;
+            case MTLPixelFormatBGRA8Unorm: bpp = 4; break;
+            case MTLPixelFormatR8Unorm:    bpp = 1; break;
+            default: return false;
+        }
+        const std::size_t expected = (std::size_t)w * (std::size_t)hh * (std::size_t)bpp;
+        if (dst_bytes_size != expected) return false;
+
+        const NSUInteger bytes_per_row = w * bpp;
+        MTLRegion region = MTLRegionMake2D(0, 0, w, hh);
+        [h getBytes:out_dst_bytes
+            bytesPerRow:bytes_per_row
+              fromRegion:region
+             mipmapLevel:0];
+        return true;
+    }
 }
 
 // ─── Render-encoder API (lane09-001 unblock) ────────────────────────────
@@ -474,8 +656,13 @@ struct Entry {
 
 static Entry  g_entries[kMaxPipelines] = {};
 static std::uint32_t g_count = 0;
+// Writers: psynder_gx_mtl_register_render_pso / *_compute_pso called from
+// lane 08's worker threads.  Reader: bind_pipeline() runs on the render
+// thread.  All access goes through g_mu.
+static std::mutex g_mu;
 
-static Entry* find(std::uint32_t needle) {
+// Locked find — caller must already hold g_mu.
+static Entry* find_locked(std::uint32_t needle) {
     for (std::uint32_t i = 0; i < g_count; ++i) {
         if (g_entries[i].handle_id == needle) return &g_entries[i];
     }
@@ -491,14 +678,18 @@ static Entry* find(std::uint32_t needle) {
 extern "C" {
 
 void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) {
-    auto& s = pipeline_shim::g_entries;
-    auto& cnt = pipeline_shim::g_count;
     // ARC is OFF for this TU (per CMakeLists: -fno-objc-arc), so we can
     // bridge-cast a raw void* to a strong reference and assign without
     // ownership semantics getting in the way. The caller (lane 08) must
     // ensure the MTLRenderPipelineState outlives the registration.
     id pso = (__bridge id)mtl_pso;
-    if (auto* e = pipeline_shim::find(handle_id)) {
+
+    // Lock the shim — lane 08 may call this from a worker thread while
+    // the render thread is in bind_pipeline() walking g_entries.
+    std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
+    auto& s = pipeline_shim::g_entries;
+    auto& cnt = pipeline_shim::g_count;
+    if (auto* e = pipeline_shim::find_locked(handle_id)) {
         e->render_pso = pso;
         return;
     }
@@ -515,13 +706,15 @@ void psynder_gx_mtl_register_compute_pso(std::uint32_t handle_id, void* mtl_pso,
                                          std::uint32_t tgs_x,
                                          std::uint32_t tgs_y,
                                          std::uint32_t tgs_z) {
-    auto& s = pipeline_shim::g_entries;
-    auto& cnt = pipeline_shim::g_count;
     id pso = (__bridge id)mtl_pso;
     MTLSize tgs = MTLSizeMake(tgs_x ? tgs_x : 1,
                               tgs_y ? tgs_y : 1,
                               tgs_z ? tgs_z : 1);
-    if (auto* e = pipeline_shim::find(handle_id)) {
+
+    std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
+    auto& s = pipeline_shim::g_entries;
+    auto& cnt = pipeline_shim::g_count;
+    if (auto* e = pipeline_shim::find_locked(handle_id)) {
         e->compute_pso = pso;
         e->compute_tgs = tgs;
         return;
@@ -612,7 +805,16 @@ void MetalBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
             }
         }
 
-        c->encoder = [c->cb renderCommandEncoderWithDescriptor:rpd];
+        // Explicit [retain] is REQUIRED here: the TU is -fno-objc-arc and
+        // the call returns an autoreleased object.  Without the retain, the
+        // encoder would be released when this `@autoreleasepool` block
+        // drains at function exit, and every subsequent encoder call —
+        // set_viewport / set_scissor / bind_pipeline / push_constants /
+        // bind_vertex_buffer / bind_index_buffer / draw_indexed — would be
+        // hitting a dangling pointer.  end_render() balances this with a
+        // matching [release] after [endEncoding].  (Same pattern is used
+        // for frame_.drawable / frame_.command_buffer above, ~L294/L300.)
+        c->encoder = [[c->cb renderCommandEncoderWithDescriptor:rpd] retain];
         c->encoder.label = @"psy::gpu user pass";
         // Suppress the M0 auto-clear: cmd_submit's frame_.encoded_clear gate
         // is per-frame; flipping it here means subsequent cmd_submit
@@ -626,6 +828,10 @@ void MetalBackend::end_render(CmdBuffer* cmd) {
         auto* c = static_cast<MtlCmdBuf*>(cmd);
         if (!c || !c->encoder) return;
         [c->encoder endEncoding];
+        // Balance the explicit [retain] in begin_render.  Without the
+        // matching [release], the encoder would leak its retain count
+        // indefinitely (process-wide leak — small but accumulates).
+        [c->encoder release];
         c->encoder = nil;
         c->bound_render_pso = nil;
         c->index_mtl        = nil;
@@ -664,8 +870,25 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
         c->bound_compute_pso = nil;
         return;
     }
-    auto* entry = pipeline_shim::find(h.id);
-    if (!entry) {
+    // Snapshot the entry under the lock so a concurrent register_*_pso()
+    // from a worker thread doesn't tear the read. After the copy we drop
+    // the lock — the rest of bind_pipeline only touches `c` (the local
+    // cmd buffer) and the Metal encoder, neither of which the shim mutex
+    // covers.
+    id  shim_render_pso  = nil;
+    id  shim_compute_pso = nil;
+    MTLSize shim_tgs     = MTLSizeMake(1, 1, 1);
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
+        if (auto* entry = pipeline_shim::find_locked(h.id)) {
+            shim_render_pso  = entry->render_pso;
+            shim_compute_pso = entry->compute_pso;
+            shim_tgs         = entry->compute_tgs;
+            found = true;
+        }
+    }
+    if (!found) {
         // Lane 08 hasn't published a Metal PSO for this handle yet. This
         // is the expected state today: lane 08 only emits Metal IR blobs,
         // not state objects. Render lanes that hit this path will see
@@ -684,12 +907,12 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
         return;
     }
 
-    // entry->render_pso / compute_pso are stored as untyped `id` (the
-    // shim's struct must not name protocols inside the nested namespace —
-    // see the comment in pipeline_shim). Re-narrow back to the typed
-    // protocol via static_cast on the way out.
-    id<MTLRenderPipelineState>  render_pso  = static_cast<id<MTLRenderPipelineState>>(entry->render_pso);
-    id<MTLComputePipelineState> compute_pso = static_cast<id<MTLComputePipelineState>>(entry->compute_pso);
+    // Shim values are stored as untyped `id` (the shim's struct must not
+    // name protocols inside the nested namespace — see the comment in
+    // pipeline_shim). Re-narrow back to the typed protocol via static_cast
+    // on the way out.
+    id<MTLRenderPipelineState>  render_pso  = static_cast<id<MTLRenderPipelineState>>(shim_render_pso);
+    id<MTLComputePipelineState> compute_pso = static_cast<id<MTLComputePipelineState>>(shim_compute_pso);
 
     if (c->encoder && render_pso) {
         c->bound_render_pso = render_pso;
@@ -697,14 +920,14 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     }
     if (c->compute_encoder && compute_pso) {
         c->bound_compute_pso = compute_pso;
-        c->compute_tgs       = entry->compute_tgs;
+        c->compute_tgs       = shim_tgs;
         [c->compute_encoder setComputePipelineState:compute_pso];
     }
     // If neither encoder is open yet, stash for the next encode-open.
     if (!c->encoder && !c->compute_encoder) {
         c->bound_render_pso  = render_pso;
         c->bound_compute_pso = compute_pso;
-        c->compute_tgs       = entry->compute_tgs;
+        c->compute_tgs       = shim_tgs;
     }
 }
 
@@ -733,6 +956,22 @@ void MetalBackend::bind_index_buffer(CmdBuffer* cmd, Buffer* buf,
     c->index_mtl        = mb->handle;
     c->index_mtl_type   = (type == IndexType::U32) ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
     c->index_mtl_offset = offset;
+}
+
+void MetalBackend::bind_texture(CmdBuffer* cmd, std::uint32_t slot,
+                                Texture* tex, Sampler* samp) {
+    auto* c = static_cast<MtlCmdBuf*>(cmd);
+    if (!c || !c->encoder || !tex || !samp) return;
+    id<MTLTexture>      mtl_tex  = static_cast<MtlTexture*>(tex)->handle;
+    id<MTLSamplerState> mtl_samp = static_cast<MtlSampler*>(samp)->handle;
+    if (!mtl_tex || !mtl_samp) return;
+    // Metal keeps textures + samplers in argument tables separate from the
+    // buffer table (kVertexBufferSlot0 / kPushConstantSlot), so `slot` maps
+    // straight to the fragment texture + sampler index. slang lowers
+    // register(tN)/register(sN) to [[texture(N)]]/[[sampler(N)]], matching the
+    // Vulkan [[vk::binding(N,0)]] the textured-triangle shader declares.
+    [c->encoder setFragmentTexture:mtl_tex      atIndex:(NSUInteger)slot];
+    [c->encoder setFragmentSamplerState:mtl_samp atIndex:(NSUInteger)slot];
 }
 
 void MetalBackend::push_constants(CmdBuffer* cmd, const void* data,

@@ -29,6 +29,8 @@
 #include "TickConfig.h"
 #include "core/Types.h"
 
+#include <vector>
+
 namespace psynder::net {
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -56,20 +58,59 @@ enum class RewindResult : u8 {
 // ──────────────────────────────────────────────────────────────────────────────
 // LagCompContext — per-server state for the rolling world history buffer.
 //
-// Wave B stub: the context is opaque; M6 will define its internals. For now
-// all operations are no-ops that always report Unavailable.
+// Carries a ring buffer of past world snapshots covering `cfg.lag_comp_ticks`
+// ticks (= ceil(200ms / frame_ms) per DESIGN §10.4). Each stored snapshot is
+// a deep copy of the bytes passed to `push_world_snapshot`. Older entries
+// are evicted automatically as new ticks arrive.
+//
+// The WorldState payload is opaque to the net layer (see OpaqueWorldState
+// above). Lane 17 (physics-destruction) will eventually settle the concrete
+// layout via a follow-up Issue. For now the buffer stores `(tick, bytes)`
+// pairs and lets the hitreg layer cast the bytes back to its real type.
 // ──────────────────────────────────────────────────────────────────────────────
 class LagCompContext {
 public:
-    explicit LagCompContext(const TickConfig& cfg) noexcept : cfg_(cfg) {}
+    explicit LagCompContext(const TickConfig& cfg) noexcept;
+    ~LagCompContext() noexcept;
+
+    LagCompContext(const LagCompContext&)            = delete;
+    LagCompContext& operator=(const LagCompContext&) = delete;
 
     // Returns the depth of the rewind buffer in ticks (= cfg_.lag_comp_ticks).
     u32 max_rewind_ticks() const noexcept { return cfg_.lag_comp_ticks; }
 
     const TickConfig& tick_config() const noexcept { return cfg_; }
 
+    // Number of snapshots currently stored (0 .. max_rewind_ticks()).
+    u32 stored_count() const noexcept;
+
+    // Tick number of the oldest / newest stored snapshot. Returns 0 if
+    // empty.
+    u32 oldest_tick() const noexcept;
+    u32 newest_tick() const noexcept;
+
+    // Internal: append a snapshot. Public so the free function
+    // push_world_snapshot() can delegate; not part of the documented API.
+    void push_internal_(u32 tick, const OpaqueWorldState& state) noexcept;
+
+    // Internal: locate the snapshot bracketing `target_tick` (older + newer)
+    // for linear interpolation. Returns false if buffer is empty.
+    bool bracket_internal_(u32 target_tick,
+                           const u8*& out_older_bytes, u32& out_older_tick,
+                           const u8*& out_newer_bytes, u32& out_newer_tick,
+                           usize& out_state_size) const noexcept;
+
 private:
-    TickConfig cfg_;
+    struct Slot {
+        u32              tick = 0;
+        std::vector<u8>  bytes;
+    };
+
+    TickConfig         cfg_;
+    std::vector<Slot>  ring_;
+    u32                head_  = 0;  // index of newest entry
+    u32                count_ = 0;
+    u32                capacity_ = 0;
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -90,48 +131,27 @@ private:
 // Returns RewindResult indicating whether the rewind was exact, clamped, or
 // not available. Callers reject hits on Unavailable.
 //
-// STUB: Wave B returns Unavailable and leaves out_state unchanged.
+// `out_state.data` must point at a caller-owned buffer of `out_state.size`
+// bytes; on Ok / Clamped the bytes are filled with the rewound (and
+// optionally interpolated) world state. If the stored snapshot size doesn't
+// match `out_state.size`, the call returns Unavailable.
 // ──────────────────────────────────────────────────────────────────────────────
-inline RewindResult rewind_world_to(
+RewindResult rewind_world_to(
     LagCompContext&   ctx,
     OpaqueWorldState& out_state,
     f64               client_view_time_ms,
     u32               current_tick,
-    u16               sub_tick_frac_u16) noexcept
-{
-    // Suppress unused-parameter warnings for stub.
-    (void)ctx;
-    (void)out_state;
-    (void)client_view_time_ms;
-    (void)current_tick;
-    (void)sub_tick_frac_u16;
-
-    // M6 will replace this with:
-    //   1. Convert client_view_time_ms to a tick + sub-tick fraction.
-    //   2. Clamp to the rewind window (ctx.max_rewind_ticks()).
-    //   3. Fetch the rolling snapshot for that tick from the ring buffer.
-    //   4. If sub_tick_frac_u16 != 0: linearly interpolate between tick T and
-    //      T+1 snapshots, then write into out_state.
-    //   5. Return Ok or Clamped based on whether clamping occurred.
-    return RewindResult::Unavailable;
-}
+    u16               sub_tick_frac_u16) noexcept;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // push_world_snapshot — record the current world state into the lag-comp
 // buffer. Called once per server tick, before handing control to game code.
-//
-// STUB: no-op in Wave B.
+// The bytes pointed at by `state.data` are deep-copied; the caller is free
+// to mutate the buffer immediately after this returns.
 // ──────────────────────────────────────────────────────────────────────────────
-inline void push_world_snapshot(
-    LagCompContext&       ctx,
+void push_world_snapshot(
+    LagCompContext&         ctx,
     const OpaqueWorldState& state,
-    u32                   tick) noexcept
-{
-    (void)ctx;
-    (void)state;
-    (void)tick;
-    // M6: append state to the ring buffer indexed by `tick`.
-    // Evict entries older than ctx.max_rewind_ticks().
-}
+    u32                     tick) noexcept;
 
 }  // namespace psynder::net

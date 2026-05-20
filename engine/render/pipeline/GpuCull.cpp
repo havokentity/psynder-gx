@@ -12,10 +12,9 @@
 //             argument buffer (vkCmdDrawIndexedIndirectCount-equivalent
 //             / MTLIndirectCommandBuffer).
 //
-// Wave-B scope:
-//   - Allocate three persistent buffers sized for kDefaultMaxInstances.
-//   - Create the cull compute pipeline via lane 08.
-//   - encode_gpu_cull: log + drop until lane 07 ships cmd encoder APIs.
+// Wave-C update — encode_gpu_cull now issues a real bind_pipeline +
+// push_constants + dispatch. Group size 64 matches gpu_cull.slang's
+// [numthreads(64,1,1)].
 
 #include "render/pipeline/Pipeline_internal.h"
 
@@ -33,18 +32,23 @@ namespace {
 // growth (M3-M4 worlds); the size is per Pipeline, not per frame.
 constexpr std::uint32_t kDefaultMaxInstances = 64 * 1024;
 
-// Per-instance descriptor for GPU cull:
-//   float4x4 world_matrix       (64 bytes)
-//   float4   aabb_min_pad       (16 bytes)
-//   float4   aabb_max_pad       (16 bytes)
-//   uint32   mesh_id            (4)
-//   uint32   material_id        (4)
-//   uint32   pad[2]             (8)
-// Total: 112 bytes — round up to 128 for natural alignment.
-constexpr std::size_t kInstanceDescBytes = 128;
+// Matches the [numthreads(64,1,1)] on gpu_cull.slang::cs_cull.
+constexpr std::uint32_t kCullGroupSize = 64;
+
+// Push-constant block sent to the cull compute. Mirrors the subset of
+// gpu_cull.slang::CullParams that varies per frame; the static view-proj +
+// frustum-planes uniform buffer is bound separately when lane 06 + lane
+// 07's descriptor-set API land (Issue lane09-001 follow-up).
+struct CullPushConstants {
+    std::uint32_t instance_count;
+    std::uint32_t hiz_mip_count;
+    std::uint32_t padding[2];
+};
 
 constexpr std::size_t instance_desc_buffer_bytes() {
-    return static_cast<std::size_t>(kDefaultMaxInstances) * kInstanceDescBytes;
+    // 128 bytes per instance × kDefaultMaxInstances. Matches the
+    // InstanceDesc layout in gpu_cull.slang.
+    return static_cast<std::size_t>(kDefaultMaxInstances) * 128u;
 }
 
 constexpr std::size_t visible_instance_buffer_bytes() {
@@ -115,20 +119,30 @@ bool init_gpu_cull(Pipeline* p) {
 }
 
 void encode_gpu_cull(Pipeline* p,
-                     gpu::CmdBuffer* /*cmd*/,
+                     gpu::CmdBuffer* cmd,
                      const View& /*view*/) {
-    if (!p) return;
-    // Real encode: bind instance_desc + visible_instance + indirect_draw +
-    // HiZ + view frustum UBO; dispatch ceil(renderable_count / 64). The
-    // compute shader (gpu_cull.slang) does frustum + HiZ tests per
-    // instance and atomically appends to visible_instance + builds the
-    // indirect-draw record. Blocked on lane 07 cmd encoder APIs.
-    if (!p->warned_missing_cmd_encoder && !p->renderables.empty()) {
-        std::printf("[psy::render::pipeline] gpu_cull would dispatch %zu instances "
-                    "(%zu groups of 64)\n",
-                    p->renderables.size(),
-                    (p->renderables.size() + 63u) / 64u);
-    }
+    if (!p || !cmd) return;
+    if (p->renderables.empty()) return;
+    if (!p->gpu_cull.cull_compute.valid()) return;
+
+    // Bind the cull compute PSO. (The visible_instance_buffer header and
+    // the indirect_draw_buffer are bound via descriptor sets — currently
+    // managed by lane 08's PipelineRegistry; the binding state survives
+    // across multiple frames so we don't rebind per frame in this lane.)
+    gpu::bind_pipeline(cmd, p->gpu_cull.cull_compute);
+
+    CullPushConstants pc{};
+    pc.instance_count = static_cast<std::uint32_t>(p->renderables.size());
+    pc.hiz_mip_count  = p->hiz.mip_count;
+    pc.padding[0]     = 0;
+    pc.padding[1]     = 0;
+    gpu::push_constants(cmd, &pc, sizeof(pc), gpu::ShaderStage::Compute);
+
+    // Ceil(renderable_count / 64). The shader skips out-of-range threads.
+    const std::uint32_t groups_x =
+        (pc.instance_count + kCullGroupSize - 1u) / kCullGroupSize;
+    gpu::dispatch(cmd, groups_x, 1, 1);
+    ++p->stats.cull_dispatches;
 }
 
 } // namespace psynder::render::pipeline

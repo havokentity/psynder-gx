@@ -20,3 +20,9 @@ endif()
 if(TARGET psynder_gpu)
     target_link_libraries(sample_00_clear PRIVATE psynder_gpu)
 endif()
+# psynder_gpu's Vulkan init publishes its device to lane 08 via
+# psynder_gx_shader_push_vk_context (defined in psynder_shader), so every GPU
+# consumer must resolve that symbol even with no shaders of its own.
+if(TARGET psynder_shader)
+    target_link_libraries(sample_00_clear PRIVATE psynder_shader)
+endif()

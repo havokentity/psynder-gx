@@ -11,28 +11,33 @@
 //   render(p, view)   — per-frame:
 //                       1. ECS extract (M1 = hardcoded triangle; M2+ =
 //                          lane 06 scene query)
-//                       2. light cluster build (compute)
-//                       3. depth pre-pass + HiZ pyramid (compute)
-//                       4. GPU cull (compute → indirect args)
-//                       5. opaque forward+ pass (draw indirect)
-//                       Each step calls into the per-sub-pass encoder
-//                       defined in LightCluster/Hiz/GpuCull/OpaquePass.cpp.
+//                       2. light cluster build (compute dispatch)
+//                       3. depth pre-pass (render pass) + HiZ pyramid
+//                          (compute dispatches per mip)
+//                       4. GPU cull (compute dispatch → indirect args)
+//                       5. opaque forward+ pass (draw indexed)
+//                       The compute passes share one cmd buffer; the
+//                       depth pre-pass + opaque pass each open their own
+//                       so each begin_render scope is clean (Metal can't
+//                       nest compute inside a render encoder — backend
+//                       returns "dispatch called inside a render pass;
+//                       ignored" otherwise).
 //   destroy(p)        — drop resources via Handle<T> destructors + delete
 //                       the Pipeline struct.
 //
 // See DESIGN-PSYNDER-GX.md §7.1–§7.3.
 //
-// Cross-lane integration gap (Wave B): PublicGpu.h does not yet expose
-// per-pass encoder APIs (begin_render / draw / dispatch / end_render).
-// The encode_*() helpers in this lane therefore prepare resources +
-// indirect args and rely on lane 07's cmd_submit which, at M0, encodes
-// an animated clear color to the swapchain. INTEGRATION.txt describes
-// the handoff + the Issue we file against lane 07.
+// Wave-C update (lane 07 cmd encoder API + lane 08 PSO registration
+// landed): the per-pass encode_*() helpers now issue real begin_render /
+// bind_pipeline / dispatch / draw_indexed calls against the public
+// PublicGpu.h surface. The previous diagnostic-only fallthrough only
+// kicks in if the device hook is null (headless tests).
 
 #include "render/pipeline/PublicRenderPipeline.h"
 #include "render/pipeline/Pipeline_internal.h"
 
 #include "gpu/PublicGpu.h"
+#include "jobs/JobSystem.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +62,11 @@ gpu::Device* g_device_hook = nullptr;
 // Callers set this before pipeline::create() so the lane can locate the
 // GPU device. A future cross-lane Issue (lane09-002) extends PipelineDesc.
 void set_device_hook(gpu::Device* dev) { g_device_hook = dev; }
+
+const Pipeline::PassStats& pipeline_stats(const Pipeline* p) {
+    static const Pipeline::PassStats kEmpty{};
+    return p ? p->stats : kEmpty;
+}
 
 // ─── create / destroy ───────────────────────────────────────────────────
 Pipeline* create(const PipelineDesc& desc) {
@@ -116,46 +126,93 @@ void destroy(Pipeline* p) {
 }
 
 // ─── per-frame render() ─────────────────────────────────────────────────
+//
+// Per-pass cmd-buffer layout (DESIGN §7.1 ordering):
+//
+//   cmd_compute  : light_cluster_build (dispatch) +
+//                  gpu_cull             (dispatch)
+//                  (encoded together — both are pure compute and can share
+//                   a single Metal compute scope; the backend opens / closes
+//                   the compute encoder around each dispatch internally)
+//   cmd_depth    : depth pre-pass render pass (draw_indexed across visible
+//                  instances) + HiZ downsample compute chain (one dispatch
+//                  per mip level)
+//   cmd_opaque   : opaque forward+ render pass (draw_indexed across
+//                  visible instances; reads depth_texture with depth-equal
+//                  compare)
+//
+// The orchestrator brief calls out the JobSystem usage: we submit the
+// CPU-side extract as a job (one per archetype chunk) before starting
+// the GPU recording. The recording itself happens on the calling thread
+// because the M0 single-frame backend does not yet expose per-worker
+// cmd-buffer allocation — that's a Lane 07 M3 expansion. When that lands,
+// the three cmd_* recordings below trivially parallelise via additional
+// JobSystem::submit calls (each closure already gets its own CmdBuffer*).
 void render(Pipeline* p, const View& view) {
     if (!p) return;
     ++p->frame_index;
 
-    // 1. CPU extract — collect visible renderables.
-    extract_renderables(p, view);
+    // 1. CPU extract — dispatch as a job so the JobSystem accounts for it.
+    //    In headless / synchronous Phase-0 the job runs inline; once Lane 04
+    //    ships the work-stealing scheduler this becomes a true parallel
+    //    walk over archetype chunks (DESIGN §2.4 + §3).
+    struct ExtractCtx { Pipeline* p; const View* view; };
+    ExtractCtx ectx{p, &view};
+    psynder::jobs::JobDesc edesc{};
+    edesc.name = "render-pipeline.extract";
+    edesc.user = &ectx;
+    edesc.fn   = [](void* user) noexcept {
+        auto* ctx = static_cast<ExtractCtx*>(user);
+        extract_renderables(ctx->p, *ctx->view);
+    };
+    auto h = psynder::jobs::JobSystem::Get().submit(edesc);
+    psynder::jobs::JobSystem::Get().wait(h);
 
     if (!p->device) {
-        // Headless mode (no device hook): nothing more to do.
+        // Headless mode (no device hook): nothing more to do beyond the
+        // extract (already populated p->renderables). The per-pass encode_*
+        // helpers each short-circuit when cmd == nullptr.
         return;
     }
 
-    // 2-5. Open a command buffer and walk the sub-passes.
-    //
-    // The current cross-lane API (PublicGpu.h) does NOT expose
-    // begin_render / draw / dispatch / end_render. cmd_submit on its own
-    // triggers the M0 Metal-backend animated-clear encode. The encode_*()
-    // helpers below therefore:
-    //   - build any per-frame uniforms via buffer_map / buffer_unmap
-    //     (lane 07's mid-frame helpers ARE in the contract)
-    //   - log the would-be dispatch counts for diagnostics
-    //   - skip the actual API encode (filed as Issue lane09-001)
-    //
-    // Once lane 07 extends PublicGpu.h with cmd encoder APIs, each
-    // encode_*() will replace its diagnostic-only body with the real
-    // bindings + dispatches.
-
-    gpu::CmdBuffer* cmd = gpu::cmd_open(p->device);
-    if (!cmd) {
-        // Frame dropped — swapchain timeout etc. lane 07 already logged.
-        return;
+    // 2. Light cluster build — no HiZ dependency, runs as soon as the
+    //    cluster grid is set up.  Pure compute; submitted on its own cmd
+    //    buffer so the GPU can overlap it with the depth pre-pass below.
+    if (gpu::CmdBuffer* cmd_cluster = gpu::cmd_open(p->device)) {
+        encode_light_cluster_build(p, cmd_cluster, view);
+        gpu::cmd_submit(p->device, cmd_cluster);
     }
 
-    encode_light_cluster_build(p, cmd, view);
-    encode_depth_prepass     (p, cmd, view);
-    encode_hiz_downsample    (p, cmd);
-    encode_gpu_cull          (p, cmd, view);
-    encode_opaque            (p, cmd, view);
+    // 3. Depth pre-pass + HiZ downsample chain.  Depth is a render pass;
+    //    HiZ is compute and MUST come after end_render so the Metal compute
+    //    encoder can open cleanly (see MetalBackend.mm: "dispatch called
+    //    inside a render pass; ignored").  They share one cmd buffer.
+    if (gpu::CmdBuffer* cmd_depth = gpu::cmd_open(p->device)) {
+        encode_depth_prepass (p, cmd_depth, view);
+        encode_hiz_downsample(p, cmd_depth);
+        gpu::cmd_submit(p->device, cmd_depth);
+    }
 
-    gpu::cmd_submit(p->device, cmd);
+    // 4. GPU instance cull.  Order matters: this consumes the HiZ pyramid
+    //    populated by step 3 (occlusion test against the conservative-max
+    //    mip chain).  An earlier revision ran cull before HiZ — that would
+    //    have been silently incorrect once the SCAFFOLD body in gpu_cull
+    //    .slang grows real HiZ sampling.  Copilot's PR #8 review caught
+    //    the ordering bug; the cull now runs on its own cmd buffer
+    //    submitted *after* cmd_depth so the HiZ writes are visible.
+    if (gpu::CmdBuffer* cmd_cull = gpu::cmd_open(p->device)) {
+        encode_gpu_cull(p, cmd_cull, view);
+        gpu::cmd_submit(p->device, cmd_cull);
+    }
+
+    // 5. Opaque forward+ pass. Distinct cmd buffer for the same scope
+    //    reason as above (render pass) and so the orchestrator can
+    //    optionally interleave it with the post lane (lane 11) once that
+    //    integration lands.
+    if (gpu::CmdBuffer* cmd_opaque = gpu::cmd_open(p->device)) {
+        encode_opaque(p, cmd_opaque, view);
+        gpu::cmd_submit(p->device, cmd_opaque);
+    }
 }
 
 } // namespace psynder::render::pipeline

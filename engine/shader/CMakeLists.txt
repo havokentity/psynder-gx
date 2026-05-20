@@ -55,6 +55,21 @@ psynder_add_lane(shader
         $<$<BOOL:${SLANGC_EXECUTABLE}>:PSYNDER_SLANGC_PATH="${SLANGC_EXECUTABLE}">
 )
 
+# ── Pipeline-state-object backend wiring ──────────────────────────────────
+# PipelineCreateMetal.mm needs the same ARC-off compile flag as lane 07's
+# MetalBackend.mm because we hold strong id<T> references and free them by
+# hand (matching the backend's existing -fno-objc-arc TU layout). The
+# PSYNDER_GX_BACKEND_* defines flow in via psynder_gpu's PUBLIC scope
+# (see engine/gpu/CMakeLists.txt) — psynder_shader links psynder_gpu so
+# the defines propagate automatically; no -D needed here.
+if(PSYNDER_GX_PLATFORM_MACOS)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/PipelineCreateMetal.mm
+        PROPERTIES
+            COMPILE_FLAGS "-fno-objc-arc -fobjc-weak"
+    )
+endif()
+
 # Expose slang.h to private compilation units in this lane.
 # Other lanes never include slang.h directly — they use PublicShader.h.
 if(PSYNDER_SLANG_INC_DIR)

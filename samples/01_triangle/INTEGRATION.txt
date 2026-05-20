@@ -1,0 +1,236 @@
+sample_01_triangle — cross-lane integration notes
+==================================================
+
+M1 textured-triangle demo. Files inside samples/01_triangle/ only:
+
+  * main.cpp                    — platform-dispatched entry (mac/win/linux)
+  * shaders/triangle_textured.slang — vs_main / fs_main, push-constant MVP
+                                      + Texture2D + SamplerState
+  * CMakeLists.txt              — sample_01_triangle target + slang source
+
+What this sample proves end-to-end (Mac, on launch):
+
+  * lane 25 (platform-macos) opens an NSWindow + CAMetalLayer.
+  * lane 07 (gpu) creates psy::gpu::Device, attaches the layer, brings up
+    the swapchain (BGRA8 unorm).
+  * lane 07 allocates a vertex buffer, index buffer, texture, and sampler
+    via the public Handle<T> ABI. The buffers + texture are created as
+    DeviceLocal on Apple Silicon (unified memory).
+  * lane 08 invokes slangc on samples/01_triangle/shaders/triangle_textured
+    .slang and registers a shader::PipelineHandle.
+  * lane 02 composes a real MVP matrix (60 deg vertical FOV, RH look-at,
+    perspective_rh, near 0.1 m, far 100 m) in metres — the helper
+    (compose_mvp) is left in the source tagged [[maybe_unused]] so the
+    moment sample01-004 lands it gets re-enabled with no further edits.
+  * lane 04 JobSystem singleton is bootstrapped (per the DOTS + jobs
+    mandate in the orchestrator brief; M1 itself fans no work out).
+  * lane 07 frame loop runs begin_frame / cmd_open / cmd_submit /
+    end_frame. The backend's M0 auto-clear (animated colour) encodes
+    the frame in the absence of a user-driven render pass.
+
+The full M1 encoder path — begin_render / set_viewport / set_scissor /
+bind_pipeline / push_constants / bind_vertex_buffer / bind_index_buffer
+/ draw_indexed / end_render — is implemented in encode_frame() in
+main.cpp and gated on the build-time macro
+PSYNDER_GX_SAMPLE_01_USE_ENCODER. The macro is intentionally OFF for
+Wave-B because lane 07's MetalBackend.mm hits sample01-004 (encoder
+retain bug). Once that's fixed the sample CMakeLists can flip the macro
+on without touching main.cpp.
+
+Tested via `sample_01_triangle --smoke-frames=30` on Apple M4 Max; exits
+0 with the orchestrator-mandated /tmp/psynder_gx_smoke.lockdir mutex
+held.
+
+What is gated on cross-lane handshakes still in flight:
+
+═══════════════════════════════════════════════════════════════════════
+CROSS-LANE GAPS / ISSUES THIS SAMPLE DEFERS TO
+═══════════════════════════════════════════════════════════════════════
+
+Issue sample01-001 — Against lane 07 (gpu)
+  Title: PublicGpu.h create_texture lacks an initial-data upload path
+  Body : The frozen public surface in engine/gpu/PublicGpu.h exposes
+           Handle<Texture> create_texture(Device*, const TextureDesc&)
+         but no `const void* initial_data` parameter, no
+         `upload_texture(Texture*, const void*, std::size_t)` entry, and
+         no staging-buffer copy primitive against the cmd encoder. As a
+         result the M1 sample bakes the 24x24 RGBA8 checkerboard into
+         the binary as a constexpr table but cannot publish it to the
+         GPU at all — fs_main samples whatever undefined contents the
+         backend's stub MtlTexture / VkTextureRes happens to return.
+         Suggest one of:
+           a) Extend TextureDesc with an `initial_data` pointer +
+              `initial_data_size` so create_texture can stage internally
+              (Apple Silicon: direct write via [MTLBuffer contents]; Vk:
+              staging buffer + cmd_copy_buffer_to_image).
+           b) Add an explicit public surface:
+                void  upload_texture(Texture*, const void* data,
+                                     std::uint32_t mip, std::uint32_t layer);
+              callable outside the frame loop (level-load time per
+              DESIGN §4.4 "no mid-frame GPU allocations").
+         Without this the M1 visual landing on screen is gated on lane
+         07 + lane 08 finishing PR #7's PSO registration + a future
+         texture-upload PR; until then the sample renders a clear
+         rgba=(0.05,0.07,0.10,1) with the bound (but un-sampling)
+         pipeline.
+
+Issue sample01-002 — Against lane 07 (gpu) + lane 08 (shader)
+  Title: Metal PSO registration is not yet wired for
+         samples/01_triangle/shaders/triangle_textured.slang
+  Body : lane 07's pipeline_shim in engine/gpu/mtl/MetalBackend.mm
+         expects lane 08 to publish each PipelineHandle's
+         id<MTLRenderPipelineState> via the extern "C" entry point
+         psynder_gx_mtl_register_render_pso. Today lane 08 emits the
+         SPIR-V (or Metal source) blob but does NOT take the next step
+         of constructing an MTLRenderPipelineState and registering it.
+         When the sample runs, bind_pipeline(handle=N) logs once with
+           [psy::gpu::mtl] bind_pipeline: PipelineHandle id=N not
+             registered (lane 08 owes psynder_gx_mtl_register_render_pso);
+             pass will render blank
+         and subsequent draw_indexed calls early-out at the backend
+         because the encoder has no bound PSO. The sample binary still
+         completes the smoke-frames count and exits 0.
+         Same gap exists on the Vulkan side
+         (psynder_gx_vk_register_pipeline). Suggest lane 08 grow a
+         "build per-backend state object once SPIR-V/Metal-IR compile
+         succeeds" step at the end of create_graphics() / create_compute().
+
+Issue sample01-003 — Against lane 09 (render-pipeline)
+  Title: GraphicsPipelineDesc lacks vertex-layout descriptor
+  Body : Duplicates lane09-004 in engine/render/pipeline/INTEGRATION.txt.
+         The textured-triangle pipeline needs to declare its vertex
+         input layout (POSITION/NORMAL/UV/COLOR) so lane 08 can hand the
+         correct VkPipelineVertexInputStateCreateInfo /
+         MTLVertexDescriptor to the backend. Today the sample's
+         create_graphics(GraphicsPipelineDesc) leaves the vertex layout
+         unset because the field doesn't exist; the backend defaults to
+         whatever lane 09 or lane 08 most recently published, which is
+         the right behaviour for M1 (single global vertex layout) but
+         breaks when M2 introduces multiple instance / mesh formats.
+
+Issue sample01-004 — Against lane 07 (gpu)
+  Title: MetalBackend.mm begin_render leaks the MTLRenderCommandEncoder
+         without [retain]; Metal aborts on the eventual dealloc
+  Body : engine/gpu/mtl/MetalBackend.mm:615 stores the result of
+           [c->cb renderCommandEncoderWithDescriptor:rpd]
+         straight onto c->encoder inside an @autoreleasepool block,
+         with no [retain] step. The TU is compiled with -fno-objc-arc
+         (see comment near pipeline_shim), so the assignment is a
+         plain pointer copy and does NOT bump the retain count. When
+         the @autoreleasepool block ends at the close of begin_render
+         the autorelease pool releases the encoder; the pointer in
+         c->encoder dangles. The eventual user-facing call sequence is
+           begin_render(cb, pass);          // encoder created, autoreleased
+           set_viewport(cb, vp);            // calls on dangling encoder
+           push_constants(cb, ...);
+           bind_vertex_buffer(cb, 0, ...);
+           bind_index_buffer (cb, ...);
+           draw_indexed(cb, 3);
+           end_render(cb);                  // [encoder endEncoding] on a
+                                            //   now-dead object
+           cmd_submit(dev, cb);
+         and Metal's runtime aborts with
+           -[_MTLCommandEncoder dealloc]:134: failed assertion
+             `Command encoder released without endEncoding'
+         when the encoder's retain count finally hits zero. The signal
+         is SIGABRT (process exit 134).
+
+         Fix: bump the retain after creation and balance the release
+         after endEncoding. Specifically:
+
+           // begin_render: retain so the pointer survives the
+           // @autoreleasepool drain at function exit.
+           c->encoder = [[c->cb renderCommandEncoderWithDescriptor:rpd] retain];
+
+           // end_render: release the explicit retain after endEncoding.
+           [c->encoder endEncoding];
+           [c->encoder release];
+           c->encoder = nil;
+
+         (Same pattern is already in use elsewhere in MetalBackend.mm
+         for frame_.drawable and frame_.command_buffer at lines ~294 and
+         ~300 — both retained at creation, released at end_frame.)
+
+         Until the fix lands, samples/01_triangle/main.cpp gates every
+         encoder-API call (begin_render / set_viewport / set_scissor /
+         bind_pipeline / push_constants / bind_vertex_buffer /
+         bind_index_buffer / draw_indexed / end_render) on the build-
+         time macro PSYNDER_GX_SAMPLE_01_USE_ENCODER, which is
+         intentionally not defined by samples/01_triangle/CMakeLists.txt.
+         The sample falls back to the M0 auto-clear path (cmd_open →
+         cmd_submit, no begin_render) so the smoke-frame test still
+         exits 0. The helper functions encode_frame() + compose_mvp()
+         are tagged [[maybe_unused]] in the source; when sample01-004
+         lands the CMakeLists adds `-DPSYNDER_GX_SAMPLE_01_USE_ENCODER`
+         and the [[maybe_unused]] attributes can come off — no other
+         edits to main.cpp are needed.
+
+         Same fix applies on the Vulkan side if anyone reproduces the
+         issue against a swapchain there, but the failure mode is
+         different — VkCommandBuffer is a pure handle (no retain/release
+         dance), so the dangling pointer just becomes a stale
+         VK_NULL_HANDLE and vkCmdEndRenderPass quietly no-ops. The
+         M1 visual would still be blank but the process would not
+         abort. The Vulkan path is therefore lower-severity than the
+         Metal path.
+
+═══════════════════════════════════════════════════════════════════════
+WHAT THIS LANE DOES NOT TOUCH (per AGENTS.md ownership)
+═══════════════════════════════════════════════════════════════════════
+
+  * engine/gpu/PublicGpu.h is FROZEN — sample01-001 / sample01-002 are
+    deferred to lane 07; we never edit the public surface ourselves.
+  * engine/shader/PublicShader.h is FROZEN — sample01-003 lives with
+    lane 09 / lane 08 to coordinate.
+  * samples/CMakeLists.txt is shared but the orchestrator brief grants
+    this lane permission to add an `add_subdirectory(01_triangle)` line
+    when it's not already present. That single line was added in the
+    same commit as the sample lands.
+  * engine/render/pipeline/ — read-only deps (we crib the Vertex layout
+    + shader source patterns from there without modifying anything).
+
+═══════════════════════════════════════════════════════════════════════
+LOCAL VERIFICATION RECIPE (macOS)
+═══════════════════════════════════════════════════════════════════════
+
+  cmake --preset mac-release -DPSYNDER_GX_BUILD_SAMPLES=ON
+  cmake --build build/mac-release -j --target sample_01_triangle
+
+  LOCK=/tmp/psynder_gx_smoke.lockdir
+  until mkdir "$LOCK" 2>/dev/null; do sleep 0.5; done
+  trap 'rmdir "$LOCK"' EXIT
+  ./build/mac-release/bin/sample_01_triangle --smoke-frames=30
+
+Expected output (Wave-B, sample01-004 fallback active):
+
+  [sample_01_triangle] platform=macOS  backend=Metal  smoke_frames=30
+  [psy::gpu::mtl] init: device="Apple M..." unified=1 rt=1 mesh=1 layer=...
+  [sample_01_triangle] device=Apple M...  unified_memory=1  rt=1  mesh=1
+  [sample_01_triangle] VB allocated (buffer_map=null, lane 07 M0 stub)
+  [sample_01_triangle] pipeline=N ok
+  [sample_01_triangle] smoke complete: 30 frames
+
+  EXIT: 0
+
+The "pipeline=N ok" line proves lane 08 compiled the slang shader (the
+slangc subprocess shelled out and returned 0 with a non-empty SPIR-V
+blob).
+
+The "buffer_map=null, lane 07 M0 stub" line is the expected sample01-001
+diagnostic — the texture / VB content lands once lane 07 ships its M1
+upload path.
+
+When sample01-004 lands and the CMake macro PSYNDER_GX_SAMPLE_01_USE_ENCODER
+is flipped on, expect an additional line on each frame:
+
+  [psy::gpu::mtl] bind_pipeline: PipelineHandle id=N not registered ...
+
+That is the expected sample01-002 diagnostic — visible-frame triangle
+lands once lane 08 publishes a MTLRenderPipelineState for the handle
+(lane/08-pso-register on origin already does this; main hasn't merged
+it yet).
+
+The visible-frame triangle then appears once BOTH sample01-002 (PSO
+registration) AND sample01-004 (encoder retain) merge to main. At that
+point the M1 acceptance criterion is fully met and the sample's CMake
+gate can drop.

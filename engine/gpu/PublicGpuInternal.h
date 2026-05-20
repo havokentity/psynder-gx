@@ -186,6 +186,7 @@ public:
     virtual void bind_pipeline      (CmdBuffer*, ::psynder::shader::PipelineHandle) {}
     virtual void bind_vertex_buffer (CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) {}
     virtual void bind_index_buffer  (CmdBuffer*, Buffer*, IndexType, std::uint64_t) {}
+    virtual void bind_texture       (CmdBuffer*, std::uint32_t, Texture*, Sampler*) {}
     virtual void push_constants     (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) {}
     virtual void draw         (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {}
     virtual void draw_indexed (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) {}
@@ -194,6 +195,24 @@ public:
     // Deferred destroy entry — called by Handle<T>::~Handle once refcount
     // hits zero and the GPU has retired the resource.
     virtual void destroy_resource(RefCountedBase*) = 0;
+
+    // ─── Test-only: mip-0 readback ──────────────────────────────────────
+    //
+    // Drains the texture's mip-0 contents back into `out_dst_bytes`. The
+    // buffer must be the same byte size as the upload that populated the
+    // texture (width * height * bytes_per_pixel(format)). Returns false
+    // when the texture is invalid, its format isn't on the M1 upload
+    // allow-list, or `dst_bytes_size` doesn't match the expected layout.
+    //
+    // NOT a public-ABI surface — this method is consumed solely by the
+    // gpu_texture_upload unit test (tests/unit/gpu_texture_upload.cpp).
+    // Production render lanes never call it; the production "readback"
+    // story is M3+ async streaming through the JobSystem.
+    virtual bool texture_readback_mip0(Texture* /*tex*/,
+                                       void*    /*out_dst_bytes*/,
+                                       std::size_t /*dst_bytes_size*/) {
+        return false; // default backend has no readback implementation
+    }
 };
 
 // Factory selected at compile time — defined in vk/VulkanBackend.cpp or

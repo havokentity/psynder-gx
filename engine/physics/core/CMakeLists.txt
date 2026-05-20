@@ -35,6 +35,14 @@ if(PSYNDER_GX_VENDOR_JOLT AND NOT TARGET Jolt)
     # subsystems (physics qualifies).
     set(CPP_EXCEPTIONS_ENABLED       OFF CACHE BOOL "" FORCE)
     set(CPP_RTTI_ENABLED             OFF CACHE BOOL "" FORCE)
+    # Match the engine's CRT. The rest of Psynder-GX builds against the
+    # dynamic MSVC runtime (/MD — CMake's default with no explicit
+    # CMAKE_MSVC_RUNTIME_LIBRARY). Jolt defaults USE_STATIC_MSVC_RUNTIME_LIBRARY
+    # to ON (/MT), which makes Jolt.lib /MT while every other lib is /MD; any
+    # target linking both (psynder_unit) then fails with
+    # `lld-link: error: /failifmismatch: mismatch detected for 'RuntimeLibrary'`.
+    # Force OFF so Jolt uses /MD too. MSVC-only; ignored on Linux/macOS.
+    set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
     # Disable upstream samples, viewer, perf tests, hello-world and unit
     # tests — we don't need them and they pull in extra deps (e.g. GLFW).
     set(TARGET_UNIT_TESTS            OFF CACHE BOOL "" FORCE)
@@ -66,7 +74,18 @@ if(PSYNDER_GX_VENDOR_JOLT AND NOT TARGET Jolt)
         set(USE_SSE4_2 ON  CACHE BOOL "" FORCE)
         set(USE_AVX    ON  CACHE BOOL "" FORCE)
         set(USE_AVX2   ${PSYNDER_GX_ENABLE_AVX2}   CACHE BOOL "" FORCE)
-        set(USE_AVX512 ${PSYNDER_GX_ENABLE_AVX512} CACHE BOOL "" FORCE)
+        # Jolt has NO runtime ISA dispatch: USE_AVX512 compiles libJolt.a
+        # TU-wide with -mavx512* and assumes the host CPU supports it. Since
+        # libJolt.a is linked into psynder_unit, forwarding
+        # PSYNDER_GX_ENABLE_AVX512 here SIGILL'd the test binary at startup on
+        # non-AVX-512 CPUs (e.g. the GitHub CI runners) — a Jolt global
+        # initialiser executed an AVX-512 instruction before main(). Cap Jolt
+        # at AVX2 (the project's guaranteed runtime baseline) regardless of the
+        # AVX-512 option. The opportunistic AVX-512 path lives ONLY in the simd
+        # lane (engine/simd/Simd_avx512.cpp), which IS runtime-dispatched
+        # (Tier::Avx512 gated on CpuFeatures::avx512f) and is therefore safe to
+        # keep enabled by default.
+        set(USE_AVX512 OFF CACHE BOOL "" FORCE)
         set(USE_LZCNT  ON  CACHE BOOL "" FORCE)
         set(USE_TZCNT  ON  CACHE BOOL "" FORCE)
         set(USE_F16C   ON  CACHE BOOL "" FORCE)

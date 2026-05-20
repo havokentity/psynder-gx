@@ -87,7 +87,9 @@ enum class Format : std::uint16_t {
     Undefined,
     Rgba8Unorm,
     Rgba8Srgb,
+    Bgra8Unorm,       // linear swapchain-compatible format
     Bgra8Srgb,        // common swapchain format on macOS/Vulkan
+    R8Unorm,          // single-channel (font glyph atlases, SDF masks)
     Rgba16Float,
     Rgba32Float,
     Depth32Float,
@@ -123,6 +125,80 @@ struct TextureDesc {
     std::uint32_t usage  = 0; // bitmask of TextureUsage
     HeapKind      heap   = HeapKind::DeviceLocal;
     const char*   debug_name = nullptr;
+
+    // ─── Optional: synchronous mip-0 upload at create time ─────────────────
+    //
+    // M1 contract (DESIGN §4.4, no mid-frame GPU allocations applies to the
+    // texture creation only — uploads bundled into create_texture run during
+    // level load / startup, never inside the frame loop):
+    //
+    //   * initial_data: tightly-packed mip-0 pixel buffer (row pitch =
+    //     width * bytes_per_pixel(format)). nullptr leaves the texture
+    //     uninitialised (prior behaviour preserved).
+    //   * initial_data_size: byte count of the buffer above. MUST equal
+    //     width * height * bytes_per_pixel(format) — backends reject
+    //     mismatches by returning an invalid Handle (no crash, log once).
+    //
+    // Supported M1 formats: the uncompressed 8-bit formats Rgba8Unorm,
+    // Rgba8Srgb, Bgra8Unorm, Bgra8Srgb, R8Unorm. sRGB variants decode to
+    // linear on sample (the swapchain re-encodes on store). Compressed
+    // BC*/ASTC* uploads stay rejected — M3 broadens this when the offline
+    // cooker (lane 09) grows BC7 / ASTC pipelines and owns the per-asset
+    // gamma decision. mip-1+ array slices and 3D textures are also deferred
+    // to M3 (synchronous mip generation + cube map upload).
+    //
+    // Backend mapping:
+    //   Metal (Apple Silicon, unified memory) — direct
+    //     [id<MTLTexture> replaceRegion:mipmapLevel:withBytes:bytesPerRow:].
+    //     No staging buffer needed; the texture's storage is host-visible.
+    //   Vulkan — host-visible staging buffer + vkCmdCopyBufferToImage on a
+    //     one-shot transfer command buffer, with UNDEFINED → TRANSFER_DST
+    //     → SHADER_READ_ONLY layout transitions. Synchronous (waits before
+    //     returning). M3 will batch uploads through the JobSystem.
+    const void* initial_data      = nullptr;
+    std::size_t initial_data_size = 0;
+};
+
+// ─── Linux-only tagged window-handle ────────────────────────────────────
+// On Win32  DeviceDesc::native_window_handle is a plain HWND (void*).
+// On macOS  it is a CAMetalLayer* (void*).
+// On Linux  it points to a LinuxNativeWindowHandle so the Vulkan backend
+//           can dispatch to vkCreateWaylandSurfaceKHR or
+//           vkCreateXcbSurfaceKHR without ambiguity (Issue lane09-002).
+//
+// All OS-specific pointer types are stored as void* to avoid pulling
+// wayland-client.h / xcb/xcb.h into this public header.  The Vulkan
+// backend casts them back to the concrete types at the surface-creation
+// call site — see engine/gpu/vk/VulkanBackend.cpp, create_surface_().
+struct LinuxNativeWindowHandle {
+    enum class Kind : std::uint8_t {
+        Invalid = 0,  // default-constructed state — backend rejects with a clear error
+        Wayland,
+        Xcb,
+    };
+
+    // Named sub-structs avoid the -Wnested-anon-types Clang extension warning.
+    // Default member initializers on every field so a default-constructed
+    // handle is fully zeroed — the backend's `default:` case in
+    // create_surface_() catches Kind::Invalid + null pointers and rejects
+    // explicitly instead of reading indeterminate union storage.
+    struct WaylandFields {
+        void* wl_display = nullptr; // cast to ::wl_display*      at the surface-creation site
+        void* wl_surface = nullptr; // cast to ::wl_surface*      at the surface-creation site
+    };
+    struct XcbFields {
+        void*         xcb_connection = nullptr; // cast to ::xcb_connection_t* at the surface-creation site
+        std::uint32_t xcb_window     = 0;       // xcb_window_t is uint32
+    };
+
+    Kind kind = Kind::Invalid;
+    // Active variant is determined by `kind`. Wayland gets the default
+    // member init (all nulls) so a default-constructed handle is fully
+    // zeroed; population happens at window-create time in lane 24.
+    union {
+        WaylandFields wayland{};
+        XcbFields     xcb;
+    };
 };
 
 // ─── Device — top-level GPU handle ──────────────────────────────────────
@@ -130,7 +206,11 @@ struct DeviceDesc {
     bool enable_validation = false; // Vulkan validation layers in dev builds
     bool enable_rt         = true;  // gated by hardware capability detection
     bool enable_mesh_shaders = true;
-    void* native_window_handle = nullptr; // HWND / NSWindow* / wl_surface*
+    // Platform-specific:
+    //   Win32  — HWND cast to void*
+    //   macOS  — CAMetalLayer* cast to void*
+    //   Linux  — LinuxNativeWindowHandle* cast to void*  (see struct above)
+    void* native_window_handle = nullptr;
 };
 
 Device* create_device(const DeviceDesc&);
@@ -258,6 +338,13 @@ void set_scissor (CmdBuffer*, const Scissor&);
 void bind_pipeline(CmdBuffer*, ::psynder::shader::PipelineHandle);
 void bind_vertex_buffer(CmdBuffer*, std::uint32_t binding, Buffer*, std::uint64_t offset = 0);
 void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t offset = 0);
+
+// Bind a sampled texture + sampler to a descriptor slot for subsequent draws.
+// Vulkan resolves it to a descriptor set compatible with the bound pipeline;
+// Metal maps it to setFragmentTexture / setFragmentSamplerState. M1 uses slot
+// 0 for the fragment shader's primary texture; richer material binding (and
+// SPIR-V-reflected set layouts) arrive with the M2 forward+ path.
+void bind_texture(CmdBuffer*, std::uint32_t slot, Texture*, Sampler*);
 
 // Inline push constants (Vulkan vkCmdPushConstants /
 // Metal setVertexBytes:atIndex: + setFragmentBytes:atIndex:).
