@@ -31,3 +31,10 @@ else()
         psynder_core psynder_math psynder_gpu)
     add_test(NAME psynder_unit_smoke COMMAND psynder_unit)
 endif()
+
+# Make ctest's non-ASCII Catch2 name filters (e.g. "°", "—") match on Windows: the
+# manifest forces the process ANSI code page to UTF-8 so argv is decoded as UTF-8
+# rather than the legacy code page. Embedded by the linker via vs_link_exe/mt.
+if(MSVC)
+    target_sources(psynder_unit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/psynder_unit.manifest")
+endif()
