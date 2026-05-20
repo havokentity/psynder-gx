@@ -6,7 +6,7 @@ What ships in this PR (M2 baseline)
 * CLI: psymesh_cook --in <obj> --out <psymesh> [--scale N] [--center-pivot]
        [--no-tangents] [--gen-uv2-lightmap] [--force] [--print-stats] [--quiet]
 * Frozen wire format v1 (see PsyMeshFormat.h):
-    - PsyMeshFileHeader: 48 bytes, static_asserted on disk size.
+    - PsyMeshFileHeader: 52 bytes, static_asserted on disk size.
     - PsyMeshSubmesh:    16 bytes, static_asserted.
     - Per-stream contiguous layout (SoA on the wire) so the runtime
       loader can mmap and skip cold attributes.

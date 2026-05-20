@@ -35,6 +35,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+    #include <process.h>   // _getpid
+#else
+    #include <unistd.h>    // getpid
+#endif
+
 namespace fs = std::filesystem;
 
 using psy::psymesh::CookOptions;
@@ -57,11 +63,25 @@ static_assert(sizeof(PsyMeshSubmesh)    == 16, "PsyMeshSubmesh is 16 bytes on di
 namespace {
 
 // Tempfile helper. Catch2 sets up its own temp dir but we just use the
-// system temp + a process-unique counter to keep tests self-contained.
+// system temp + a TRULY process-unique counter to keep tests self-
+// contained even when ctest + catch_discover_tests run them as separate
+// processes in parallel.  Earlier this used only an in-process atomic
+// counter, which collided across PIDs sharing the same temp dir
+// (Copilot PR #18 review).  Mixing the PID into the directory name
+// keeps every test process in its own sub-tree; the in-process counter
+// then disambiguates within a single PID.
 std::string make_temp_path(const char* suffix) {
     static std::atomic<std::uint32_t> counter{0};
     const std::uint32_t n = counter.fetch_add(1, std::memory_order_relaxed);
-    const fs::path dir = fs::temp_directory_path() / "psynder_gx_psymesh_tests";
+    const auto pid =
+#if defined(_WIN32)
+        static_cast<long>(::_getpid());
+#else
+        static_cast<long>(::getpid());
+#endif
+    char dirname[64];
+    std::snprintf(dirname, sizeof(dirname), "psynder_gx_psymesh_tests-%ld", pid);
+    const fs::path dir = fs::temp_directory_path() / dirname;
     std::error_code ec;
     fs::create_directories(dir, ec);
     char buf[64];

@@ -50,7 +50,15 @@
 // ──────────────────────────────────────────────────────────────────────────
 //
 //   The cooker is required to produce byte-identical output for byte-
-//   identical input, on any host. Specifically:
+//   identical input across runs on any LITTLE-ENDIAN, IEEE-754, x86-64
+//   / aarch64 host (the project's supported targets — see DESIGN §1.2).
+//   The on-disk format is explicitly little-endian and the writer memcpys
+//   native u32 / f32 values without byte-swapping; the static_assert at
+//   the bottom of this header enforces the matching host expectation at
+//   compile time so a hypothetical big-endian build trips the build
+//   rather than silently mis-encoding bytes.
+//
+//   Specifically:
 //     * No std::random_device / std::chrono / process-id mixing.
 //     * Vertex dedup uses an ordered map keyed on the (pos, normal, uv0)
 //       bit-pattern; first-occurrence wins. Insertion order = stream order.
@@ -68,7 +76,7 @@
 //   Positions in the file are in METRES. The cooker's --scale option
 //   multiplies input positions by a uniform factor; pass 1.0 if the input
 //   DCC file already uses metres, or e.g. 0.01 if the input is in cm
-//   (max .obj convention for some pipelines).
+//   (most .obj convention for some pipelines).
 //
 //   Coordinate convention: right-handed, +Y up (Blender / glTF). .obj
 //   files are read with the same convention — the cooker does not flip
@@ -78,7 +86,9 @@
 
 #pragma once
 
+#include <bit>
 #include <cstdint>
+#include <limits>
 
 namespace psy::psymesh {
 
@@ -119,6 +129,19 @@ struct PsyMeshSubmesh {
 
 static_assert(sizeof(PsyMeshFileHeader) == 52, "PsyMeshFileHeader v1 wire size is 52 bytes");
 static_assert(sizeof(PsyMeshSubmesh)    == 16, "PsyMeshSubmesh v1 wire size is 16 bytes");
+
+// Endianness + IEEE-754 host expectations.  The writer memcpys native
+// u32 / f32 values into the blob without byte-swapping; the format is
+// explicitly little-endian (DESIGN §1.2 supported targets).  A
+// hypothetical big-endian or non-IEEE-754 host would silently mis-encode
+// bytes — trip the build instead.  Copilot PR #18 review caught the
+// implicit assumption.
+static_assert(std::endian::native == std::endian::little,
+              "psymesh wire format is little-endian; this host must be too "
+              "(supported targets per DESIGN §1.2 are all LE)");
+static_assert(std::numeric_limits<float>::is_iec559,
+              "psymesh wire format stores native f32 bit-patterns; host "
+              "float MUST be IEEE-754 binary32 (every supported target is)");
 
 // Per-vertex byte sizes for each stream — useful when computing the
 // expected file size or scanning for a specific attribute.
