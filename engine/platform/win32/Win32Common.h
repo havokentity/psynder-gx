@@ -31,6 +31,11 @@
 #ifndef NOMINMAX
 #   define NOMINMAX
 #endif
+// Target Windows 10+ so the per-monitor-DPI APIs (SetProcessDpiAwarenessContext,
+// GetDpiForSystem, AdjustWindowRectExForDpi, WM_DPICHANGED) are declared.
+#ifndef _WIN32_WINNT
+#   define _WIN32_WINNT 0x0A00
+#endif
 
 #include <windows.h>
 
