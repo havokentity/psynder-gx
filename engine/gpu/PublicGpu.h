@@ -157,12 +157,58 @@ struct TextureDesc {
     std::size_t initial_data_size = 0;
 };
 
+// ─── Linux-only tagged window-handle ────────────────────────────────────
+// On Win32  DeviceDesc::native_window_handle is a plain HWND (void*).
+// On macOS  it is a CAMetalLayer* (void*).
+// On Linux  it points to a LinuxNativeWindowHandle so the Vulkan backend
+//           can dispatch to vkCreateWaylandSurfaceKHR or
+//           vkCreateXcbSurfaceKHR without ambiguity (Issue lane09-002).
+//
+// All OS-specific pointer types are stored as void* to avoid pulling
+// wayland-client.h / xcb/xcb.h into this public header.  The Vulkan
+// backend casts them back to the concrete types at the surface-creation
+// call site — see engine/gpu/vk/VulkanBackend.cpp, create_surface_().
+struct LinuxNativeWindowHandle {
+    enum class Kind : std::uint8_t {
+        Invalid = 0,  // default-constructed state — backend rejects with a clear error
+        Wayland,
+        Xcb,
+    };
+
+    // Named sub-structs avoid the -Wnested-anon-types Clang extension warning.
+    // Default member initializers on every field so a default-constructed
+    // handle is fully zeroed — the backend's `default:` case in
+    // create_surface_() catches Kind::Invalid + null pointers and rejects
+    // explicitly instead of reading indeterminate union storage.
+    struct WaylandFields {
+        void* wl_display = nullptr; // cast to ::wl_display*      at the surface-creation site
+        void* wl_surface = nullptr; // cast to ::wl_surface*      at the surface-creation site
+    };
+    struct XcbFields {
+        void*         xcb_connection = nullptr; // cast to ::xcb_connection_t* at the surface-creation site
+        std::uint32_t xcb_window     = 0;       // xcb_window_t is uint32
+    };
+
+    Kind kind = Kind::Invalid;
+    // Active variant is determined by `kind`. Wayland gets the default
+    // member init (all nulls) so a default-constructed handle is fully
+    // zeroed; population happens at window-create time in lane 24.
+    union {
+        WaylandFields wayland{};
+        XcbFields     xcb;
+    };
+};
+
 // ─── Device — top-level GPU handle ──────────────────────────────────────
 struct DeviceDesc {
     bool enable_validation = false; // Vulkan validation layers in dev builds
     bool enable_rt         = true;  // gated by hardware capability detection
     bool enable_mesh_shaders = true;
-    void* native_window_handle = nullptr; // HWND / NSWindow* / wl_surface*
+    // Platform-specific:
+    //   Win32  — HWND cast to void*
+    //   macOS  — CAMetalLayer* cast to void*
+    //   Linux  — LinuxNativeWindowHandle* cast to void*  (see struct above)
+    void* native_window_handle = nullptr;
 };
 
 Device* create_device(const DeviceDesc&);

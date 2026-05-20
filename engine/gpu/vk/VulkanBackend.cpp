@@ -28,19 +28,30 @@
 // xcb fallback. The platform lanes (23 / 24) pass us the appropriate
 // native handle via DeviceDesc::native_window_handle.
 //
-// The platform-handle interpretation:
-//   * Win32: native_window_handle is HWND.
-//   * Linux Wayland: native_window_handle is wl_surface* (with the
-//     compositor accessible via the platform lane's wl_display pointer).
-//     We expect a small struct LinuxWaylandHandle behind a tagged
-//     interface — TBD with lane 24 via Issue.
-//   * Linux X11/xcb: TBD with lane 24.
+// The platform-handle interpretation (current — Issue lane09-002 resolved):
+//   * Win32: native_window_handle is HWND (void* cast).
+//   * macOS: native_window_handle is CAMetalLayer* (void* cast) —
+//     handled by the Metal backend, never reaches this TU.
+//   * Linux: native_window_handle is psynder::gpu::LinuxNativeWindowHandle*
+//     (void* cast). The struct carries a Kind tag (Invalid / Wayland / Xcb)
+//     plus a union of OS-specific sub-fields stored as void*/uint32 so
+//     wayland-client.h and xcb/xcb.h stay out of PublicGpu.h. We cast
+//     them back to concrete types in create_surface_() below where the
+//     OS headers are already included.
 //
 // NO mid-frame allocations. Command pool is per-frame and gets reset
 // (not freed) each frame.
 
 #include "gpu/PublicGpu.h"
 #include "gpu/PublicGpuInternal.h"
+
+#if defined(__linux__) && !defined(PSYNDER_GX_DEDICATED_SERVER)
+// LinuxNativeWindowHandle is defined in PublicGpu.h (already included above).
+// This comment is the only Linux-specific include needed here — the wl_display,
+// wl_surface, xcb_connection_t types are accessed via void* casts and the
+// platform headers (wayland-client.h / xcb/xcb.h) are pulled in below inside
+// the platform guards.
+#endif
 
 #if !defined(PSYNDER_GX_BACKEND_VULKAN)
 
@@ -296,6 +307,16 @@ bool VulkanBackend::create_instance_(Device* dev) {
 }
 
 // ─── Surface ────────────────────────────────────────────────────────────
+//
+// Platform-handle interpretation:
+//   Win32  — native_handle is HWND (void* cast).
+//   macOS  — Metal backend; this function is never called on macOS.
+//   Linux  — native_handle is LinuxNativeWindowHandle* (void* cast).
+//             The struct carries a Kind tag (Wayland / Xcb) plus the
+//             OS-specific sub-fields stored as void* to avoid pulling
+//             Wayland/XCB headers into PublicGpu.h.  We cast the void*
+//             sub-fields back to their concrete types here where the
+//             platform headers are already included.
 bool VulkanBackend::create_surface_(Device* /*dev*/, void* native_handle) {
 #if defined(_WIN32)
     VkWin32SurfaceCreateInfoKHR ci{};
@@ -305,31 +326,97 @@ bool VulkanBackend::create_surface_(Device* /*dev*/, void* native_handle) {
     VK_CHECK(vkCreateWin32SurfaceKHR(instance_, &ci, nullptr, &surface_));
     return true;
 #elif defined(__linux__)
-    // The platform-linux lane (24) is expected to give us a small
-    // tagged-handle struct so we can pick Wayland vs X11. The contract
-    // is TBD via Issue against lane 24; for now we accept a raw
-    // wl_surface* under Wayland and a uintptr-encoded xcb_window_t under
-    // XCB, selecting by which extension was compiled in.
+    // Interpret native_handle as the tagged LinuxNativeWindowHandle struct
+    // populated by lane 24's create_window_impl (LinuxPlatform.cpp).
+    // The void*-typed sub-fields are cast back to their concrete types here;
+    // wayland-client.h and xcb/xcb.h are already included above.
+    if (!native_handle) {
+        std::fputs("[psy::gpu::vk] native_handle is null on Linux\n", stderr);
+        return false;
+    }
+    const auto* lh = reinterpret_cast<const psynder::gpu::LinuxNativeWindowHandle*>(
+        native_handle);
+
+    switch (lh->kind) {
 #  if defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    {
-        // Lane 24 stub: assume Wayland for now; platform fills out the
-        // wl_display pointer via a side channel until the handle struct
-        // ABI is agreed.
-        (void)native_handle;
-        std::fputs("[psy::gpu::vk] Wayland surface creation pending lane-24 handle contract\n", stderr);
-        return false;
+    case psynder::gpu::LinuxNativeWindowHandle::Kind::Wayland: {
+        // wl_display* and wl_surface* were stored as void* in the tagged
+        // struct (PublicGpu.h) to avoid pulling wayland-client.h into the
+        // public GPU header.  Cast them back here where the header is present.
+        auto* display = reinterpret_cast<wl_display*>(lh->wayland.wl_display);
+        auto* surface = reinterpret_cast<wl_surface*>(lh->wayland.wl_surface);
+        if (!display || !surface) {
+            std::fputs("[psy::gpu::vk] Wayland handle has null display or surface\n",
+                       stderr);
+            return false;
+        }
+        VkWaylandSurfaceCreateInfoKHR ci{};
+        ci.sType   = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+        ci.display = display;
+        ci.surface = surface;
+        VK_CHECK(vkCreateWaylandSurfaceKHR(instance_, &ci, nullptr, &surface_));
+        return true;
     }
-#  elif defined(VK_USE_PLATFORM_XCB_KHR)
-    {
-        (void)native_handle;
-        std::fputs("[psy::gpu::vk] XCB surface creation pending lane-24 handle contract\n", stderr);
-        return false;
+#  endif // VK_USE_PLATFORM_WAYLAND_KHR
+
+#  if defined(VK_USE_PLATFORM_XCB_KHR)
+    case psynder::gpu::LinuxNativeWindowHandle::Kind::Xcb: {
+        // xcb_connection_t* and xcb_window_t (uint32) were stored as
+        // void* / uint32 in the tagged struct.  Cast back here where
+        // xcb/xcb.h is present.
+        auto* conn   = reinterpret_cast<xcb_connection_t*>(lh->xcb.xcb_connection);
+        auto  window = static_cast<xcb_window_t>(lh->xcb.xcb_window);
+        if (!conn || window == 0) {
+            std::fputs("[psy::gpu::vk] XCB handle has null connection or zero window\n",
+                       stderr);
+            return false;
+        }
+        VkXcbSurfaceCreateInfoKHR ci{};
+        ci.sType      = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
+        ci.connection = conn;
+        ci.window     = window;
+        VK_CHECK(vkCreateXcbSurfaceKHR(instance_, &ci, nullptr, &surface_));
+        return true;
     }
+#  endif // VK_USE_PLATFORM_XCB_KHR
+
+    // Two distinct failure modes folded into the same arm so we report
+    // accurately. Kind::Invalid means the caller never populated the
+    // handle. A valid Kind value (Wayland/Xcb) landing here means the
+    // corresponding VK_USE_PLATFORM_*_KHR was not defined at compile time
+    // — different fix from the user (rebuild) vs different fix from the
+    // caller (populate the handle).
+    case psynder::gpu::LinuxNativeWindowHandle::Kind::Invalid:
+        std::fputs("[psy::gpu::vk] LinuxNativeWindowHandle is Kind::Invalid "
+                   "(default-constructed?); the platform lane must populate "
+                   "kind + the active union variant before psy::gpu::create_device()\n",
+                   stderr);
+        return false;
+    default: {
+        const int k = static_cast<int>(lh->kind);
+#  if !defined(VK_USE_PLATFORM_WAYLAND_KHR) && !defined(VK_USE_PLATFORM_XCB_KHR)
+        std::fprintf(stderr,
+            "[psy::gpu::vk] LinuxNativeWindowHandle::Kind = %d but this build "
+            "has neither VK_USE_PLATFORM_WAYLAND_KHR nor VK_USE_PLATFORM_XCB_KHR "
+            "defined — rebuild psynder_gpu with the relevant CMake flags\n", k);
+#  elif !defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        std::fprintf(stderr,
+            "[psy::gpu::vk] LinuxNativeWindowHandle::Kind = %d (Wayland?) but "
+            "VK_USE_PLATFORM_WAYLAND_KHR not defined at compile time; either "
+            "rebuild with the Wayland WSI flag or use Kind::Xcb\n", k);
+#  elif !defined(VK_USE_PLATFORM_XCB_KHR)
+        std::fprintf(stderr,
+            "[psy::gpu::vk] LinuxNativeWindowHandle::Kind = %d (Xcb?) but "
+            "VK_USE_PLATFORM_XCB_KHR not defined at compile time; either "
+            "rebuild with the XCB WSI flag or use Kind::Wayland\n", k);
 #  else
-    (void)native_handle;
-    std::fputs("[psy::gpu::vk] no Linux WSI extension compiled in\n", stderr);
-    return false;
+        std::fprintf(stderr,
+            "[psy::gpu::vk] LinuxNativeWindowHandle::Kind = %d is outside "
+            "the known enum range — check the platform lane for ABI drift\n", k);
 #  endif
+        return false;
+    }
+    }
 #else
     (void)native_handle;
     std::fputs("[psy::gpu::vk] unsupported platform for VkSurfaceKHR\n", stderr);
