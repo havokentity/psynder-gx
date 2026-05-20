@@ -2,6 +2,7 @@
 // Psynder — Lane 06 spatial query router + brute-force baseline (see Spatial.h).
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -42,6 +43,13 @@ void SpatialIndex::clear() noexcept {
 void SpatialIndex::rebuild(std::span<const Entity> entities,
                            std::span<const math::Aabb> aabbs,
                            Params params) {
+    // Exactly one AABB per entity. On a size mismatch, build nothing rather than
+    // risk an out-of-bounds index->entity mapping in a later query.
+    assert(entities.size() == aabbs.size());
+    if (entities.size() != aabbs.size()) {
+        clear();
+        return;
+    }
     entities_.assign(entities.begin(), entities.end());
     aabbs_.assign(aabbs.begin(), aabbs.end());
 
@@ -71,6 +79,13 @@ void SpatialIndex::refit(std::span<const math::Aabb> aabbs) {
     // Precondition: same proxy count and order as the last rebuild() — only the
     // bounds have moved. The BVH refits cheaply in place; the SAP/grid keep no
     // incremental state here, so they are simply marked for lazy rebuild.
+    //
+    // On a count mismatch, skip the refit: the BVH was built for the old count,
+    // so refitting would read proxy indices out of bounds. A topology change
+    // (different proxy count/order) must go through rebuild() instead.
+    assert(aabbs.size() == aabbs_.size());
+    if (aabbs.size() != aabbs_.size())
+        return;
     aabbs_.assign(aabbs.begin(), aabbs.end());
     bvh_.refit(std::span<const math::Aabb>{aabbs_});
     scene_bounds_ = bvh_.bounds();

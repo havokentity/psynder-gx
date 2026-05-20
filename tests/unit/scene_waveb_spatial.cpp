@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
 #include <chrono>
 #include <random>
 #include <utility>
@@ -22,13 +24,16 @@ using namespace psynder::scene;
 
 namespace {
 
-// Start the job pool once for the whole test binary so build/refit exercise the
-// parallel_for path. JobSystem::Get() is a function-local static, so this is
-// safe at dynamic-init time regardless of TU ordering.
-struct JobsGuard {
-    JobsGuard() { jobs::JobSystem::Get().start(); }
+// Start the job pool for the duration of the test run and stop it at the end,
+// via a Catch2 session listener. Controlled lifetime (rather than starting at
+// static-init time) keeps the real threaded pool free of init-order and
+// shutdown-hang hazards; build()/refit() then exercise the parallel_for path.
+struct JobsListener : Catch::EventListenerBase {
+    using Catch::EventListenerBase::EventListenerBase;
+    void testRunStarting(const Catch::TestRunInfo&) override { jobs::JobSystem::Get().start(); }
+    void testRunEnded(const Catch::TestRunStats&) override { jobs::JobSystem::Get().stop(); }
 };
-const JobsGuard g_jobs_guard{};
+CATCH_REGISTER_LISTENER(JobsListener)
 
 constexpr f32 kSceneMetres = 1400.0f;  // 1.4 km map per DESIGN §9.1
 

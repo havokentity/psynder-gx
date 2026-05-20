@@ -92,12 +92,15 @@ void UniformGrid::rebuild_internal() {
     jobs::JobSystem::Get().parallel_for(0u, n, kParallelGrain, [&](usize lo, usize hi) noexcept {
         for (usize i = lo; i < hi; ++i) {
             const math::Aabb& b = prims_[i];
-            ranges[i] = Range{cell_coord(b.min.x),
-                              cell_coord(b.max.x),
-                              cell_coord(b.min.y),
-                              cell_coord(b.max.y),
-                              cell_coord(b.min.z),
-                              cell_coord(b.max.z)};
+            // Order each axis so lo <= hi even if a degenerate box arrives with
+            // min > max — otherwise (hi - lo + 1) goes negative and the usize
+            // cast in the count passes would blow the entry-array allocation up.
+            ranges[i] = Range{cell_coord(std::min(b.min.x, b.max.x)),
+                              cell_coord(std::max(b.min.x, b.max.x)),
+                              cell_coord(std::min(b.min.y, b.max.y)),
+                              cell_coord(std::max(b.min.y, b.max.y)),
+                              cell_coord(std::min(b.min.z, b.max.z)),
+                              cell_coord(std::max(b.min.z, b.max.z))};
         }
     });
 
