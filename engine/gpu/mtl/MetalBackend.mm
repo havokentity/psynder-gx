@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <new>
 
 namespace psynder::gpu {
@@ -474,8 +475,13 @@ struct Entry {
 
 static Entry  g_entries[kMaxPipelines] = {};
 static std::uint32_t g_count = 0;
+// Writers: psynder_gx_mtl_register_render_pso / *_compute_pso called from
+// lane 08's worker threads.  Reader: bind_pipeline() runs on the render
+// thread.  All access goes through g_mu.
+static std::mutex g_mu;
 
-static Entry* find(std::uint32_t needle) {
+// Locked find — caller must already hold g_mu.
+static Entry* find_locked(std::uint32_t needle) {
     for (std::uint32_t i = 0; i < g_count; ++i) {
         if (g_entries[i].handle_id == needle) return &g_entries[i];
     }
@@ -491,14 +497,18 @@ static Entry* find(std::uint32_t needle) {
 extern "C" {
 
 void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) {
-    auto& s = pipeline_shim::g_entries;
-    auto& cnt = pipeline_shim::g_count;
     // ARC is OFF for this TU (per CMakeLists: -fno-objc-arc), so we can
     // bridge-cast a raw void* to a strong reference and assign without
     // ownership semantics getting in the way. The caller (lane 08) must
     // ensure the MTLRenderPipelineState outlives the registration.
     id pso = (__bridge id)mtl_pso;
-    if (auto* e = pipeline_shim::find(handle_id)) {
+
+    // Lock the shim — lane 08 may call this from a worker thread while
+    // the render thread is in bind_pipeline() walking g_entries.
+    std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
+    auto& s = pipeline_shim::g_entries;
+    auto& cnt = pipeline_shim::g_count;
+    if (auto* e = pipeline_shim::find_locked(handle_id)) {
         e->render_pso = pso;
         return;
     }
@@ -515,13 +525,15 @@ void psynder_gx_mtl_register_compute_pso(std::uint32_t handle_id, void* mtl_pso,
                                          std::uint32_t tgs_x,
                                          std::uint32_t tgs_y,
                                          std::uint32_t tgs_z) {
-    auto& s = pipeline_shim::g_entries;
-    auto& cnt = pipeline_shim::g_count;
     id pso = (__bridge id)mtl_pso;
     MTLSize tgs = MTLSizeMake(tgs_x ? tgs_x : 1,
                               tgs_y ? tgs_y : 1,
                               tgs_z ? tgs_z : 1);
-    if (auto* e = pipeline_shim::find(handle_id)) {
+
+    std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
+    auto& s = pipeline_shim::g_entries;
+    auto& cnt = pipeline_shim::g_count;
+    if (auto* e = pipeline_shim::find_locked(handle_id)) {
         e->compute_pso = pso;
         e->compute_tgs = tgs;
         return;
@@ -664,8 +676,25 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
         c->bound_compute_pso = nil;
         return;
     }
-    auto* entry = pipeline_shim::find(h.id);
-    if (!entry) {
+    // Snapshot the entry under the lock so a concurrent register_*_pso()
+    // from a worker thread doesn't tear the read. After the copy we drop
+    // the lock — the rest of bind_pipeline only touches `c` (the local
+    // cmd buffer) and the Metal encoder, neither of which the shim mutex
+    // covers.
+    id  shim_render_pso  = nil;
+    id  shim_compute_pso = nil;
+    MTLSize shim_tgs     = MTLSizeMake(1, 1, 1);
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
+        if (auto* entry = pipeline_shim::find_locked(h.id)) {
+            shim_render_pso  = entry->render_pso;
+            shim_compute_pso = entry->compute_pso;
+            shim_tgs         = entry->compute_tgs;
+            found = true;
+        }
+    }
+    if (!found) {
         // Lane 08 hasn't published a Metal PSO for this handle yet. This
         // is the expected state today: lane 08 only emits Metal IR blobs,
         // not state objects. Render lanes that hit this path will see
@@ -684,12 +713,12 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
         return;
     }
 
-    // entry->render_pso / compute_pso are stored as untyped `id` (the
-    // shim's struct must not name protocols inside the nested namespace —
-    // see the comment in pipeline_shim). Re-narrow back to the typed
-    // protocol via static_cast on the way out.
-    id<MTLRenderPipelineState>  render_pso  = static_cast<id<MTLRenderPipelineState>>(entry->render_pso);
-    id<MTLComputePipelineState> compute_pso = static_cast<id<MTLComputePipelineState>>(entry->compute_pso);
+    // Shim values are stored as untyped `id` (the shim's struct must not
+    // name protocols inside the nested namespace — see the comment in
+    // pipeline_shim). Re-narrow back to the typed protocol via static_cast
+    // on the way out.
+    id<MTLRenderPipelineState>  render_pso  = static_cast<id<MTLRenderPipelineState>>(shim_render_pso);
+    id<MTLComputePipelineState> compute_pso = static_cast<id<MTLComputePipelineState>>(shim_compute_pso);
 
     if (c->encoder && render_pso) {
         c->bound_render_pso = render_pso;
@@ -697,14 +726,14 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     }
     if (c->compute_encoder && compute_pso) {
         c->bound_compute_pso = compute_pso;
-        c->compute_tgs       = entry->compute_tgs;
+        c->compute_tgs       = shim_tgs;
         [c->compute_encoder setComputePipelineState:compute_pso];
     }
     // If neither encoder is open yet, stash for the next encode-open.
     if (!c->encoder && !c->compute_encoder) {
         c->bound_render_pso  = render_pso;
         c->bound_compute_pso = compute_pso;
-        c->compute_tgs       = entry->compute_tgs;
+        c->compute_tgs       = shim_tgs;
     }
 }
 
