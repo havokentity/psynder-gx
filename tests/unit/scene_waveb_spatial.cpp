@@ -9,8 +9,6 @@
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/reporters/catch_reporter_event_listener.hpp>
-#include <catch2/reporters/catch_reporter_registrars.hpp>
 #include <chrono>
 #include <random>
 #include <utility>
@@ -24,16 +22,19 @@ using namespace psynder::scene;
 
 namespace {
 
-// Start the job pool for the duration of the test run and stop it at the end,
-// via a Catch2 session listener. Controlled lifetime (rather than starting at
-// static-init time) keeps the real threaded pool free of init-order and
-// shutdown-hang hazards; build()/refit() then exercise the parallel_for path.
-struct JobsListener : Catch::EventListenerBase {
-    using Catch::EventListenerBase::EventListenerBase;
-    void testRunStarting(const Catch::TestRunInfo&) override { jobs::JobSystem::Get().start(); }
-    void testRunEnded(const Catch::TestRunStats&) override { jobs::JobSystem::Get().stop(); }
+// RAII: run this test's build()/refit() on the real threaded pool, then stop
+// it. Scoped to the individual TEST_CASE on purpose -- a global Catch2 listener
+// (CATCH_REGISTER_LISTENER) starts the pool at the beginning of EVERY test
+// process in the combined binary, which breaks lanes that rely on the
+// synchronous-fallback default (asset read_async firing inline; jobs' not-
+// started worker_count()==1 and backend-selection asserts). parallel_for is
+// synchronous either way, so scene correctness is identical with the pool off.
+struct ScenePool {
+    ScenePool() { jobs::JobSystem::Get().start(); }
+    ~ScenePool() { jobs::JobSystem::Get().stop(); }
+    ScenePool(const ScenePool&) = delete;
+    ScenePool& operator=(const ScenePool&) = delete;
 };
-CATCH_REGISTER_LISTENER(JobsListener)
 
 constexpr f32 kSceneMetres = 1400.0f;  // 1.4 km map per DESIGN §9.1
 
@@ -106,6 +107,7 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 }  // namespace
 
 TEST_CASE("scene spatial BVH matches brute force", "[scene][spatial][bvh]") {
+    ScenePool pool;
     const std::vector<math::Aabb> boxes = make_proxies(8000, 1234);
     const std::span<const math::Aabb> span{boxes};
 
@@ -173,6 +175,7 @@ TEST_CASE("scene spatial BVH matches brute force", "[scene][spatial][bvh]") {
 }
 
 TEST_CASE("scene spatial ray robust to axis-aligned directions", "[scene][spatial][bvh]") {
+    ScenePool pool;
     // Zero direction components make the slab reciprocal +/-inf; verify the BVH
     // ray query stays consistent with brute force (no NaN-poisoned misses).
     const std::vector<math::Aabb> boxes = make_proxies(4000, 88);
@@ -200,6 +203,7 @@ TEST_CASE("scene spatial ray robust to axis-aligned directions", "[scene][spatia
 }
 
 TEST_CASE("scene spatial uniform grid matches brute force", "[scene][spatial][grid]") {
+    ScenePool pool;
     const std::vector<math::Aabb> boxes = make_proxies(8000, 4242);
     const std::span<const math::Aabb> span{boxes};
 
@@ -252,6 +256,7 @@ TEST_CASE("scene spatial uniform grid matches brute force", "[scene][spatial][gr
 }
 
 TEST_CASE("scene spatial SAP matches brute force", "[scene][spatial][sap]") {
+    ScenePool pool;
     // Smaller N: the brute-force pair baseline is O(n^2). Dense packing (a 200 m
     // cube) guarantees plenty of real overlaps to exercise the sweep.
     std::mt19937 rng(2025);
@@ -294,6 +299,7 @@ TEST_CASE("scene spatial SAP matches brute force", "[scene][spatial][sap]") {
 }
 
 TEST_CASE("scene spatial BVH refit tracks moved proxies", "[scene][spatial][bvh]") {
+    ScenePool pool;
     std::vector<math::Aabb> boxes = make_proxies(6000, 555);
     Bvh bvh;
     bvh.build(std::span<const math::Aabb>{boxes});
@@ -325,6 +331,7 @@ TEST_CASE("scene spatial BVH refit tracks moved proxies", "[scene][spatial][bvh]
 }
 
 TEST_CASE("scene spatial empty and singleton", "[scene][spatial]") {
+    ScenePool pool;
     SECTION("empty index") {
         SpatialIndex idx;
         std::vector<Entity> out;
@@ -354,6 +361,7 @@ TEST_CASE("scene spatial empty and singleton", "[scene][spatial]") {
 }
 
 TEST_CASE("scene spatial router matches brute force over 100k", "[scene][spatial][router]") {
+    ScenePool pool;
     constexpr u32 kN = 100000;
     std::vector<math::Aabb> boxes = make_proxies(kN, 0xC0FFEE);
     std::vector<Entity> ents(kN);
