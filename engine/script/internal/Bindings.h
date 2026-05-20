@@ -58,4 +58,9 @@ bool run_registered_systems(lua_State*       L,
                             f64              dt,
                             std::string&     err_out);
 
+// Installs the read-only `reflect` global, exposing the component / system
+// reflection registries (see script/Reflect.h) to Lua. Implemented in
+// internal/Reflect.cpp.
+void install_reflect_api(lua_State* L);
+
 }  // namespace psynder::script::detail

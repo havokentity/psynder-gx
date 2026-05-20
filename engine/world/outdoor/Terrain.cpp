@@ -9,9 +9,11 @@
 #include "world/outdoor/Terrain.h"
 
 #include "world/outdoor/CdlodMesh_internal.h"
+#include "world/outdoor/HeightfieldSimd_internal.h"
 #include "world/outdoor/Heightmap_internal.h"
 #include "world/outdoor/Raymarch_internal.h"
 #include "world/outdoor/Scatter_internal.h"
+#include "world/outdoor/SplineEditor_internal.h"
 #include "world/outdoor/Spline_internal.h"
 
 #include "asset/Vfs.h"

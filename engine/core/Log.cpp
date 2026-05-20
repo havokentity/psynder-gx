@@ -181,6 +181,31 @@ void add_sink(Sink sink) {
     retire_sink_list(old);
 }
 
+void remove_sink(Sink sink) {
+    if (!sink) return;
+    // Mirror add_sink: build a fresh immutable list without `sink`, swap it
+    // in, retire the old one. The CAS loop handles a racing writer; if the
+    // list went null underneath us there is nothing to remove.
+    SinkList* old = g_sinks.load(std::memory_order_acquire);
+    auto* fresh = new SinkList;
+    for (;;) {
+        if (!old) {
+            delete fresh;
+            return;
+        }
+        fresh->sinks.clear();
+        for (auto s : old->sinks) {
+            if (s != sink) fresh->sinks.push_back(s);
+        }
+        if (g_sinks.compare_exchange_weak(old, fresh,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire)) {
+            break;
+        }
+    }
+    retire_sink_list(old);
+}
+
 void remove_all_sinks() {
     SinkList* old = g_sinks.exchange(nullptr, std::memory_order_acq_rel);
     retire_sink_list(old);
