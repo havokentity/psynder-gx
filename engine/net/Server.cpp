@@ -25,6 +25,24 @@
 #include <chrono>
 #include <thread>
 
+#if defined(_WIN32)
+// timeBeginPeriod/timeEndPeriod raise the system timer resolution so
+// std::this_thread::sleep_until in high_res_sleep_until() lands within ~1 ms of
+// the deadline. Windows' default ~15.6 ms granularity otherwise overshoots every
+// 128 Hz frame (the 250 us final spin can't recover 15 ms), dropping the server
+// to ~70 Hz. WIN32_LEAN_AND_MEAN + NOMINMAX keep <windows.h> from polluting the
+// TU; winmm provides timeBeginPeriod (linked via the pragma so no CMake change).
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <timeapi.h>
+#  pragma comment(lib, "winmm.lib")
+#endif
+
 namespace psynder::net {
 
 namespace {
@@ -76,14 +94,35 @@ bool Server::start(const TickConfig& cfg, u16 bind_port) noexcept {
 
     if (!socket_.open(bind_port)) return false;
 
+#if defined(_WIN32)
+    // Raise timer resolution to 1 ms for the lifetime of the run loop so the
+    // 128-tick deadline waits are accurate (see the include-block note + the
+    // granularity comment in high_res_sleep_until). Released in stop().
+    if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+        win_timer_period_set_ = true;
+    }
+#endif
+
     next_deadline_ = now() + frame_period_;
     return true;
 }
 
 void Server::stop() noexcept {
     if (!is_running()) return;
+    // Signal run_until_stop() to exit FIRST (matches the Server.h contract that
+    // stop() ends the loop), then tear down. Setting the atomic before closing
+    // the socket / dropping the timer resolution means a run loop on another
+    // thread breaks promptly instead of continuing to tick after teardown (and,
+    // on Windows, after timeEndPeriod has already lowered the timer res).
+    // start() resets stop_requested_ to false, so the Server stays reusable.
+    stop_requested_.store(true);
     socket_.close();
-    stop_requested_.store(false);
+#if defined(_WIN32)
+    if (win_timer_period_set_) {
+        timeEndPeriod(1);
+        win_timer_period_set_ = false;
+    }
+#endif
 }
 
 u64 Server::run(u32 tick_count) noexcept {
