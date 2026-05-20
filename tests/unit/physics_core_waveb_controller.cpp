@@ -151,7 +151,8 @@ TEST_CASE("physics-core wave-b: capsule climbs a ramp within the slope limit",
     character_get_transform(cc, p1, nullptr);
 
     REQUIRE(p1[2] > p0[2] + 0.3f); // advanced up the ramp
-    REQUIRE(p1[1] > p0[1] + 0.3f); // gained height}
+    REQUIRE(p1[1] > p0[1] + 0.3f); // gained height
+}
 
 TEST_CASE("physics-core wave-b: capsule steps up a curb within the step offset",
           "[physics][character][waveb]") {
@@ -174,7 +175,8 @@ TEST_CASE("physics-core wave-b: capsule steps up a curb within the step offset",
     character_get_transform(cc, p1, nullptr);
 
     REQUIRE(p1[1] > p0[1] + 0.1f); // stepped up onto the ~0.2 m curb
-    REQUIRE(p1[2] > 0.3f);         // got past the curb's front edge (z=0)}
+    REQUIRE(p1[2] > 0.3f);         // got past the curb's front edge (z=0)
+}
 
 TEST_CASE("physics-core wave-b: capsule is blocked by a curb taller than the step offset",
           "[physics][character][waveb]") {
@@ -194,7 +196,8 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a curb taller than the ste
 
     REQUIRE(p1[1] < 0.3f);  // did not climb onto the 0.6 m curb top
     REQUIRE(p1[2] < 0.0f);  // stopped in front of the curb (front face at z=0)
-    REQUIRE(p1[2] > -1.5f); // but did advance from the z=-2 start toward it}
+    REQUIRE(p1[2] > -1.5f); // but did advance from the z=-2 start toward it
+}
 
 TEST_CASE("physics-core wave-b: capsule is blocked by a wall steeper than the slope limit",
           "[physics][character][waveb]") {
@@ -215,7 +218,8 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a wall steeper than the sl
 
     REQUIRE(p1[2] < -0.4f); // stopped before the wall (front face at z=-0.5)
     REQUIRE(p1[2] > -2.0f); // but advanced from z=-3 up to the wall
-    REQUIRE(p1[1] < 0.5f);  // did not climb the wall}
+    REQUIRE(p1[1] < 0.5f);  // did not climb the wall
+}
 
 // ─── Ground snap ──────────────────────────────────────────────────────────
 
@@ -241,7 +245,8 @@ TEST_CASE("physics-core wave-b: ground snap keeps the capsule grounded over a sm
     // Without ground snap the capsule would launch off the lip at speed and
     // be airborne here; with it, StickToFloor keeps it planted.
     REQUIRE(character_ground_state(cc) == CharacterGroundState::OnGround);
-    REQUIRE(p1[2] > 0.5f); // crossed onto the lower slab}
+    REQUIRE(p1[2] > 0.5f); // crossed onto the lower slab
+}
 
 // ─── Stance ────────────────────────────────────────────────────────────────
 
@@ -268,7 +273,8 @@ TEST_CASE("physics-core wave-b: crouch and prone shrink the capsule, standing re
 
     settle(scope.w, cc, 30); // release: stand back up (open headroom)
     REQUIRE(character_stance(cc) == CharacterStance::Stand);
-    REQUIRE(approx_eq(character_capsule_height_m(cc), stand_h));}
+    REQUIRE(approx_eq(character_capsule_height_m(cc), stand_h));
+}
 
 // ─── Lean ────────────────────────────────────────────────────────────────
 
@@ -292,7 +298,8 @@ TEST_CASE("physics-core wave-b: lean eases toward the input and clamps",
     // Release: eases back toward neutral.
     settle(scope.w, cc, 60);
     REQUIRE(character_lean(cc) < leaned);
-    REQUIRE(approx_eq(character_lean(cc), 0.0f, 0.05f));}
+    REQUIRE(approx_eq(character_lean(cc), 0.0f, 0.05f));
+}
 
 // ─── (b) Narrowphase + island solver tuning knobs ────────────────────────
 
@@ -416,4 +423,5 @@ TEST_CASE("physics-core wave-b: character tuning round-trips",
     REQUIRE(approx_eq(got.mass_kg, 90.0f));
     REQUIRE(approx_eq(got.max_push_strength_n, 300.0f));
     REQUIRE(approx_eq(got.lean_offset_m, 0.30f));
-    REQUIRE(approx_eq(got.lean_speed_mps, 4.0f));}
+    REQUIRE(approx_eq(got.lean_speed_mps, 4.0f));
+}
