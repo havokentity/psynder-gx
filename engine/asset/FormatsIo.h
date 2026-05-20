@@ -123,6 +123,13 @@ inline constexpr u32 lma_bytes_per_sample(LmaSampleFmt fmt) noexcept {
     return 0u;
 }
 
+// Upper bound on a single .lma's decoded PCM. Caps the buffer a (potentially
+// hostile) header can ask decode() to allocate, defusing zstd decompression
+// bombs and usize-truncation. ~3h of 48 kHz stereo f32; streamed music is
+// split into multiple .lma chunks (kLmaFlagStreamed), so no single chunk
+// legitimately approaches this.
+inline constexpr u64 kMaxDecodedAudioBytes = u64{2} * 1024 * 1024 * 1024;  // 2 GiB
+
 // ─── Readers (zero-copy views into the source blob) ──────────────────────
 //
 // All `parse_*` are noexcept, allocate nothing, and return spans pointing
@@ -181,6 +188,17 @@ inline bool parse_lmm(const u8* data, usize bytes, LmmView& out) noexcept {
     const u64 idx_off = cursor;
     cursor += idx_bytes;
     if (cursor != u64(bytes)) return false;  // no trailing slack
+
+    // .lmm is an indexed triangle list; validate submesh ranges so a consumer
+    // can't be steered outside the index buffer. Records read by value via
+    // memcpy (alignment-safe) since `data` may point anywhere.
+    if (h.index_count % 3u != 0u) return false;
+    const u32 sub_count = h.submesh_count;
+    for (u32 i = 0; i < sub_count; ++i) {
+        LmmSubmesh sm{};
+        std::memcpy(&sm, data + sub_off + usize(i) * sizeof(LmmSubmesh), sizeof(sm));
+        if (u64(sm.index_start) + u64(sm.index_count) > u64(h.index_count)) return false;
+    }
 
     out.header = h;
     out.submesh_data = data + sub_off;
@@ -305,6 +323,9 @@ struct LmaView {
     bool decode(std::vector<u8>& pcm) const {
         if (!valid) return false;
         const u64 need = decoded_bytes();
+        // Bound the allocation before any cast/resize: defuses a zstd bomb
+        // (header + frame both claiming a huge size) and usize truncation.
+        if (need > kMaxDecodedAudioBytes) return false;
         if (need == 0) {  // empty audio: nothing to copy/inflate (avoid null dst)
             pcm.clear();
             return true;
@@ -339,6 +360,7 @@ inline bool parse_lma(const u8* data, usize bytes, LmaView& out) noexcept {
 
     if (lma_bytes_per_sample(h.sample_fmt) == 0) return false;
     if (h.channels != 1 && h.channels != 2) return false;
+    if (h.sample_rate == 0) return false;  // 0 Hz is invalid (downstream div-by-zero)
 
     const bool is_zstd = (h.file.flags & kLmaFlagZstd) != 0;
     const u64 stored_bytes = u64(bytes) - sizeof(LmaHeader);

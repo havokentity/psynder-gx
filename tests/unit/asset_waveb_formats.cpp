@@ -163,6 +163,29 @@ TEST_CASE("asset/formats: .lmm picks 32-bit indices past 65535 verts",
     REQUIRE(span_equals(v.indices, w.index_data));
 }
 
+TEST_CASE("asset/formats: .lmm rejects a submesh range past the index buffer",
+          "[asset][formats][lmm]") {
+    fio::LmmWriter w;
+    w.vertex_fmt = fio::LmmVertexFmt::Pos3N3UV2;
+    w.vertex_count = 4;
+    w.index_count = 12;
+    w.vertex_data = pattern_bytes(4 * 32, 1);
+    w.index_data = pattern_bytes(12 * 2, 2);
+    w.submeshes.push_back(fio::LmmSubmesh{0, 6, 0, 0});
+    w.submeshes.push_back(fio::LmmSubmesh{6, 6, 0, 0});
+    std::vector<u8> bytes;
+    REQUIRE(w.build(bytes));
+    fio::LmmView ok;
+    REQUIRE(fio::parse_lmm(bytes.data(), bytes.size(), ok));  // valid before tampering
+
+    // Push submesh[1].index_count past the end of the 12-index buffer.
+    const u32 bad = 100;  // 6 + 100 > 12
+    const usize sm1 = sizeof(fio::LmmHeader) + sizeof(fio::LmmSubmesh);
+    std::memcpy(bytes.data() + sm1 + offsetof(fio::LmmSubmesh, index_count), &bad, sizeof(bad));
+    fio::LmmView v;
+    REQUIRE_FALSE(fio::parse_lmm(bytes.data(), bytes.size(), v));
+}
+
 TEST_CASE("asset/formats: .lmt texture round-trips (RGBA8 mipchain + P8 palette)",
           "[asset][formats][lmt]") {
     SECTION("RGBA8 with a 3-level mip chain") {
@@ -399,17 +422,24 @@ TEST_CASE("asset/formats: .lma decode rejects a forged frame_count",
     std::vector<u8> bytes;
     REQUIRE(w.build(bytes));
 
-    // Forge a wildly larger frame_count. The zstd frame still declares the
-    // real (small) content size, so decode must reject up front rather than
-    // speculatively allocating hundreds of MB.
-    const u32 forged = 0x10000000u;  // ~268M frames
+    std::vector<u8> pcm;
+
+    // (a) Forged but below the decoded-size cap: rejected by the zstd frame
+    //     content-size check (the real frame inflates to a few hundred bytes).
+    const u32 forged = 0x10000000u;  // ~268M frames -> ~512 MB
     std::memcpy(bytes.data() + offsetof(fio::LmaHeader, frame_count), &forged, sizeof(forged));
     fio::LmaView v;
     REQUIRE(fio::parse_lma(bytes.data(), bytes.size(), v));  // header still parses
     REQUIRE(v.zstd);
     REQUIRE(v.header.frame_count == forged);
-    std::vector<u8> pcm;
-    REQUIRE_FALSE(v.decode(pcm));  // content-size mismatch -> rejected before resize
+    REQUIRE_FALSE(v.decode(pcm));
+
+    // (b) Forged past the decoded-size cap: rejected before any allocation.
+    const u32 huge = 0x40000001u;  // * 2 bytes/sample > 2 GiB cap
+    std::memcpy(bytes.data() + offsetof(fio::LmaHeader, frame_count), &huge, sizeof(huge));
+    fio::LmaView v2;
+    REQUIRE(fio::parse_lma(bytes.data(), bytes.size(), v2));
+    REQUIRE_FALSE(v2.decode(pcm));
 }
 
 TEST_CASE("asset/formats: cooked .lmt round-trips through the VFS .lmpak path",
