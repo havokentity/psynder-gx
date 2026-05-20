@@ -71,13 +71,13 @@ int main(int argc, char** argv) {
             const char* p = next_arg("--scale");
             if (!p)
                 return 2;
-            char* end = nullptr;
-            const double v = std::strtod(p, &end);
-            if (end == p || *end != '\0' || !(v > 0.0)) {
+            // Locale-independent parse (matches the shared .map parser).
+            float v = 0.0f;
+            if (!psy::lmtools::parse_float(p, v) || !(v > 0.0f)) {
                 std::fprintf(stderr, "lm_qbsp: error: --scale must be a positive float\n");
                 return 2;
             }
-            opts.scale = static_cast<float>(v);
+            opts.scale = v;
         } else if (a == "--force") {
             opts.force_overwrite = true;
         } else if (a == "--print-stats") {

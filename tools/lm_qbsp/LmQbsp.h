@@ -457,6 +457,10 @@ inline bool compile_map(const lmtools::MapFile& map,
             }
             std::vector<lmtools::FacePolygon> polys =
                 lmtools::brush_build_polygons(scaled_brush, world_extent);
+            if (polys.empty()) {
+                return fail("brush " + std::to_string(brush_count) +
+                            " produced no faces (degenerate or non-convex plane set)");
+            }
             bool any = false;
             Aabb bounds;
             for (const lmtools::FacePolygon& fp : polys) {
@@ -765,41 +769,48 @@ inline bool compile_map(const lmtools::MapFile& map,
     }
 
     // ── Header + chunk layout (all offsets 4-byte aligned) ────────────────
-    const std::uint32_t header_bytes = static_cast<std::uint32_t>(sizeof(bspfmt::BspFileHeader));
-    std::uint32_t cursor = header_bytes;
-    const std::uint32_t nodes_off = cursor;
-    cursor += static_cast<std::uint32_t>(file_nodes.size() * sizeof(bspfmt::BspFileNode));
-    const std::uint32_t leaves_off = cursor;
-    cursor += static_cast<std::uint32_t>(file_leaves.size() * sizeof(bspfmt::BspFileLeaf));
-    const std::uint32_t faces_off = cursor;
-    cursor += static_cast<std::uint32_t>(file_faces.size() * sizeof(bspfmt::BspFileFace));
-    const std::uint32_t verts_off = cursor;
-    cursor += static_cast<std::uint32_t>(vertex_blob.size());
-    const std::uint32_t indices_off = cursor;
-    cursor += static_cast<std::uint32_t>(index_blob.size() * sizeof(std::uint32_t));
-    const std::uint32_t pvs_off = cursor;
-    cursor += static_cast<std::uint32_t>(pvs.size());
-    const std::uint32_t total_bytes = cursor;
+    // Chunk offsets/sizes are computed in u64 to avoid wrapping; the .psybsp
+    // header stores them as u32, so the whole file must fit the 32-bit limit.
+    const std::uint64_t header_bytes = sizeof(bspfmt::BspFileHeader);
+    std::uint64_t cursor = header_bytes;
+    const std::uint64_t nodes_off = cursor;
+    cursor += static_cast<std::uint64_t>(file_nodes.size()) * sizeof(bspfmt::BspFileNode);
+    const std::uint64_t leaves_off = cursor;
+    cursor += static_cast<std::uint64_t>(file_leaves.size()) * sizeof(bspfmt::BspFileLeaf);
+    const std::uint64_t faces_off = cursor;
+    cursor += static_cast<std::uint64_t>(file_faces.size()) * sizeof(bspfmt::BspFileFace);
+    const std::uint64_t verts_off = cursor;
+    cursor += vertex_blob.size();
+    const std::uint64_t indices_off = cursor;
+    cursor += static_cast<std::uint64_t>(index_blob.size()) * sizeof(std::uint32_t);
+    const std::uint64_t pvs_off = cursor;
+    cursor += pvs.size();
+    const std::uint64_t total_bytes = cursor;
 
+    if (total_bytes > 0xFFFFFFFFull) {
+        return fail("compiled .psybsp exceeds the 32-bit format size limit");
+    }
+
+    auto u32 = [](std::uint64_t v) { return static_cast<std::uint32_t>(v); };
     bspfmt::BspFileHeader header{};
     header.magic = bspfmt::kBspFileMagic;
     header.version = bspfmt::kBspFileVersion;
     header.flags = 0;
-    header.total_bytes = total_bytes;
+    header.total_bytes = u32(total_bytes);
     header.cluster_count = cluster_count;
     header.pvs_row_bytes = pvs_row_bytes;
-    header.nodes = {nodes_off, static_cast<std::uint32_t>(file_nodes.size())};
-    header.leaves = {leaves_off, static_cast<std::uint32_t>(file_leaves.size())};
-    header.faces = {faces_off, static_cast<std::uint32_t>(file_faces.size())};
-    header.vertices = {verts_off, emitted_vertices};
-    header.indices = {indices_off, static_cast<std::uint32_t>(index_blob.size())};
-    header.pvs = {pvs_off, static_cast<std::uint32_t>(pvs.size())};
+    header.nodes = {u32(nodes_off), u32(file_nodes.size())};
+    header.leaves = {u32(leaves_off), u32(file_leaves.size())};
+    header.faces = {u32(faces_off), u32(file_faces.size())};
+    header.vertices = {u32(verts_off), emitted_vertices};
+    header.indices = {u32(indices_off), u32(index_blob.size())};
+    header.pvs = {u32(pvs_off), u32(pvs.size())};
     for (std::uint32_t& r : header.reserved) {
         r = 0u;
     }
 
     blob.clear();
-    blob.reserve(total_bytes);
+    blob.reserve(static_cast<std::size_t>(total_bytes));
     write_pod(blob, header);
     for (const auto& n : file_nodes) {
         write_pod(blob, n);

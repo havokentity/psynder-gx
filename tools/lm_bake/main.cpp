@@ -6,9 +6,11 @@
 // The core path tracer (LmBake.h) is map-agnostic; this shell is the .map
 // front-end, reusing the shared parser in tools/lm_qbsp/MapSource.h.
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <ios>
 #include <string>
@@ -56,7 +58,7 @@ psy::lm_bake::Vec3 to_bake(psy::lmtools::Vec3 v) {
 bool slurp_file(const std::string& path, std::vector<std::uint8_t>& out, std::string& err) {
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) {
-        err = "cannot open input file '" + path + "'";
+        err = "cannot open input file '" + path + "': " + std::strerror(errno);
         return false;
     }
     f.seekg(0, std::ios::end);
@@ -120,13 +122,11 @@ int main(int argc, char** argv) {
             const char* p = next_arg(name);
             if (!p)
                 return false;
-            char* end = nullptr;
-            const double v = std::strtod(p, &end);
-            if (end == p || *end != '\0') {
+            // Locale-independent parse (matches the shared .map parser).
+            if (!psy::lmtools::parse_float(p, dst)) {
                 std::fprintf(stderr, "lm_bake: error: %s expects a float\n", name);
                 return false;
             }
-            dst = static_cast<float>(v);
             return true;
         };
         auto next_u32 = [&](const char* name, std::uint32_t& dst) -> bool {
