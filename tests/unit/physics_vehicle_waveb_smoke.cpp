@@ -358,6 +358,38 @@ TEST_CASE("vehicle: reverse is reachable regardless of gear array order",
     destroy_vehicle(v);
 }
 
+TEST_CASE("vehicle: malformed desc inputs do not poison the sim",
+          "[vehicle][robustness]") {
+    // A zero tire radius would zero the wheel's rotational inertia (the tick
+    // divides by it), and negative aero would flip drag into thrust.
+    // create_vehicle must clamp both so the tick stays finite and physical.
+    CarRig rig;
+    rig.wheels[0].tire_radius_m = 0.0f;  // degenerate radius on a front wheel
+    rig.desc.drag_cd = -0.5f;            // negative drag
+    rig.desc.frontal_area_m2 = -2.0f;    // negative frontal area
+    Vehicle* v = create_vehicle(nullptr, rig.desc);
+    REQUIRE(v != nullptr);
+    settle(v);
+
+    VehicleInput in{};
+    in.throttle = 1.0f;
+    in.gear_request = +1;
+    vehicle_tick(v, in, kDt);
+    in.gear_request = 0;
+    for (int i = 0; i < 240; ++i) vehicle_tick(v, in, kDt);  // 2 s
+
+    float p[3], q[4];
+    vehicle_get_transform(v, p, q);
+    const float s = vehicle_get_speed_mps(v);
+    REQUIRE(std::isfinite(p[0]));
+    REQUIRE(std::isfinite(p[1]));
+    REQUIRE(std::isfinite(p[2]));
+    REQUIRE(std::isfinite(s));
+    REQUIRE(s >= 0.0f);
+    REQUIRE(s < 200.0f);  // negative drag was clamped, so no thrust blow-up
+    destroy_vehicle(v);
+}
+
 TEST_CASE("vehicle: identical inputs produce bit-identical motion "
           "(determinism precondition)",
           "[vehicle][determinism]") {

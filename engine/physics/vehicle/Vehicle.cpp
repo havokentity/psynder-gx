@@ -65,6 +65,7 @@ constexpr float kGroundHeight = 0.0f;          // analytic flat ground plane (y)
 constexpr float kJounceFraction = 0.4f;        // usable bump travel as frac of rest
 constexpr float kReboundFraction = 0.5f;       // extra droop ray length as frac of rest
 constexpr float kMinDim = 0.5f;                // floor for derived chassis extents
+constexpr float kMinTireRadius = 0.05f;        // floor so wheel inertia stays > 0
 
 inline float clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -196,7 +197,15 @@ void substep(Vehicle& v, const VehicleInput& in, float steer_rad, float dt) {
     const Vec3 fwd = quat_rotate(v.orientation, {0.0f, 0.0f, 1.0f});
     const Vec3 right = quat_rotate(v.orientation, {1.0f, 0.0f, 0.0f});
     const Vec3 up = quat_rotate(v.orientation, {0.0f, 1.0f, 0.0f});
-    const Vec3 axis_down = -up;
+    // Suspension axis = chassis down. If the chassis is rolled past ~horizontal
+    // the strut no longer points downward, so fall back to a world-down ray;
+    // this keeps a rolled vehicle in contact with the analytic plane instead of
+    // tunnelling through it (there is no separate chassis-ground collision). The
+    // support force is applied opposite the ray, so it equals chassis-up while
+    // upright (no behaviour change) and world-up once the fallback engages.
+    Vec3 axis_down = -up;
+    if (axis_down.y > -0.1f) axis_down = Vec3{0.0f, -1.0f, 0.0f};
+    const Vec3 support_dir = -axis_down;
 
     // ── Drivetrain: derive engine speed/torque from the driven-wheel speeds ──
     float driven_omega_sum = 0.0f;
@@ -293,8 +302,8 @@ void substep(Vehicle& v, const VehicleInput& in, float steer_rad, float dt) {
         // Suspension pushes the chassis up along its axis.
         const Vec3 contact = attach_world + axis_down * (center_dist + wd.tire_radius_m);
         const Vec3 r_contact = contact - v.position;
-        force = force + up * load;
-        torque = torque + cross(r_contact, up * load);
+        force = force + support_dir * load;
+        torque = torque + cross(r_contact, support_dir * load);
 
         // Tire ground frame: chassis fwd/right rotated by steer about up, then
         // flattened into the ground plane so traction stays horizontal.
@@ -350,9 +359,11 @@ Vehicle* create_vehicle(::psynder::physics::World* world, const VehicleDesc& des
     v->world = world;
     v->mass_kg = desc.mass_kg > 1.0f ? desc.mass_kg : 1.0f;
     v->inv_mass = 1.0f / v->mass_kg;
-    v->drag_cd = desc.drag_cd;
-    v->frontal_area_m2 = desc.frontal_area_m2;
-    v->lift_area_m2 = desc.frontal_area_m2 * kDownforceClaPerArea;
+    // Clamp aero inputs to >= 0 so malformed desc data can't flip drag into
+    // thrust (or downforce into lift); the lift area derives from the clamp.
+    v->drag_cd = desc.drag_cd > 0.0f ? desc.drag_cd : 0.0f;
+    v->frontal_area_m2 = desc.frontal_area_m2 > 0.0f ? desc.frontal_area_m2 : 0.0f;
+    v->lift_area_m2 = v->frontal_area_m2 * kDownforceClaPerArea;
     // NOTE: despite the "_z_m" name, this field is documented in PublicVehicle.h
     // as the offset "below geometric center" — i.e. a vertical (Y, up-axis)
     // offset in this Y-up engine, not a Z offset. We apply it on Y accordingly.
@@ -368,8 +379,13 @@ Vehicle* create_vehicle(::psynder::physics::World* world, const VehicleDesc& des
                          : (desc.wheel_count < kMaxWheels ? desc.wheel_count : kMaxWheels);
     float min_x = 1e9f, max_x = -1e9f, min_z = 1e9f, max_z = -1e9f, sum_w = 0.0f;
     for (std::uint32_t i = 0; i < v->wheel_count; ++i) {
-        const WheelDesc& wd = desc.wheels[i];
-        v->wheels[i].desc = wd;
+        v->wheels[i].desc = desc.wheels[i];
+        // A zero tire radius makes the wheel's rotational inertia zero, and the
+        // tick divides by it; clamp to a positive minimum.
+        if (v->wheels[i].desc.tire_radius_m < kMinTireRadius) {
+            v->wheels[i].desc.tire_radius_m = kMinTireRadius;
+        }
+        const WheelDesc& wd = v->wheels[i].desc;
         min_x = wd.local_pos[0] < min_x ? wd.local_pos[0] : min_x;
         max_x = wd.local_pos[0] > max_x ? wd.local_pos[0] : max_x;
         min_z = wd.local_pos[2] < min_z ? wd.local_pos[2] : min_z;
