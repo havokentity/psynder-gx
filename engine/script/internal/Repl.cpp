@@ -33,7 +33,6 @@ extern "C" {
 
 #include <atomic>
 #include <cstddef>
-#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -52,13 +51,14 @@ namespace {
 // outlives any number of Vm start/shutdown cycles.
 std::atomic<bool> g_console_registered{false};
 
-// Hash of the thread that started the VM, atomically published so the `lua`
-// command's thread check is data-race-free. The Lua VM and g_capture are
-// single-thread by contract (DESIGN.md §10.5), but Console commands can be
-// dispatched from any thread; the command refuses to run anywhere else. The
-// script thread is invariant (the dedicated game thread), so this is published
-// once, on first command registration.
-std::atomic<std::size_t> g_script_thread_hash{0};
+// The thread that started the VM, published once on first command
+// registration. The Lua VM + g_capture are single-thread by contract
+// (DESIGN.md §10.5); the `lua` command refuses to run on any other thread.
+// The script thread is invariant (the dedicated game thread). The `published`
+// flag (release/acquire) orders the write of g_script_thread_id before the
+// command's read, so the comparison is exact (no hashing) and race-free.
+std::thread::id   g_script_thread_id{};
+std::atomic<bool> g_script_thread_published{false};
 
 // Overridden Lua `print`: gather all arguments (honouring __tostring) into a
 // single tab-separated line and hand it to the active sink.
@@ -91,8 +91,8 @@ int l_print(lua_State* L) {
 // line and has no such limitation.
 void lua_console_cmd(std::span<const std::string_view> args,
                      ::psynder::console::Output& out) {
-    if (std::hash<std::thread::id>{}(std::this_thread::get_id()) !=
-        g_script_thread_hash.load(std::memory_order_relaxed)) {
+    if (!g_script_thread_published.load(std::memory_order_acquire) ||
+        std::this_thread::get_id() != g_script_thread_id) {
         out.PrintLine(
             "error: 'lua' must run on the script thread (the Vm is single-thread)");
         return;
@@ -135,9 +135,8 @@ void install_repl(lua_State* L) {
     // dedicated game thread, invariant across restarts, so a single
     // publication is correct and the read in lua_console_cmd is race-free.
     if (!g_console_registered.exchange(true)) {
-        g_script_thread_hash.store(
-            std::hash<std::thread::id>{}(std::this_thread::get_id()),
-            std::memory_order_relaxed);
+        g_script_thread_id = std::this_thread::get_id();
+        g_script_thread_published.store(true, std::memory_order_release);
         ::psynder::console::Console::Get().RegisterCommand(
             "lua", "Evaluate a Lua REPL line against the live script VM",
             lua_console_cmd);

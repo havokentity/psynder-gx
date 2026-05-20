@@ -180,16 +180,17 @@ inline constexpr FieldKind field_kind_v<Handle<Tag>> = FieldKind::Handle;
 
 // Register reflection for an in-scope, unqualified POD component `Type`.
 // `#Type` is the Lua-visible name; component_id<Type>() ties the engine id.
-// Use at namespace scope only; requires at least one PSYNDER_SCRIPT_FIELD.
-#define PSYNDER_SCRIPT_COMPONENT(Type, ...)                                 \
+// Use at namespace scope only. The first field is a REQUIRED argument, so a
+// component with no fields is rejected by the preprocessor rather than
+// silently registered as an empty schema (this also keeps the field array
+// non-empty, avoiding the ill-formed zero-size-array case).
+#define PSYNDER_SCRIPT_COMPONENT(Type, Field1, ...)                         \
     namespace {                                                             \
     static_assert(::std::is_standard_layout_v<Type>,                        \
                   "PSYNDER_SCRIPT_COMPONENT requires a standard-layout "    \
                   "type (offsetof is UB otherwise)");                       \
     [[maybe_unused]] const ::psynder::script::FieldDesc                     \
-        psy_refl_fields_##Type[] = {__VA_ARGS__};                           \
-    static_assert(sizeof(psy_refl_fields_##Type) != 0,                      \
-                  "PSYNDER_SCRIPT_COMPONENT requires at least one field");  \
+        psy_refl_fields_##Type[] = {Field1 __VA_OPT__(, ) __VA_ARGS__};     \
     [[maybe_unused]] const ::psynder::script::ComponentReflection* const    \
         psy_refl_##Type = ::psynder::script::register_component_reflection( \
             #Type, ::psynder::scene::component_id<Type>(),                  \
