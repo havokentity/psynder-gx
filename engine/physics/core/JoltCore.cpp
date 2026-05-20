@@ -595,16 +595,19 @@ void character_tick(CharacterController* cc,
 
 void character_get_transform(const CharacterController* cc,
                              float out_pos[3],
-                             float out_yaw_deg) {
-    // out_yaw_deg is a scalar (not a pointer) in the frozen contract;
-    // the parameter is accepted but cannot be written through. We treat
-    // it as informational input from the camera lane in a later wave.
-    (void)out_yaw_deg;
+                             float* out_yaw_deg) {
     if (!cc || cc->character == nullptr) {
         out_pos[0] = out_pos[1] = out_pos[2] = 0.0f;
+        if (out_yaw_deg) *out_yaw_deg = 0.0f;
         return;
     }
     WriteV3(cc->character->GetPosition(), out_pos);
+    if (out_yaw_deg) {
+        // Yaw = atan2(-x, -z) — facing-direction convention with 0 = +Z.
+        const auto rot = cc->character->GetRotation();
+        const auto fwd = rot.RotateAxisZ();
+        *out_yaw_deg = std::atan2(-fwd.GetX(), -fwd.GetZ()) * 180.0f / 3.14159265358979323846f;
+    }
 }
 
 } // namespace psynder::physics
