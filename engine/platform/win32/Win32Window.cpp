@@ -59,6 +59,25 @@ ATOM register_window_class(HINSTANCE hinst) {
     return s_atom;
 }
 
+// Process-wide DPI awareness — set once, before any window is created. With
+// Per-Monitor-V2 the OS renders us at native resolution (crisp) instead of
+// bitmap-scaling on >100% displays, and reports the real DPI. Benign-fails on
+// older OSes or if awareness was already set (e.g. via an app manifest).
+void ensure_process_dpi_aware() {
+    static const bool s_done = [] {
+        if (::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+            return true;
+        const DWORD err = ::GetLastError();
+        // ERROR_ACCESS_DENIED means awareness was already set — not a failure.
+        if (err != ERROR_ACCESS_DENIED) {
+            PSY_LOG_WARN("[win32] SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) "
+                         "failed (err={}); window may be DPI-virtualised", err);
+        }
+        return false;
+    }();
+    (void)s_done;
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -68,6 +87,10 @@ ATOM register_window_class(HINSTANCE hinst) {
 Win32Window::Win32Window(const WindowDesc& desc)
     : desc_(desc), window_w_(desc.window_width), window_h_(desc.window_height)
 {
+    // Become per-monitor-DPI-aware before creating any window so Windows
+    // renders us at native resolution (crisp) rather than bitmap-scaling.
+    ensure_process_dpi_aware();
+
     hinstance_ = ::GetModuleHandleW(nullptr);
     if (register_window_class(hinstance_) == 0) return;
 
@@ -78,9 +101,14 @@ Win32Window::Win32Window(const WindowDesc& desc)
         style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
     }
 
+    // Size the frame for the current DPI so the *client* ends up the requested
+    // physical pixel size. GetDpiForSystem() is the right pre-creation seed;
+    // WM_DPICHANGED refits the frame if the window opens on / moves to a
+    // monitor with different scaling.
+    const UINT dpi = ::GetDpiForSystem();
     RECT rc{ 0, 0, static_cast<LONG>(desc.window_width),
                   static_cast<LONG>(desc.window_height) };
-    ::AdjustWindowRectEx(&rc, style, FALSE, ex_style);
+    ::AdjustWindowRectExForDpi(&rc, style, FALSE, ex_style, dpi);
 
     const std::wstring wtitle = to_wide(desc.title);
     hwnd_ = ::CreateWindowExW(
@@ -148,9 +176,10 @@ Win32Window::Win32Window(const WindowDesc& desc)
         POINT tl{0, 0};
         if (::GetWindowRect(hwnd_, &wr) && ::GetClientRect(hwnd_, &cr2) &&
             ::ClientToScreen(hwnd_, &tl)) {
-            PSY_LOG_INFO("[win32] client={}x{} non-client frame: top={}px side={}px",
+            PSY_LOG_INFO("[win32] client={}x{} non-client frame: top={}px side={}px dpi={}",
                          static_cast<int>(cr2.right),    static_cast<int>(cr2.bottom),
-                         static_cast<int>(tl.y - wr.top), static_cast<int>(tl.x - wr.left));
+                         static_cast<int>(tl.y - wr.top), static_cast<int>(tl.x - wr.left),
+                         static_cast<unsigned>(::GetDpiForWindow(hwnd_)));
         } else {
             PSY_LOG_WARN("[win32] frame-sanity: window-rect query failed (err={})",
                          static_cast<unsigned>(::GetLastError()));
@@ -333,6 +362,19 @@ LRESULT Win32Window::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             // loop is expected to check window_width()/window_height() and
             // call resize_swapchain() when they change.
 #endif
+            return 0;
+        }
+
+        case WM_DPICHANGED: {
+            // lParam points to the RECT Windows suggests for the new DPI,
+            // keeping the window correctly sized + positioned when dragged to a
+            // monitor with different scaling (per-monitor-v2). Honor it.
+            const RECT* r = reinterpret_cast<const RECT*>(lparam);
+            if (r) {
+                ::SetWindowPos(hwnd, nullptr, r->left, r->top,
+                               r->right - r->left, r->bottom - r->top,
+                               SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             return 0;
         }
 
