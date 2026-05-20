@@ -351,7 +351,15 @@ class Bvh {
             const float dc = (axis == 0) ? d.x : (axis == 1) ? d.y : d.z;
             const float lo = (axis == 0) ? b.lo.x : (axis == 1) ? b.lo.y : b.lo.z;
             const float hi = (axis == 0) ? b.hi.x : (axis == 1) ? b.hi.y : b.hi.z;
-            const float inv = (std::fabs(dc) > 1e-20f) ? 1.0f / dc : 1e30f;
+            if (std::fabs(dc) < 1e-20f) {
+                // Ray parallel to this axis: miss iff the origin is outside the
+                // slab; otherwise this axis imposes no constraint.
+                if (oc < lo || oc > hi) {
+                    return false;
+                }
+                continue;
+            }
+            const float inv = 1.0f / dc;
             float t0 = (lo - oc) * inv;
             float t1 = (hi - oc) * inv;
             if (t0 > t1) {

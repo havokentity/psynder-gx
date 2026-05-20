@@ -127,7 +127,8 @@ inline std::uint32_t fnv1a32(const std::uint8_t* bytes, std::size_t len) noexcep
 inline bool import_map(const lmtools::MapFile& map,
                        const ImportOptions& opts,
                        std::vector<std::uint8_t>& blob,
-                       ImportStats* out_stats) {
+                       ImportStats* out_stats,
+                       std::string* out_error = nullptr) {
     std::vector<std::uint8_t> body;
     std::uint32_t brush_total = 0;
     std::uint32_t face_total = 0;
@@ -170,6 +171,16 @@ inline bool import_map(const lmtools::MapFile& map,
                 put_string(body, face.texture);
             }
         }
+    }
+
+    // The header stores entity_count + payload_size as u32. Fail rather than
+    // silently truncate on a pathologically large scene. (Because body fits in
+    // u32 here, every length-prefixed string inside it does too.)
+    if (map.entities.size() > 0xFFFFFFFFull || body.size() > 0xFFFFFFFFull) {
+        if (out_error != nullptr) {
+            *out_error = "scene exceeds the 32-bit .psimport format limit";
+        }
+        return false;
     }
 
     blob.clear();
@@ -244,8 +255,9 @@ inline bool import(const ImportOptions& opts,
 
     std::vector<std::uint8_t> blob;
     ImportStats stats;
-    if (!import_map(map, opts, blob, &stats)) {
-        log_err("import failed");
+    std::string import_err;
+    if (!import_map(map, opts, blob, &stats, &import_err)) {
+        log_err(import_err.empty() ? "import failed" : import_err);
         return false;
     }
     stats.source_hash = source_hash;
