@@ -14,11 +14,12 @@
 // crouch/prone shrink the capsule, and the internal narrowphase / island /
 // character tuning knobs (PhysicsTuning.h) round-trip.
 //
-// Assertions are behavioural thresholds (climbed > X, blocked < Y), not
-// bit-exact positions, so they hold across the CI matrix (Jolt is built
-// CROSS_PLATFORM_DETERMINISTIC, but arm64 vs x86_64 still differ in the
-// low bits). The bit-exact local-determinism check lives in
-// physics_core_smoke.cpp.
+// Assertions are behavioural thresholds (climbed > X, blocked < Y) rather
+// than exact positions, so they stay robust to compiler / optimization
+// differences across the CI matrix without pinning brittle coordinates.
+// Exact tick reproducibility is a separate concern, covered by the
+// determinism test in physics_core_smoke.cpp (Jolt is built
+// CROSS_PLATFORM_DETERMINISTIC for lockstep replay).
 
 #include "physics/core/PublicPhysicsCore.h"
 #include "physics/core/PhysicsTuning.h"
@@ -39,8 +40,10 @@ bool approx_eq(float a, float b, float tol = 1e-4f) {
     return std::fabs(a - b) <= tol;
 }
 
-// Small world: the production default (64k bodies) over-reserves Jolt's
-// 16 MiB temp allocator on the first tick. Unit scenes use a handful.
+// Small world: the production default (64k bodies) sizes Jolt's temp
+// allocator at ~64 MiB (TempAllocSize scales it at ~1 KiB/body over a
+// 16 MiB floor). Unit scenes need only a handful of bodies, so 256 keeps
+// each test world cheap.
 WorldDesc unit_world_desc() {
     WorldDesc d{};
     d.max_bodies      = 256u;
