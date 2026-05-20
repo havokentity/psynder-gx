@@ -36,16 +36,22 @@ struct Light {
     float  pad;
 };
 
-cbuffer PerView : register(b0) {
+// Push-constants — must match the layout of OpaquePushConstants in
+// engine/render/pipeline/OpaquePass.cpp (2 × float4x4 = 128 bytes, which
+// is also kMaxPushConstantBytes).  This replaces the prior b0 PerView +
+// b1 PerDraw cbuffers — on Vulkan, push_constants don't populate b0/b1
+// at all, and on Metal lane 07's backend reserves the push slot, so the
+// only path that actually delivers the matrices today is push_constants.
+//
+// Fields NOT in the push range (camera_pos, light_count, material_id) are
+// SCAFFOLD-removed below until M3 lands a per-view UBO via lane 07's
+// descriptor-set API.  The fragment shader is downgraded to an un-lit
+// passthrough until that happens (see fs_main).
+struct OpaqueParams {
     float4x4 g_view_proj;
-    float4   g_camera_pos_ws;   // .xyz = camera position, .w = light_count
-};
-
-cbuffer PerDraw : register(b1) {
     float4x4 g_world_matrix;
-    uint     g_material_id;
-    uint3    g_pad;
 };
+[[vk::push_constant]] ConstantBuffer<OpaqueParams> g_pc;
 
 StructuredBuffer<Light>   g_lights              : register(t2);
 StructuredBuffer<uint2>   g_cluster_offset_count: register(t3); // (offset, count)
@@ -75,12 +81,12 @@ struct VSOutput {
 [shader("vertex")]
 VSOutput vs_main(VSInput vin) {
     VSOutput vout;
-    float4 pos_ws = mul(g_world_matrix, float4(vin.position, 1.0f));
+    float4 pos_ws = mul(g_pc.g_world_matrix, float4(vin.position, 1.0f));
     vout.position_ws = pos_ws.xyz;
-    vout.sv_pos      = mul(g_view_proj, pos_ws);
+    vout.sv_pos      = mul(g_pc.g_view_proj, pos_ws);
     // Normal transformed by 3x3 of world matrix (no non-uniform scale at
     // scaffold time; full inverse-transpose path comes in M5).
-    vout.normal_ws = normalize(mul((float3x3)g_world_matrix, vin.normal));
+    vout.normal_ws = normalize(mul((float3x3)g_pc.g_world_matrix, vin.normal));
     vout.uv        = vin.uv;
     vout.color     = vin.color;
     return vout;
@@ -124,64 +130,21 @@ uint2 cluster_for_fragment(float4 sv_pos) {
 }
 
 // ─── Fragment ────────────────────────────────────────────────────────────
+//
+// SCAFFOLD: the full PBR loop iterated `g_camera_pos_ws.w` lights and used
+// `g_camera_pos_ws.xyz` for the view vector.  Both fields live in the M3
+// per-view UBO, NOT in push_constants — so until lane 07 grows the
+// descriptor-set API + lane 09 wires a per-view UBO, the body is
+// downgraded to an un-lit albedo passthrough.  The PBR helpers above
+// (distribution_ggx / geometry_smith / fresnel_schlick) are kept compiled
+// so the M3 re-enable is a single function-body swap, no header churn.
 [shader("fragment")]
 float4 fs_main(VSOutput fin) : SV_Target {
-    // Sample material textures. The default sampler (u_linear_sampler) is
-    // trilinear; lane 21 / 09 wires per-material samplers later.
-    float3 albedo   = u_albedo.Sample(u_linear_sampler, fin.uv).rgb * fin.color.rgb;
-    float3 mr       = u_metallic_roughness.Sample(u_linear_sampler, fin.uv).rgb;
-    float  metallic  = mr.r;
-    float  roughness = max(0.04f, mr.g);
-
-    // Tangent-space normal mapping omitted at scaffold; use interpolated
-    // world normal directly. Full TBN basis arrives with M5 / lane 05
-    // mesh cooker work.
+    float3 albedo = u_albedo.Sample(u_linear_sampler, fin.uv).rgb * fin.color.rgb;
+    // Subtle N·V hint so a vertical-normal triangle still shows some
+    // facing variation when no lights are present.
     float3 N = normalize(fin.normal_ws);
-    float3 V = normalize(g_camera_pos_ws.xyz - fin.position_ws);
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-
-    float3 lo = float3(0, 0, 0);
-
-    // Scaffold: iterate all lights up to light_count (clamped to 256 to
-    // bound the inner loop in case the constant buffer is uninitialised
-    // at first frame).
-    uint light_count = min((uint)g_camera_pos_ws.w, 256u);
-    for (uint i = 0; i < light_count; ++i) {
-        Light L = g_lights[i];
-        float3 to_l = L.position_ws - fin.position_ws;
-        float  dist = length(to_l);
-        if (dist > L.range) continue;
-
-        float3 Ldir = to_l / max(dist, 1e-4f);
-        float3 H    = normalize(V + Ldir);
-
-        float n_dot_l = max(dot(N, Ldir), 0.0f);
-        float n_dot_v = max(dot(N, V),    0.0f);
-        float n_dot_h = max(dot(N, H),    0.0f);
-        float v_dot_h = max(dot(V, H),    0.0f);
-
-        // Inverse-square attenuation with a smooth-step cut-off at range.
-        float att   = 1.0f / (dist * dist + 1e-3f);
-        float falloff = saturate(1.0f - (dist / L.range));
-        float3 radiance = L.color * att * falloff;
-
-        float  D = distribution_ggx(n_dot_h, roughness);
-        float  G = geometry_smith(n_dot_v, n_dot_l, roughness);
-        float3 F = fresnel_schlick(v_dot_h, F0);
-
-        float3 spec = (D * G) * F / max(4.0f * n_dot_v * n_dot_l, 1e-4f);
-        float3 kS = F;
-        float3 kD = (float3(1, 1, 1) - kS) * (1.0f - metallic);
-
-        lo += (kD * albedo / kPI + spec) * radiance * n_dot_l;
-    }
-
-    // Crude ambient term (M2 scaffold; DDGI replaces this in M5).
-    float3 ambient = albedo * 0.03f;
-
-    float3 color = ambient + lo;
-    // Sample colour buffer is sRGB; we output linear and let the
-    // hardware sRGB write convert. ACES tonemap is lane 11's post path.
+    float facing = saturate(0.5f + 0.5f * N.z);
+    float3 color = albedo * (0.6f + 0.4f * facing);
     return float4(color, 1.0f);
 }

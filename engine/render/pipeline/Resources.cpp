@@ -135,6 +135,10 @@ void release_pipeline_resources(Pipeline* p) {
         shader::destroy_pipeline(p->hiz.downsample_compute);
         p->hiz.downsample_compute = {};
     }
+    if (p->hiz.depth_only_graphics.valid()) {
+        shader::destroy_pipeline(p->hiz.depth_only_graphics);
+        p->hiz.depth_only_graphics = {};
+    }
     if (p->gpu_cull.cull_compute.valid()) {
         shader::destroy_pipeline(p->gpu_cull.cull_compute);
         p->gpu_cull.cull_compute = {};

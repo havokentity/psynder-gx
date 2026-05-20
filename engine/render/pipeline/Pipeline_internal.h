@@ -96,6 +96,9 @@ struct HizPyramid {
     gpu::Handle<gpu::Texture> hiz_pyramid;     // mipped, R32Uint min/max
     std::uint32_t             mip_count = 0;
     shader::PipelineHandle    downsample_compute{};
+    // Depth-only graphics PSO for the pre-pass — VS-only (no color writes),
+    // depth-write enabled. Sourced from shaders/depth_only.slang.
+    shader::PipelineHandle    depth_only_graphics{};
 };
 
 // ─── GPU-driven cull (compute → indirect draw arguments) ────────────────
@@ -186,7 +189,31 @@ struct Pipeline {
     // backend-encoded clear path because cmd-encoding APIs aren't wired
     // through psy::gpu yet. See INTEGRATION.txt + Issue lane09-001.
     bool warned_missing_cmd_encoder = false;
+
+    // ─── Per-frame draw / dispatch counters ─────────────────────────────
+    //
+    // Bumped by each encode_*() entry point as it issues real cmd encoder
+    // calls. The test harness reads these to verify the pipeline actually
+    // walked the expected sub-passes — they're cheap (one uint64 per pass)
+    // and live regardless of whether a real device is attached.
+    struct PassStats {
+        std::uint64_t opaque_draws        = 0; // draw_indexed calls (opaque pass)
+        std::uint64_t depth_prepass_draws = 0; // draw_indexed calls (depth pre-pass)
+        std::uint64_t cluster_dispatches  = 0; // light_cluster_build dispatches
+        std::uint64_t hiz_dispatches      = 0; // hiz_downsample dispatches
+        std::uint64_t cull_dispatches     = 0; // gpu_cull dispatches
+        std::uint64_t opaque_passes       = 0; // begin_render(opaque) count
+        std::uint64_t depth_passes        = 0; // begin_render(depth) count
+    };
+    PassStats stats{};
 };
+
+// ─── Stats accessor for tests / diagnostics ─────────────────────────────
+//
+// Free function so tests don't have to take the dependency on the full
+// Pipeline_internal.h layout — they just include this header at the call
+// site (it's in the same lane subtree).
+const Pipeline::PassStats& pipeline_stats(const Pipeline* p);
 
 // ─── Internal helpers (defined in the various sub-pass .cpp files) ──────
 
