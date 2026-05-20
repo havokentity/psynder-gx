@@ -22,6 +22,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>  // _getpid
+#else
+#include <unistd.h>  // getpid
+#endif
+
 namespace fs = std::filesystem;
 using namespace psynder;
 using psynder::asset::Vfs;
@@ -42,14 +48,24 @@ bool span_equals(std::span<const u8> a, const std::vector<u8>& b) {
     return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), b.size()) == 0);
 }
 
+unsigned long current_pid() {
+#if defined(_WIN32)
+    return static_cast<unsigned long>(_getpid());
+#else
+    return static_cast<unsigned long>(::getpid());
+#endif
+}
+
 fs::path make_scratch_dir(const char* tag) {
     // Each TEST_CASE runs as its own process under catch_discover_tests, and
     // CI uses `ctest -j`, so a fixed name + per-process counter could race
-    // across processes. Mix in a per-process random token so every process
-    // owns a distinct scratch path (and remove_all only ever touches it).
+    // across processes. The PID is unique among concurrent processes (the
+    // guaranteed-unique part); a random_device draw adds entropy, and the
+    // per-call counter disambiguates within a process. remove_all then only
+    // ever touches this process's own dir.
     static const std::string proc_token = [] {
         std::random_device rd;
-        return std::to_string(rd()) + std::to_string(rd());
+        return std::to_string(current_pid()) + "_" + std::to_string(rd());
     }();
     static int counter = 0;
     fs::path base = fs::temp_directory_path() / "psynder_asset_waveb";
