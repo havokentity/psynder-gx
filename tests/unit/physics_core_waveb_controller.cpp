@@ -52,19 +52,24 @@ WorldDesc unit_world_desc() {
     return d;
 }
 
+// Owns a world plus every body / character created through it, and tears
+// them all down in the right order (characters + bodies before the world)
+// in its destructor — so a failing REQUIRE mid-test can't leak them or
+// leave a CharacterVirtual dangling against a destroyed PhysicsSystem.
 struct WorldScope {
     World* w = nullptr;
     std::vector<RigidBody*> bodies;
+    std::vector<CharacterController*> chars;
     WorldScope() {
         w = create_world(unit_world_desc());
         REQUIRE(w != nullptr);
     }
     ~WorldScope() {
+        for (CharacterController* c : chars) destroy_character(w, c);
         for (RigidBody* b : bodies) destroy_body(w, b);
         destroy_world(w);
     }
-    // Static (mass 0) box, tracked so the scope tears it down on exit.
-    // Half-extents in metres; quaternion {x,y,z,w}.
+    // Static (mass 0) box. Half-extents in metres; quaternion {x,y,z,w}.
     RigidBody* box(float cx, float cy, float cz,
                    float hx, float hy, float hz,
                    float qx = 0.0f, float qy = 0.0f, float qz = 0.0f, float qw = 1.0f) {
@@ -79,15 +84,16 @@ struct WorldScope {
         bodies.push_back(b);
         return b;
     }
+    // Character at (x, y, z) with default CharacterDesc dimensions.
+    CharacterController* character(float x, float y, float z) {
+        CharacterDesc cd{};
+        cd.pos[0] = x; cd.pos[1] = y; cd.pos[2] = z;
+        CharacterController* cc = create_character(w, cd);
+        REQUIRE(cc != nullptr);
+        chars.push_back(cc);
+        return cc;
+    }
 };
-
-CharacterController* spawn_character(World* w, float x, float y, float z) {
-    CharacterDesc cd{};
-    cd.pos[0] = x; cd.pos[1] = y; cd.pos[2] = z;
-    CharacterController* cc = create_character(w, cd);
-    REQUIRE(cc != nullptr);
-    return cc;
-}
 
 // Advance the character (and world) with a fixed planar input for N ticks.
 void run_input(World* w, CharacterController* cc,
@@ -132,7 +138,7 @@ TEST_CASE("physics-core wave-b: capsule climbs a ramp within the slope limit",
 
     const float z0 = -4.0f;
     CharacterController* cc =
-        spawn_character(scope.w, 0.0f, tan_a * z0 + 0.1f, z0);
+        scope.character(0.0f, tan_a * z0 + 0.1f, z0);
 
     settle(scope.w, cc, 90); // drop the 0.1 m and settle on the slope
 
@@ -145,10 +151,7 @@ TEST_CASE("physics-core wave-b: capsule climbs a ramp within the slope limit",
     character_get_transform(cc, p1, nullptr);
 
     REQUIRE(p1[2] > p0[2] + 0.3f); // advanced up the ramp
-    REQUIRE(p1[1] > p0[1] + 0.3f); // gained height
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(p1[1] > p0[1] + 0.3f); // gained height}
 
 TEST_CASE("physics-core wave-b: capsule steps up a curb within the step offset",
           "[physics][character][waveb]") {
@@ -159,7 +162,7 @@ TEST_CASE("physics-core wave-b: capsule steps up a curb within the step offset",
     scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
     scope.box(0.0f,  0.1f, 10.0f, 20.0f, 0.1f, 10.0f);        // curb top y=0.2
 
-    CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -2.0f);
+    CharacterController* cc = scope.character(0.0f, 0.1f, -2.0f);
     settle(scope.w, cc, 60);
 
     float p0[3]{};
@@ -171,10 +174,7 @@ TEST_CASE("physics-core wave-b: capsule steps up a curb within the step offset",
     character_get_transform(cc, p1, nullptr);
 
     REQUIRE(p1[1] > p0[1] + 0.1f); // stepped up onto the ~0.2 m curb
-    REQUIRE(p1[2] > 0.3f);         // got past the curb's front edge (z=0)
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(p1[2] > 0.3f);         // got past the curb's front edge (z=0)}
 
 TEST_CASE("physics-core wave-b: capsule is blocked by a curb taller than the step offset",
           "[physics][character][waveb]") {
@@ -184,7 +184,7 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a curb taller than the ste
     scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
     scope.box(0.0f,  0.3f, 10.0f, 20.0f, 0.3f, 10.0f);        // curb top y=0.6
 
-    CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -2.0f);
+    CharacterController* cc = scope.character(0.0f, 0.1f, -2.0f);
     settle(scope.w, cc, 60);
 
     run_input(scope.w, cc, 0.0f, 1.0f, 180);
@@ -194,10 +194,7 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a curb taller than the ste
 
     REQUIRE(p1[1] < 0.3f);  // did not climb onto the 0.6 m curb top
     REQUIRE(p1[2] < 0.0f);  // stopped in front of the curb (front face at z=0)
-    REQUIRE(p1[2] > -1.5f); // but did advance from the z=-2 start toward it
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(p1[2] > -1.5f); // but did advance from the z=-2 start toward it}
 
 TEST_CASE("physics-core wave-b: capsule is blocked by a wall steeper than the slope limit",
           "[physics][character][waveb]") {
@@ -208,7 +205,7 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a wall steeper than the sl
     scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
     scope.box(0.0f,  2.0f, 0.0f, 20.0f, 2.0f, 0.5f);          // wall y[0,4] z[-0.5,0.5]
 
-    CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -3.0f);
+    CharacterController* cc = scope.character(0.0f, 0.1f, -3.0f);
     settle(scope.w, cc, 60);
 
     run_input(scope.w, cc, 0.0f, 1.0f, 180);
@@ -218,10 +215,7 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a wall steeper than the sl
 
     REQUIRE(p1[2] < -0.4f); // stopped before the wall (front face at z=-0.5)
     REQUIRE(p1[2] > -2.0f); // but advanced from z=-3 up to the wall
-    REQUIRE(p1[1] < 0.5f);  // did not climb the wall
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(p1[1] < 0.5f);  // did not climb the wall}
 
 // ─── Ground snap ──────────────────────────────────────────────────────────
 
@@ -234,7 +228,7 @@ TEST_CASE("physics-core wave-b: ground snap keeps the capsule grounded over a sm
     scope.box(0.0f, -0.5f, -10.0f, 20.0f, 0.5f, 10.0f); // upper, top y=0
     scope.box(0.0f, -0.7f,  10.0f, 20.0f, 0.5f, 10.0f); // lower, top y=-0.2
 
-    CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -3.0f);
+    CharacterController* cc = scope.character(0.0f, 0.1f, -3.0f);
     settle(scope.w, cc, 60);
     REQUIRE(character_ground_state(cc) == CharacterGroundState::OnGround);
 
@@ -247,10 +241,7 @@ TEST_CASE("physics-core wave-b: ground snap keeps the capsule grounded over a sm
     // Without ground snap the capsule would launch off the lip at speed and
     // be airborne here; with it, StickToFloor keeps it planted.
     REQUIRE(character_ground_state(cc) == CharacterGroundState::OnGround);
-    REQUIRE(p1[2] > 0.5f); // crossed onto the lower slab
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(p1[2] > 0.5f); // crossed onto the lower slab}
 
 // ─── Stance ────────────────────────────────────────────────────────────────
 
@@ -259,7 +250,7 @@ TEST_CASE("physics-core wave-b: crouch and prone shrink the capsule, standing re
     WorldScope scope;
     scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f); // floor, no ceiling
 
-    CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, 0.0f);
+    CharacterController* cc = scope.character(0.0f, 0.1f, 0.0f);
     settle(scope.w, cc, 60);
 
     const float stand_h = character_capsule_height_m(cc);
@@ -277,10 +268,7 @@ TEST_CASE("physics-core wave-b: crouch and prone shrink the capsule, standing re
 
     settle(scope.w, cc, 30); // release: stand back up (open headroom)
     REQUIRE(character_stance(cc) == CharacterStance::Stand);
-    REQUIRE(approx_eq(character_capsule_height_m(cc), stand_h));
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(approx_eq(character_capsule_height_m(cc), stand_h));}
 
 // ─── Lean ────────────────────────────────────────────────────────────────
 
@@ -289,7 +277,7 @@ TEST_CASE("physics-core wave-b: lean eases toward the input and clamps",
     WorldScope scope;
     scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);
 
-    CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, 0.0f);
+    CharacterController* cc = scope.character(0.0f, 0.1f, 0.0f);
     settle(scope.w, cc, 60);
     REQUIRE(approx_eq(character_lean(cc), 0.0f));
 
@@ -304,10 +292,7 @@ TEST_CASE("physics-core wave-b: lean eases toward the input and clamps",
     // Release: eases back toward neutral.
     settle(scope.w, cc, 60);
     REQUIRE(character_lean(cc) < leaned);
-    REQUIRE(approx_eq(character_lean(cc), 0.0f, 0.05f));
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(approx_eq(character_lean(cc), 0.0f, 0.05f));}
 
 // ─── (b) Narrowphase + island solver tuning knobs ────────────────────────
 
@@ -405,7 +390,7 @@ TEST_CASE("physics-core wave-b: character tuning round-trips",
           "[physics][tuning][waveb]") {
     WorldScope scope;
     scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);
-    CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, 0.0f);
+    CharacterController* cc = scope.character(0.0f, 0.1f, 0.0f);
 
     const CharacterTuning def = character_tuning(cc);
     REQUIRE(approx_eq(def.max_slope_angle_deg, 45.0f));
@@ -431,7 +416,4 @@ TEST_CASE("physics-core wave-b: character tuning round-trips",
     REQUIRE(approx_eq(got.mass_kg, 90.0f));
     REQUIRE(approx_eq(got.max_push_strength_n, 300.0f));
     REQUIRE(approx_eq(got.lean_offset_m, 0.30f));
-    REQUIRE(approx_eq(got.lean_speed_mps, 4.0f));
-
-    destroy_character(scope.w, cc);
-}
+    REQUIRE(approx_eq(got.lean_speed_mps, 4.0f));}

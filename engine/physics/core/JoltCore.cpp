@@ -354,14 +354,13 @@ struct CharacterController {
     CharacterStance                 stance         = CharacterStance::Stand;
     float                           yaw_deg        = 0.0f;
     float                           vertical_velocity = 0.0f;
-    // ── Wave-B kinematic-capsule tuning (real metric defaults) ──
-    float                           max_slope_deg      = 45.0f;
-    float                           step_offset_m      = 0.30f;
-    float                           ground_snap_dist_m = 0.30f;
-    float                           lean_offset_max_m  = 0.22f;
-    float                           lean_speed_mps     = 2.5f;
-    // ── Lean state, eased toward the input target each tick ──
-    float                           lean_amount        = 0.0f;  // -1 left .. +1 right
+    // Wave-B kinematic-capsule tuning. CharacterTuning's member initializers
+    // (PhysicsTuning.h) are the single source of the real-metric defaults —
+    // create_character applies them to the Jolt settings rather than
+    // re-stating the literals here.
+    CharacterTuning                 tuning{};
+    // Lean state, eased toward the input target each tick (-1 left .. +1 right).
+    float                           lean_amount = 0.0f;
 };
 
 // ─── World lifecycle ─────────────────────────────────────────────────────
@@ -586,10 +585,11 @@ CharacterController* create_character(World* w, const CharacterDesc& d) {
     // origin local space), so contacts on the lower hemisphere can hold the
     // character up while contacts higher on the capsule only block motion.
     cvs.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -cc->capsule_radius);
-    // Real metric controller defaults (mirror CharacterTuning's defaults).
-    cvs.mMaxSlopeAngle    = JPH::DegreesToRadians(cc->max_slope_deg); // 45 deg
-    cvs.mMass             = 80.0f;       // kg (typical adult)
-    cvs.mMaxStrength      = 200.0f;      // N — push force ceiling
+    // Real metric controller defaults, sourced from CharacterTuning (the
+    // single source) rather than re-stated as literals here.
+    cvs.mMaxSlopeAngle    = JPH::DegreesToRadians(cc->tuning.max_slope_angle_deg);
+    cvs.mMass             = cc->tuning.mass_kg;
+    cvs.mMaxStrength      = cc->tuning.max_push_strength_n;
     cvs.mShapeOffset      = JPH::Vec3::sZero();
     // Scan a little outside the shape for predictive contacts; 0 would let
     // the capsule jam against geometry as it can't compute a slide normal.
@@ -674,22 +674,23 @@ void character_tick(CharacterController* cc,
     //      by the ExtendedUpdate below. ──
     const float lean_target =
         (in.lean_right ? 1.0f : 0.0f) - (in.lean_left ? 1.0f : 0.0f);
-    const float lean_step = (cc->lean_offset_max_m > 0.0f)
-        ? (cc->lean_speed_mps / cc->lean_offset_max_m) * dt // metres/s -> lean/s
+    const float lean_offset_max = cc->tuning.lean_offset_m;
+    const float lean_step = (lean_offset_max > 0.0f)
+        ? (cc->tuning.lean_speed_mps / lean_offset_max) * dt // metres/s -> lean/s
         : 1.0f;
     const float lean_delta = lean_target - cc->lean_amount;
     if (lean_delta > lean_step)       cc->lean_amount += lean_step;
     else if (lean_delta < -lean_step) cc->lean_amount -= lean_step;
     else                              cc->lean_amount = lean_target;
     cc->character->SetShapeOffset(
-        JPH::Vec3(cc->lean_amount * cc->lean_offset_max_m, 0.0f, 0.0f));
+        JPH::Vec3(cc->lean_amount * lean_offset_max, 0.0f, 0.0f));
 
     // ── 5. Integrate with ExtendedUpdate = Update + WalkStairs +
     //      StickToFloor: step up curbs/stairs up to step_offset_m and snap
     //      back onto the floor within ground_snap_dist_m when descending. ──
     JPH::CharacterVirtual::ExtendedUpdateSettings eus;
-    eus.mWalkStairsStepUp     = JPH::Vec3(0.0f, cc->step_offset_m, 0.0f);
-    eus.mStickToFloorStepDown = JPH::Vec3(0.0f, -cc->ground_snap_dist_m, 0.0f);
+    eus.mWalkStairsStepUp     = JPH::Vec3(0.0f, cc->tuning.step_offset_m, 0.0f);
+    eus.mStickToFloorStepDown = JPH::Vec3(0.0f, -cc->tuning.ground_snap_dist_m, 0.0f);
     cc->character->ExtendedUpdate(
         dt,
         gravity,
@@ -796,27 +797,15 @@ void set_island_solver_config(World* world, const IslandSolverConfig& cfg) {
 }
 
 CharacterTuning character_tuning(const CharacterController* cc) {
-    CharacterTuning cfg{};
-    if (!cc || cc->character == nullptr) return cfg;
-    // max_slope / step / ground-snap / lean are stored on the controller
-    // (exact round-trip); mass + strength are read straight from Jolt.
-    cfg.max_slope_angle_deg = cc->max_slope_deg;
-    cfg.step_offset_m       = cc->step_offset_m;
-    cfg.ground_snap_dist_m  = cc->ground_snap_dist_m;
-    cfg.mass_kg             = cc->character->GetMass();
-    cfg.max_push_strength_n = cc->character->GetMaxStrength();
-    cfg.lean_offset_m       = cc->lean_offset_max_m;
-    cfg.lean_speed_mps      = cc->lean_speed_mps;
-    return cfg;
+    // cc->tuning is the authoritative copy; set_character_tuning keeps Jolt's
+    // mass/slope/strength in lockstep with it, so we can return it directly.
+    return (cc && cc->character != nullptr) ? cc->tuning : CharacterTuning{};
 }
 
 void set_character_tuning(CharacterController* cc, const CharacterTuning& cfg) {
     if (!cc || cc->character == nullptr) return;
-    cc->max_slope_deg      = cfg.max_slope_angle_deg;
-    cc->step_offset_m      = cfg.step_offset_m;
-    cc->ground_snap_dist_m = cfg.ground_snap_dist_m;
-    cc->lean_offset_max_m  = cfg.lean_offset_m;
-    cc->lean_speed_mps     = cfg.lean_speed_mps;
+    cc->tuning = cfg; // step / ground-snap / lean are read from here in tick
+    // Mirror the knobs Jolt owns onto the live CharacterVirtual.
     cc->character->SetMaxSlopeAngle(JPH::DegreesToRadians(cfg.max_slope_angle_deg));
     cc->character->SetMass(cfg.mass_kg);
     cc->character->SetMaxStrength(cfg.max_push_strength_n);
