@@ -57,22 +57,32 @@ struct PushConstants {
 // + the per-backend convention in MetalBackend.mm / VulkanBackend.cpp).
 [[vk::push_constant]] ConstantBuffer<PushConstants> g_push;
 
-// Texture + default sampler — slot 0 in the descriptor set / Metal buffer
-// table that lane 07 ships post-push-constants.
-Texture2D    u_texture       : register(t0);
-SamplerState u_linear_sampler : register(s0);
+// Texture + default sampler. Explicit Vulkan bindings (set 0): the sampled
+// image at binding 0, the sampler at binding 1 — matching lane 07's M1
+// descriptor-set-0 layout. Without these, Slang would map both t0 and s0 to
+// binding 0 of set 0 (HLSL register spaces are per-resource-type) and collide.
+// The register(t0)/register(s0) annotations are retained for the Metal/D3D
+// backends, which read the HLSL register, not the vk::binding decoration.
+[[vk::binding(0, 0)]] Texture2D    u_texture        : register(t0);
+[[vk::binding(1, 0)]] SamplerState u_linear_sampler : register(s0);
 
 // ─── Vertex ──────────────────────────────────────────────────────────────
 //
-// Inputs match Pipeline_internal::Vertex / DefaultVertexLayout:
+// The vertex BUFFER is the engine-canonical stride-48 layout
 //   POSITION (float3) | NORMAL (float3) | TEXCOORD0 (float2) | COLOR0 (float4)
+// so it slots into lane 09's M2 forward+ path unchanged. This unlit M1
+// shader, however, only consumes position/uv/color, so it declares just
+// those three inputs (Slang assigns them locations 0/1/2 in declaration
+// order). The sample's VertexInputDesc mirrors that: three attributes whose
+// byte offsets (0 / 24 / 32) step over the unused normal in the 48-byte
+// stride. Declaring the normal here would leave location 1 unconsumed and
+// trip the validation layer's "attribute not consumed" warning.
 //
 // The COLOR0 attribute is wired through to fs_main so the M1 demo's
 // per-vertex RGB tint visibly modulates the texture sample (which is
 // also how lane 09's passthrough.slang produced its triangle output).
 struct VSInput {
     float3 position : POSITION;
-    float3 normal   : NORMAL;
     float2 uv       : TEXCOORD0;
     float4 color    : COLOR0;
 };

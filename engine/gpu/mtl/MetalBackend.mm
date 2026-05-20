@@ -445,16 +445,20 @@ Buffer* MetalBackend::create_buffer(Device* /*dev*/, const BufferDesc& /*desc*/)
 // ─── Format → bytes_per_pixel + MTLPixelFormat helpers ──────────────────
 //
 // Restricted to the M1 supported set per the PublicGpu.h contract on
-// TextureDesc::initial_data. SRGB variants intentionally absent — the
-// SRGB-typed Metal formats use the same byte layout (4 bpp) as their
-// Unorm peers, but lane 07's M1 brief defers SRGB upload to M3 because
-// the gamma channel decision belongs to the asset cooker (lane 09).
+// TextureDesc::initial_data: the uncompressed 8-bit-per-channel formats
+// (Unorm + sRGB). sRGB-typed Metal formats share the byte layout (4 bpp) of
+// their Unorm peers; the sampler decodes sRGB→linear on read so display-
+// authored texels light the shader in linear space. The cooker-owned gamma
+// decision (lane 09) only governs *compressed* BC*/ASTC* uploads, which stay
+// deferred to M3.
 namespace {
 
 inline std::uint32_t bytes_per_pixel_for_upload(Format f) {
     switch (f) {
         case Format::Rgba8Unorm: return 4u;
+        case Format::Rgba8Srgb:  return 4u;
         case Format::Bgra8Unorm: return 4u;
+        case Format::Bgra8Srgb:  return 4u;
         case Format::R8Unorm:    return 1u;
         default:                 return 0u; // not supported on the M1 upload path
     }
@@ -463,7 +467,9 @@ inline std::uint32_t bytes_per_pixel_for_upload(Format f) {
 inline MTLPixelFormat to_mtl_pixel_format_for_upload(Format f) {
     switch (f) {
         case Format::Rgba8Unorm: return MTLPixelFormatRGBA8Unorm;
+        case Format::Rgba8Srgb:  return MTLPixelFormatRGBA8Unorm_sRGB;
         case Format::Bgra8Unorm: return MTLPixelFormatBGRA8Unorm;
+        case Format::Bgra8Srgb:  return MTLPixelFormatBGRA8Unorm_sRGB;
         case Format::R8Unorm:    return MTLPixelFormatR8Unorm;
         default:                 return MTLPixelFormatInvalid;
     }
@@ -487,7 +493,7 @@ Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) 
         const std::uint32_t bpp = bytes_per_pixel_for_upload(desc.format);
         const MTLPixelFormat mtl_fmt = to_mtl_pixel_format_for_upload(desc.format);
         if (bpp == 0 || mtl_fmt == MTLPixelFormatInvalid) {
-            std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Bgra8Unorm/R8Unorm)\n", stderr);
+            std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Rgba8Srgb/Bgra8Unorm/Bgra8Srgb/R8Unorm)\n", stderr);
             delete tex;
             return nullptr;
         }

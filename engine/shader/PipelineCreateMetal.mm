@@ -120,31 +120,86 @@ id<MTLLibrary> make_library(const std::vector<std::uint8_t>& metal_ir) {
     }
 }
 
+// ─── Public-VertexAttrFormat → MTLVertexFormat ────────────────────────────
+MTLVertexFormat to_mtl_format(VertexAttrFormat f) {
+    switch (f) {
+        case VertexAttrFormat::Float32:     return MTLVertexFormatFloat;
+        case VertexAttrFormat::Float32x2:   return MTLVertexFormatFloat2;
+        case VertexAttrFormat::Float32x3:   return MTLVertexFormatFloat3;
+        case VertexAttrFormat::Float32x4:   return MTLVertexFormatFloat4;
+        case VertexAttrFormat::Uint8x4Norm: return MTLVertexFormatUChar4Normalized;
+        case VertexAttrFormat::Uint16x2:    return MTLVertexFormatUShort2;
+    }
+    return MTLVertexFormatInvalid;
+}
+
+MTLVertexStepFunction to_mtl_step(VertexInputRate r) {
+    return (r == VertexInputRate::Instance)
+        ? MTLVertexStepFunctionPerInstance
+        : MTLVertexStepFunctionPerVertex;
+}
+
+// Lane 07's MetalBackend.mm reserves Metal vertex-buffer slot 0 for
+// push-constants. Both the default and the user-supplied paths offset
+// caller slots by +1 so they sit at slot 1 (kVertexBufferSlot0) and up.
+constexpr std::uint32_t kMtlPushConstantReserved = 1;
+
 // Build an interleaved float3 pos + float3 normal + float2 uv vertex
 // descriptor matching DefaultVertexLayout. Buffer slot is
-// kVertexBufferSlot0 = 1 (slot 0 reserved for push-constants per
-// MetalBackend.mm).
+// kMtlPushConstantReserved (=1) because slot 0 is reserved for
+// push-constants per MetalBackend.mm.
 MTLVertexDescriptor* make_default_vertex_descriptor() {
     MTLVertexDescriptor* vd = [[MTLVertexDescriptor alloc] init];
 
     // attribute 0: position (float3) @ offset 0
     vd.attributes[0].format      = MTLVertexFormatFloat3;
     vd.attributes[0].offset      = DefaultVertexLayout::kAttribOffsets[0];
-    vd.attributes[0].bufferIndex = 1;  // kVertexBufferSlot0
+    vd.attributes[0].bufferIndex = kMtlPushConstantReserved;
 
     // attribute 1: normal (float3) @ offset 12
     vd.attributes[1].format      = MTLVertexFormatFloat3;
     vd.attributes[1].offset      = DefaultVertexLayout::kAttribOffsets[1];
-    vd.attributes[1].bufferIndex = 1;
+    vd.attributes[1].bufferIndex = kMtlPushConstantReserved;
 
     // attribute 2: uv (float2) @ offset 24
     vd.attributes[2].format      = MTLVertexFormatFloat2;
     vd.attributes[2].offset      = DefaultVertexLayout::kAttribOffsets[2];
-    vd.attributes[2].bufferIndex = 1;
+    vd.attributes[2].bufferIndex = kMtlPushConstantReserved;
 
-    vd.layouts[1].stride       = DefaultVertexLayout::kStrideBytes;
-    vd.layouts[1].stepRate     = 1;
-    vd.layouts[1].stepFunction = MTLVertexStepFunctionPerVertex;
+    vd.layouts[kMtlPushConstantReserved].stride       = DefaultVertexLayout::kStrideBytes;
+    vd.layouts[kMtlPushConstantReserved].stepRate     = 1;
+    vd.layouts[kMtlPushConstantReserved].stepFunction = MTLVertexStepFunctionPerVertex;
+
+    return vd; // caller takes ownership
+}
+
+// Build a vertex descriptor from a caller-supplied VertexInputDesc.
+// Returns nil if the desc fails validate() (caller-controlled fatality
+// surfaces a stderr line + a graceful PSO-create failure upstream).
+//
+// Caller's buffer_slot is offset by kMtlPushConstantReserved so the
+// pushed-constant slot at index 0 stays untouched.  The caller drives
+// the layout in "their" slot numbering — 0,1,2… — so this offset is
+// transparent at the public surface.
+MTLVertexDescriptor* make_vertex_descriptor_from(const VertexInputDesc& vi) {
+    if (!validate(vi)) return nil;
+
+    MTLVertexDescriptor* vd = [[MTLVertexDescriptor alloc] init];
+
+    for (std::uint8_t a = 0; a < vi.attr_count; ++a) {
+        const VertexAttr& A = vi.attrs[a];
+        vd.attributes[a].format      = to_mtl_format(A.format);
+        vd.attributes[a].offset      = A.offset_in_buffer;
+        vd.attributes[a].bufferIndex = A.buffer_slot + kMtlPushConstantReserved;
+    }
+
+    for (std::uint8_t b = 0; b < vi.binding_count; ++b) {
+        const VertexBufferBinding& B = vi.bindings[b];
+        const std::uint32_t mtl_slot = b + kMtlPushConstantReserved;
+        vd.layouts[mtl_slot].stride       = B.stride;
+        vd.layouts[mtl_slot].stepRate     = 1;
+        vd.layouts[mtl_slot].stepFunction = to_mtl_step(B.input_rate);
+    }
 
     return vd; // caller takes ownership
 }
@@ -156,7 +211,8 @@ bool create_and_register_graphics_pso(
     const std::vector<std::uint8_t>&  vs_blob,
     const std::vector<std::uint8_t>&  fs_blob,
     const char*                       vs_entry,
-    const char*                       fs_entry)
+    const char*                       fs_entry,
+    const VertexInputDesc&            vertex_input)
 {
     if (!ensure_device()) return false;
     if (vs_blob.empty() || fs_blob.empty()) return false;
@@ -204,8 +260,29 @@ bool create_and_register_graphics_pso(
         rpd.depthAttachmentPixelFormat   = MTLPixelFormatInvalid;
         rpd.stencilAttachmentPixelFormat = MTLPixelFormatInvalid;
 
-        // Vertex descriptor — interleaved float3+float3+float2 at slot 1.
-        MTLVertexDescriptor* vd = make_default_vertex_descriptor();
+        // Vertex descriptor.
+        //   * attr_count == 0  → DefaultVertexLayout (slot 1, stride 32).
+        //   * attr_count  > 0  → translate the caller-supplied
+        //                        VertexInputDesc, applying the lane-07
+        //                        slot-0-reserved-for-push-constants offset.
+        // On validate() failure, make_vertex_descriptor_from returns nil
+        // and we log + bail with a clean PSO-create failure so lane 07
+        // falls back to its "not registered" no-op draw path.
+        MTLVertexDescriptor* vd = (vertex_input.attr_count == 0)
+            ? make_default_vertex_descriptor()
+            : make_vertex_descriptor_from(vertex_input);
+        if (!vd) {
+            std::fprintf(stderr,
+                "[psy::shader::mtl] VertexInputDesc failed validate() "
+                "(id=%u, attr_count=%u, binding_count=%u)\n",
+                handle_id,
+                (unsigned)vertex_input.attr_count,
+                (unsigned)vertex_input.binding_count);
+            [rpd release];
+            [vs_fn release]; [fs_fn release];
+            [vs_lib release]; [fs_lib release];
+            return false;
+        }
         rpd.vertexDescriptor = vd;
 
         NSError* err = nil;

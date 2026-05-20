@@ -139,11 +139,13 @@ struct TextureDesc {
     //     width * height * bytes_per_pixel(format) — backends reject
     //     mismatches by returning an invalid Handle (no crash, log once).
     //
-    // Supported M1 formats: Rgba8Unorm, Bgra8Unorm, R8Unorm. Anything else
-    // (including SRGB variants and compressed BC*/ASTC*) is rejected at the
-    // upload path — M3 will broaden this when the offline cooker (lane 09)
-    // grows BC7 / ASTC pipelines. mip-1+ array slices and 3D textures are
-    // also deferred to M3 (synchronous mip generation + cube map upload).
+    // Supported M1 formats: the uncompressed 8-bit formats Rgba8Unorm,
+    // Rgba8Srgb, Bgra8Unorm, Bgra8Srgb, R8Unorm. sRGB variants decode to
+    // linear on sample (the swapchain re-encodes on store). Compressed
+    // BC*/ASTC* uploads stay rejected — M3 broadens this when the offline
+    // cooker (lane 09) grows BC7 / ASTC pipelines and owns the per-asset
+    // gamma decision. mip-1+ array slices and 3D textures are also deferred
+    // to M3 (synchronous mip generation + cube map upload).
     //
     // Backend mapping:
     //   Metal (Apple Silicon, unified memory) — direct
@@ -336,6 +338,13 @@ void set_scissor (CmdBuffer*, const Scissor&);
 void bind_pipeline(CmdBuffer*, ::psynder::shader::PipelineHandle);
 void bind_vertex_buffer(CmdBuffer*, std::uint32_t binding, Buffer*, std::uint64_t offset = 0);
 void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t offset = 0);
+
+// Bind a sampled texture + sampler to a descriptor slot for subsequent draws.
+// Vulkan resolves it to a descriptor set compatible with the bound pipeline;
+// Metal maps it to setFragmentTexture / setFragmentSamplerState. M1 uses slot
+// 0 for the fragment shader's primary texture; richer material binding (and
+// SPIR-V-reflected set layouts) arrive with the M2 forward+ path.
+void bind_texture(CmdBuffer*, std::uint32_t slot, Texture*, Sampler*);
 
 // Inline push constants (Vulkan vkCmdPushConstants /
 // Metal setVertexBytes:atIndex: + setFragmentBytes:atIndex:).

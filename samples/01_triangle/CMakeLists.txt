@@ -21,6 +21,16 @@
 
 add_executable(sample_01_triangle main.cpp)
 
+# Enable the real M1 draw path (begin_render -> bind_pipeline -> draw_indexed)
+# on Vulkan targets. The sample defaults to the M0 clear-only fallback to dodge
+# a macOS-only Metal encoder-retain crash (sample01-004) -- that bug does not
+# exist on the Vulkan backend, and the PSO registration the draw needs is
+# provided by lane 08's pipeline_shim (lane/08-pso-register). Keep the fallback
+# on Apple until the Metal retain fix (lane/07-mtl-encoder-retain) lands.
+if(NOT APPLE)
+    target_compile_definitions(sample_01_triangle PRIVATE PSYNDER_GX_SAMPLE_01_USE_ENCODER)
+endif()
+
 target_link_libraries(sample_01_triangle PRIVATE
     psynder_common
     psynder_core
