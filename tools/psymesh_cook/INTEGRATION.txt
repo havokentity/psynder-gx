@@ -1,0 +1,100 @@
+psymesh_cook — integration notes (Lane 05)
+==============================================
+
+What ships in this PR (M2 baseline)
+-----------------------------------
+* CLI: psymesh_cook --in <obj> --out <psymesh> [--scale N] [--center-pivot]
+       [--no-tangents] [--gen-uv2-lightmap] [--force] [--print-stats] [--quiet]
+* Frozen wire format v1 (see PsyMeshFormat.h):
+    - PsyMeshFileHeader: 48 bytes, static_asserted on disk size.
+    - PsyMeshSubmesh:    16 bytes, static_asserted.
+    - Per-stream contiguous layout (SoA on the wire) so the runtime
+      loader can mmap and skip cold attributes.
+* .obj parser:
+    - v / vn / vt / f directives; right-handed +Y up coordinate system
+      (matches Blender / glTF).
+    - Triangles only — quads / n-gons rejected with a clear line-numbered
+      error pointing at "re-export with triangulation enabled".
+    - Per-corner stream → vertex dedup pass keyed on bit-pattern of
+      (pos, normal, uv0); first-occurrence wins → deterministic output.
+    - Patches missing normals with the per-triangle face normal.
+* Tangent computation:
+    - Per-triangle Lengyel accumulation + per-corner Gram-Schmidt
+      orthonormalisation against the source normal.
+    - Bitangent sign packed into tangent.w (the MikkT contract).
+    - Per-dedup'd-vertex tangent is the average of contributing-corner
+      tangents, re-orthonormalised; sign of the first contributor wins.
+    - Degenerate UV triangles / zero-length normals → fallback
+      (1, 0, 0, 1) + a per-cook warning to stderr.
+* --gen-uv2-lightmap (M2 stub):
+    - Emits a UV1 channel that mirrors UV0. The proper xatlas-based
+      chart packer lands in M3 (see "Deferred work" below).
+* Determinism:
+    - No random_device / chrono / pid usage.
+    - std::map<DedupKey, u32> for dedup (ordered → stable insertion).
+    - Same input bytes → byte-identical output. Verified by the
+      tools_psymesh_cook test suite.
+
+What's deferred to follow-up PRs
+--------------------------------
+1. .gltf / .glb parser. The CLI recognises the extension and the
+   InputKind::Gltf code path is wired, but parse_gltf() in
+   PsyMeshCook.cpp currently returns a clear error. Plan: vendor
+   cgltf (single-header MIT, github.com/jkuhlmann/cgltf) and walk
+   the primitive's POSITION / NORMAL / TEXCOORD_0 / INDICES accessors.
+   This was scoped out of M2 because the sandboxed agent CI does
+   not have network access for FetchContent, and the Mesh Cooker
+   lane is the only place that needs cgltf.
+
+2. xatlas-based UV1 lightmap chart pack. Today's --gen-uv2-lightmap
+   mirrors UV0. For the M3 bake pipeline (lane 11 render-post /
+   lane 13 world-outdoor lightmap baker) we need a non-overlapping
+   atlas: vendor xatlas (github.com/jpcy/xatlas, MIT) into
+   tools/psymesh_cook/third_party/ and replace the mirror with a
+   xatlas::Atlas pass — must be invoked with a FIXED SEED to
+   preserve the determinism contract documented in PsyMeshFormat.h.
+
+3. Canonical Mikkelsen MikkTSpace. The shipped tangent algorithm
+   is per-corner Lengyel + Gram-Schmidt, which agrees with MikkT
+   for manifold inputs. For full corner-mismatch handling (some
+   PBR shader pipelines verify the MikkT contract bit-exactly)
+   we should vendor the canonical mikktspace.c (BSD-3-Clause)
+   alongside the existing path so workflows that need bit-exact
+   MikkT can opt in via a future --mikkt-canonical flag.
+
+4. Submesh-by-material splitting. The .obj parser today produces
+   a single submesh containing every face. Once we wire the .mtl
+   companion and usemtl-driven splits, the ParsedSubmesh table
+   already feeds straight through to PsyMeshSubmesh on disk —
+   only the parser changes.
+
+5. Skinning (attr_mask bit 3) + vertex color (bit 2). The wire
+   format reserves these bits and the engine-side loader (lane 09)
+   should honour them; the cooker doesn't emit them today since
+   no source asset path produces them yet.
+
+6. Async / parallel cook. Cooker is single-threaded by design
+   for M2 (the dedup pass is O(N log N); even a 1M-vertex mesh
+   cooks in well under a second). If batch-cooking large content
+   libraries becomes a bottleneck, std::thread fan-out per file
+   (one cooker per worker, no shared state) is the right answer
+   — tools/psymesh_cook does NOT link engine/jobs deliberately.
+
+7. KHR_mesh_quantization / KHR_draco_mesh_compression. Both are
+   glTF extensions; once the cgltf path lands (item 1) these
+   become straightforward extension calls. Quantization is more
+   urgent than Draco given Psynder-GX's bandwidth-not-storage
+   bottleneck.
+
+Engine-side loader contract (for lane 09 / lane 10 follow-up)
+-------------------------------------------------------------
+The runtime loader is expected to:
+* Open the .psymesh file via VFS, mmap the whole thing.
+* Validate header.magic == kPsyMeshMagic AND header.version == kPsyMeshVersion.
+* Compute per-stream byte offsets by walking attr_mask bits in the
+  order defined by PsyMeshFormat.h (pos, normal, uv0, then optionals
+  in bit-index order: tangent (0), uv1 (1), color (2), skin (3)).
+* Treat positions as METRES and the coordinate system as right-handed
+  +Y up (no axis flip on load).
+* Report header.source_hash to the asset DB for staleness detection;
+  the loader doesn't need to recompute it.
