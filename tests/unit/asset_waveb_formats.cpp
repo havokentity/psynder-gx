@@ -15,6 +15,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -316,6 +317,54 @@ TEST_CASE("asset/formats: parsers reject malformed input", "[asset][formats]") {
         fio::LmmView mv;
         REQUIRE_FALSE(fio::parse_lmm(good.data(), good.size(), mv));
     }
+}
+
+TEST_CASE("asset/formats: .lmt rejects pixels pointing into metadata",
+          "[asset][formats][lmt]") {
+    fio::LmtWriter w;
+    w.pixel_fmt = fio::LmtPixelFmt::RGBA8;
+    w.mips.push_back({2, 2, pattern_bytes(2 * 2 * 4, 70)});
+    std::vector<u8> bytes;
+    REQUIRE(w.build(bytes));
+    fio::LmtView ok;
+    REQUIRE(fio::parse_lmt(bytes.data(), bytes.size(), ok));  // sane before tampering
+
+    // Repoint pixels_offset and mip0.offset back into the mip-table region
+    // (offset 32 sits inside the table, which ends at 32 + 16 = 48).
+    const u32 into_table = static_cast<u32>(sizeof(fio::LmtHeader));
+    std::memcpy(bytes.data() + offsetof(fio::LmtHeader, pixels_offset), &into_table,
+                sizeof(into_table));
+    std::memcpy(bytes.data() + sizeof(fio::LmtHeader) + offsetof(fio::LmtMip, offset), &into_table,
+                sizeof(into_table));
+    fio::LmtView v;
+    REQUIRE_FALSE(fio::parse_lmt(bytes.data(), bytes.size(), v));
+}
+
+TEST_CASE("asset/formats: .lma decode rejects a forged frame_count",
+          "[asset][formats][lma][zstd]") {
+    if (!asset::lmpak::zstd_available()) {
+        SUCCEED("zstd not built into psynder_asset; forged-frame_count path skipped");
+        return;
+    }
+    fio::LmaWriter w;
+    w.sample_fmt = fio::LmaSampleFmt::PCM_S16;
+    w.channels = 1;
+    w.compress = true;
+    w.pcm = pattern_bytes(256 * 2, 80);  // 256 frames
+    std::vector<u8> bytes;
+    REQUIRE(w.build(bytes));
+
+    // Forge a wildly larger frame_count. The zstd frame still declares the
+    // real (small) content size, so decode must reject up front rather than
+    // speculatively allocating hundreds of MB.
+    const u32 forged = 0x10000000u;  // ~268M frames
+    std::memcpy(bytes.data() + offsetof(fio::LmaHeader, frame_count), &forged, sizeof(forged));
+    fio::LmaView v;
+    REQUIRE(fio::parse_lma(bytes.data(), bytes.size(), v));  // header still parses
+    REQUIRE(v.zstd);
+    REQUIRE(v.header.frame_count == forged);
+    std::vector<u8> pcm;
+    REQUIRE_FALSE(v.decode(pcm));  // content-size mismatch -> rejected before resize
 }
 
 TEST_CASE("asset/formats: cooked .lmt round-trips through the VFS .lmpak path",

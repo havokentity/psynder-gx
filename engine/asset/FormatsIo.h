@@ -33,9 +33,14 @@
 //     - sections are contiguous, no gaps; file ends exactly at index end.
 //
 // .lmt  [LmtHeader 32B][LmtMip × mip_count][palette?][mip0 px][mip1 px]...
+//     - Section order is ENFORCED by parse_lmt: header < mip table <
+//       palette (P8 only) < pixel payloads, with no overlap. This block is
+//       the AUTHORITATIVE .lmt layout; the LmtHeader field comment in
+//       Formats.h is informative only (and is flagged in the PR body for the
+//       orchestrator to reconcile against this).
 //     - LmtMip table immediately follows the 32-byte header (off 32).
 //     - palette present iff pixel_fmt==P8: 256*4=1024 bytes at
-//       palette_offset (0 when absent).
+//       palette_offset (0 when absent), sitting between the table and pixels.
 //     - pixels_offset == LmtMip[0].offset; each LmtMip.offset is absolute
 //       from the header start, byte_size == width*height*bytes_per_texel
 //       (P8 stores 1-byte indices; palette is separate).
@@ -228,17 +233,29 @@ inline bool parse_lmt(const u8* data, usize bytes, LmtView& out) noexcept {
     if (table_bytes > u64(bytes) - table_off) return false;
     const u8* mip_table = data + table_off;
 
-    // Palette: present iff P8. Bounds-check the stored offset.
+    // Section ordering (see the layout block at the top of this file):
+    //   [header][mip table][palette? (P8)][mip pixels]
+    // Palette is present iff P8; it must sit after the mip table and before
+    // the pixels without overlap. Reject blobs whose offsets point back into
+    // the metadata even if they pass the raw size bounds.
+    const u64 table_end = table_off + table_bytes;
     const bool is_p8 = (h.pixel_fmt == LmtPixelFmt::P8);
+    u64 meta_end = table_end;  // first byte that may hold pixel payloads
     if (is_p8) {
         if (h.palette_offset == 0) return false;
         if (u64(h.palette_offset) > u64(bytes)) return false;
         if (u64(kLmtPaletteBytes) > u64(bytes) - h.palette_offset) return false;
+        if (u64(h.palette_offset) < table_end) return false;                         // after table
+        if (u64(h.pixels_offset) < u64(h.palette_offset) + kLmtPaletteBytes) return false;  // before pixels
+        meta_end = u64(h.palette_offset) + kLmtPaletteBytes;
     } else if (h.palette_offset != 0) {
         return false;  // non-paletted formats must not carry a palette
     }
+    // Pixel payloads (and pixels_offset) must begin after all metadata.
+    if (u64(h.pixels_offset) < meta_end) return false;
 
-    // Validate each mip: dimensions self-consistent, payload in bounds.
+    // Validate each mip: dimensions self-consistent, payload after metadata
+    // and in bounds.
     const u32 mip_count = h.mip_count;
     LmtMip mip0{};
     for (u32 i = 0; i < mip_count; ++i) {
@@ -250,6 +267,7 @@ inline bool parse_lmt(const u8* data, usize bytes, LmtView& out) noexcept {
         if (m.width > 0xFFFFu || m.height > 0xFFFFu) return false;
         const u64 expect = u64(m.width) * u64(m.height) * u64(bpt);
         if (m.byte_size != expect) return false;
+        if (u64(m.offset) < meta_end) return false;  // must not point into metadata
         if (u64(m.offset) > u64(bytes)) return false;
         if (u64(m.byte_size) > u64(bytes) - m.offset) return false;
     }
@@ -281,17 +299,29 @@ struct LmaView {
     }
 
     // Materialize the PCM into `pcm` (resized to decoded_bytes()),
-    // decompressing if needed. Returns false on a zstd/size error.
+    // decompressing if needed. Returns false on a zstd/size error. All size
+    // checks happen BEFORE the resize so a corrupt header can't trigger a huge
+    // speculative allocation when loading untrusted assets.
     bool decode(std::vector<u8>& pcm) const {
         if (!valid) return false;
         const u64 need = decoded_bytes();
-        pcm.resize(static_cast<usize>(need));
-        if (need == 0) return true;  // empty audio: nothing to copy/inflate (avoid null dst)
-        if (!zstd) {
-            if (stored.size() != need) return false;
-            if (need) std::memcpy(pcm.data(), stored.data(), static_cast<usize>(need));
+        if (need == 0) {  // empty audio: nothing to copy/inflate (avoid null dst)
+            pcm.clear();
             return true;
         }
+        if (!zstd) {
+            // Uncompressed: parse already enforced stored.size()==need, but
+            // re-check before allocating so a bad view can't over-allocate.
+            if (stored.size() != need) return false;
+            pcm.resize(static_cast<usize>(need));
+            std::memcpy(pcm.data(), stored.data(), static_cast<usize>(need));
+            return true;
+        }
+        // zstd: the frame's self-declared content size must match the header
+        // before we allocate `need`, so a forged frame_count can't force a
+        // multi-GB resize ahead of a decode that would just fail.
+        if (lmpak::zstd_frame_content_size(stored.data(), stored.size()) != need) return false;
+        pcm.resize(static_cast<usize>(need));
         return lmpak::zstd_decompress(stored.data(), stored.size(), pcm.data(),
                                       static_cast<usize>(need));
     }

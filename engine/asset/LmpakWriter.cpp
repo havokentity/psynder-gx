@@ -52,4 +52,16 @@ bool zstd_decompress(const u8* src, usize src_len, u8* dst, usize dst_capacity) 
 #endif
 }
 
+u64 zstd_frame_content_size(const u8* src, usize src_len) noexcept {
+#if PSYNDER_ASSET_HAS_ZSTD
+    unsigned long long n = ZSTD_getFrameContentSize(src, src_len);
+    if (n == ZSTD_CONTENTSIZE_UNKNOWN || n == ZSTD_CONTENTSIZE_ERROR) return ~u64{0};
+    return static_cast<u64>(n);
+#else
+    (void)src;
+    (void)src_len;
+    return ~u64{0};
+#endif
+}
+
 }  // namespace psynder::asset::lmpak
