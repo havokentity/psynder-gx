@@ -1,0 +1,56 @@
+lm_mapimport - integration notes (Lane 24 tools)
+=================================================
+
+What ships in this PR (M2/M3 baseline)
+--------------------------------------
+* CLI: lm_mapimport --in <map> --out <psimport> [--scale F] [--force]
+       [--print-stats] [--quiet]
+* Reuses the shared parser (tools/lm_qbsp/MapSource.h): standard AND
+  Valve-220 brush dialects, `//` comments, key/value entities + brushes.
+* Emits a documented, versioned binary scene format ".psimport"
+  (magic 'PSIM', version 1) carrying:
+    - every entity's full key/value dictionary in source order, and
+    - every brush as an OUTWARD-oriented convex plane-set, with the full
+      texture projection per face (Valve-220 axes/offsets/rotation/scale or
+      the synthesised axial basis for standard brushes), plus the texture
+      name.
+  The on-disk layout is documented at the top of LmMapImport.h.
+* --scale rescales brush plane distances (geometry); entity property strings
+  (e.g. "origin") are preserved verbatim.
+* Determinism: ordered, length-prefixed encoding; identical .map ->
+  byte-identical .psimport (verified by the tools_lm_mapimport suite, which
+  round-trips the blob back into structured form and compares).
+
+>>> SEAM THE ORCHESTRATOR MUST RECONCILE AT INTEGRATION <<<
+The engine's native level format is ".psylevel" (magic 'PSLV',
+engine/editor/core/Serialization.h), owned by lane 18 (editor-core). That
+header is INTERNAL and pulls in editor::brush::Brush / detail::EntityRec /
+constraints / sculpt, and requires psynder_editor_core (which is OFF in the
+default build and in every CI job). It also models brushes as primitive
+shapes (box/wedge/cylinder/prism via origin+extents+sides), which cannot
+represent a general convex .map brush.
+
+So lm_mapimport deliberately does NOT depend on Serialization.h; it emits a
+faithful plane-set intermediate instead. To wire this into the editor at
+integration the orchestrator should EITHER:
+  (a) add a general convex-brush representation (plane-set) to the editor +
+      a .psimport -> .psylevel transcode pass, OR
+  (b) have lm_mapimport target .psylevel directly once the editor lane
+      exposes a public, plane-set-capable, editor-independent writer.
+The .psimport field semantics already mirror .psylevel's intent (entities =
+key/values; brushes carry geometry), so the transcode is mechanical.
+
+Deferred to follow-up PRs
+-------------------------
+1. Direct .psylevel ('PSLV') output once a non-internal, plane-set-capable
+   editor writer exists (see seam above).
+2. Brush-entity grouping (func_* entities keep their brushes today, but the
+   importer does not yet special-case worldspawn vs brush entities for the
+   editor's entity/brush split semantics).
+3. Texture/material resolution against the asset DB (we keep raw texture
+   names; the consumer hashes/binds them).
+4. Patch/bezier surfaces (Quake III) and group/layer metadata
+   (TrenchBroom-specific) are ignored.
+5. .map coordinate-system remap. We preserve the source convention (+Z up,
+   right-handed). If the engine scene expects +Y up, an axis swap belongs
+   in the transcode pass (documented, not silently applied here).
