@@ -291,8 +291,11 @@ BspPortalSet build_portal_set_from_tree(const BspMap& map) {
         {
             const i32 fchild = node.front_child;
             const i32 bchild = node.back_child;
-            const std::vector<i32> list = node_portals[static_cast<usize>(nidx)];
-            node_portals[static_cast<usize>(nidx)].clear();
+            // Swap the list out (leaving node_portals[nidx] empty) instead of
+            // copy-then-clear; nidx is never revisited and no child we append to
+            // below is nidx, so the emptied slot stays empty.
+            std::vector<i32> list;
+            list.swap(node_portals[static_cast<usize>(nidx)]);
             for (const i32 pidx : list) {
                 const i32   s0   = portals[static_cast<usize>(pidx)].side[0];
                 const i32   s1   = portals[static_cast<usize>(pidx)].side[1];
@@ -517,9 +520,20 @@ ClipFrustum cone_from_winding(math::Vec3 eye, const Winding& w) {
     return out;
 }
 
-// Recursive portal flood. All cones emanate from the fixed eye, so frustums
-// only ever tighten; that plus the came-from skip and the depth cap bound the
-// walk on cyclic portal graphs.
+// One frame of the walk: a leaf reached with a clipped frustum, plus the portal
+// we came through (so we don't immediately step back). Frames live on an
+// explicit heap stack, so the walk uses no recursion — call-stack depth is O(1)
+// regardless of map size (a deep portal graph can't blow the C++ stack).
+struct PortalHop {
+    i32         leaf;
+    ClipFrustum frustum;
+    u32         came;
+    i32         depth;
+};
+
+// Portal flood with frustum clipping. All cones emanate from the fixed eye, so
+// frustums only ever tighten along a path; that plus the came-from skip and the
+// depth cap bound the work on cyclic portal graphs.
 struct PortalWalk {
     const BspMap&                            map;
     const BspPortalSet&                      portals;
@@ -531,55 +545,66 @@ struct PortalWalk {
     i32                                      leaf_count;
     i32                                      max_depth;
 
-    void go(i32 cur, const ClipFrustum& frustum, u32 came, i32 depth) {
-        if (depth > max_depth) {
-            return;
-        }
-        for (const u32 pidx : leaf_portals[static_cast<usize>(cur)]) {
-            if (pidx == came) {
+    void run(i32 start, ClipFrustum start_frustum) {
+        std::vector<PortalHop> stack;
+        stack.push_back(
+            PortalHop{ start, std::move(start_frustum), static_cast<u32>(-1), 0 });
+        while (!stack.empty()) {
+            const PortalHop hop = std::move(stack.back());
+            stack.pop_back();
+            if (hop.depth > max_depth) {
                 continue;
             }
-            const BspPortal& pr = portals.portals[pidx];
-            const i32 next = (pr.front_leaf == cur) ? pr.back_leaf : pr.front_leaf;
-            if (next < 0 || next >= leaf_count) {
-                continue;
+            for (const u32 pidx : leaf_portals[static_cast<usize>(hop.leaf)]) {
+                if (pidx == hop.came) {
+                    continue;
+                }
+                const BspPortal& pr = portals.portals[pidx];
+                const i32 next =
+                    (pr.front_leaf == hop.leaf) ? pr.back_leaf : pr.front_leaf;
+                if (next < 0 || next >= leaf_count) {
+                    continue;
+                }
+                const i32 ncluster = map.leaves[static_cast<usize>(next)].cluster;
+                if (ncluster < 0 || !pvs_visible(pvs, ncluster)) {
+                    continue;  // solid or not PVS-visible → never traversed
+                }
+                // Orient the portal plane to point into the neighbour, then
+                // require the eye on the current side (don't step back through).
+                math::Vec3 n;
+                f32        d;
+                if (pr.front_leaf == hop.leaf) {
+                    n = pr.plane_normal;
+                    d = pr.plane_d;
+                } else {
+                    n = math::mul(pr.plane_normal, -1.0f);
+                    d = -pr.plane_d;
+                }
+                if (math::dot(n, eye) - d > kEps) {
+                    continue;
+                }
+                Winding pw;
+                pw.reserve(pr.vertex_count);
+                for (u32 k = 0; k < pr.vertex_count; ++k) {
+                    pw.push_back(portals.vertices[pr.first_vertex + k]);
+                }
+                Winding clipped =
+                    clip_winding_to_frustum(std::move(pw), hop.frustum);
+                if (clipped.size() < 3) {
+                    continue;  // portal fully outside the current frustum
+                }
+                ClipFrustum next_frustum = cone_from_winding(eye, clipped);
+                if (next_frustum.empty()) {
+                    continue;
+                }
+                // A leaf may be reported once per distinct portal path that
+                // reaches it, each with the frustum clipped along that path
+                // (useful for per-path in-leaf culling); draw consumers dedup.
+                emit(map.leaves[static_cast<usize>(next)],
+                     frustum_to_public(next_frustum), user);
+                stack.push_back(PortalHop{ next, std::move(next_frustum), pidx,
+                                           hop.depth + 1 });
             }
-            const i32 ncluster = map.leaves[static_cast<usize>(next)].cluster;
-            if (ncluster < 0 || !pvs_visible(pvs, ncluster)) {
-                continue;  // solid or not PVS-visible → never traversed
-            }
-            // Orient the portal plane to point into the neighbour, then require
-            // the eye on the current side (don't step back through a portal).
-            math::Vec3 n;
-            f32        d;
-            if (pr.front_leaf == cur) {
-                n = pr.plane_normal;
-                d = pr.plane_d;
-            } else {
-                n = math::mul(pr.plane_normal, -1.0f);
-                d = -pr.plane_d;
-            }
-            if (math::dot(n, eye) - d > kEps) {
-                continue;
-            }
-            Winding pw;
-            pw.reserve(pr.vertex_count);
-            for (u32 k = 0; k < pr.vertex_count; ++k) {
-                pw.push_back(portals.vertices[pr.first_vertex + k]);
-            }
-            Winding clipped = clip_winding_to_frustum(std::move(pw), frustum);
-            if (clipped.size() < 3) {
-                continue;  // portal fully outside the current frustum
-            }
-            ClipFrustum next_frustum = cone_from_winding(eye, clipped);
-            if (next_frustum.empty()) {
-                continue;
-            }
-            // A leaf may be reported once per distinct portal path that reaches
-            // it, each with the frustum clipped along that path (useful for
-            // per-path in-leaf culling); consumers that submit draws dedup.
-            emit(map.leaves[static_cast<usize>(next)], frustum_to_public(next_frustum), user);
-            go(next, next_frustum, pidx, depth + 1);
         }
     }
 };
@@ -651,10 +676,9 @@ void walk_portal_visible_leaves(const BspMap&        map,
     // The eye's own leaf is always visible.
     emit(map.leaves[static_cast<usize>(eye_idx)], initial, user);
 
-    const ClipFrustum f0 = frustum_from_public(initial);
     PortalWalk walk{ map, portals, eye, leaf_portals, pvs,
                      emit, user, leaf_count, leaf_count + 8 };
-    walk.go(eye_idx, f0, static_cast<u32>(-1), 0);
+    walk.run(eye_idx, frustum_from_public(initial));
 }
 
 }  // namespace psynder::world::bsp

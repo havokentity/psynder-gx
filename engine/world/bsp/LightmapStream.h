@@ -10,9 +10,11 @@
 // portal / PVS culling and (b) distance from the camera, and emits the page-in
 // / page-out deltas the renderer (lane 09) turns into atlas uploads / frees.
 //
-// It is a pure CPU residency policy — no GPU types, no allocation in the hot
-// path beyond the per-frame delta vectors — so it is unit-testable in isolation
-// and parallelises the per-tile scoring over psynder::jobs::JobSystem.
+// It is a pure CPU residency policy — no GPU types, and update() does no heap
+// allocation: the scratch buffers are sized once in configure(), and the
+// caller-owned delta vectors reuse their capacity across frames. That keeps it
+// unit-testable in isolation and lets the per-tile scoring fan out over
+// psynder::jobs::JobSystem.
 
 #pragma once
 
@@ -82,6 +84,10 @@ private:
     std::vector<u8>           resident_;     // per-tile TileResidency
     std::vector<u32>          id_to_index_;  // dense lightmap_id -> tile index
     u32                       resident_count_ = 0;
+    // Per-frame scratch, sized once in configure() so update() never allocates.
+    std::vector<u8>           visible_;      // per-tile visible-this-frame flags
+    std::vector<u32>          candidates_;   // visible tile indices
+    std::vector<u8>           want_;         // per-tile desired-resident flags
 };
 
 }  // namespace psynder::world::bsp

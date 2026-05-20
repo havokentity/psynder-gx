@@ -23,6 +23,11 @@ void LightmapStreamer::configure(const LightmapStreamConfig&   cfg,
     score_.assign(tiles_.size(), kNegInf);
     resident_.assign(tiles_.size(), static_cast<u8>(TileResidency::Evicted));
     resident_count_ = 0;
+    // Size the per-frame scratch once so update() is allocation-free.
+    visible_.assign(tiles_.size(), 0);
+    want_.assign(tiles_.size(), 0);
+    candidates_.clear();
+    candidates_.reserve(tiles_.size());
 
     u32 max_id = 0;
     for (const LightmapTile& t : tiles_) {
@@ -44,13 +49,13 @@ void LightmapStreamer::update(math::Vec3            eye,
         return;
     }
 
-    // Mark the tiles referenced by visible faces this frame.
-    std::vector<u8> visible(n, 0);
+    // Mark the tiles referenced by visible faces this frame (reuse scratch).
+    std::fill(visible_.begin(), visible_.end(), static_cast<u8>(0));
     for (const u32 id : visible_lightmap_ids) {
         if (id < id_to_index_.size()) {
             const u32 idx = id_to_index_[id];
             if (idx != kNoTile) {
-                visible[idx] = 1;
+                visible_[idx] = 1;
             }
         }
     }
@@ -62,7 +67,7 @@ void LightmapStreamer::update(math::Vec3            eye,
     const f32 hys   = cfg_.evict_hysteresis_m;
     jobs::JobSystem::Get().parallel_for(0, n, 256, [&](usize lo, usize hi) {
         for (usize i = lo; i < hi; ++i) {
-            if (!visible[i]) {
+            if (!visible_[i]) {
                 score_[i] = kNegInf;
                 continue;
             }
@@ -84,11 +89,10 @@ void LightmapStreamer::update(math::Vec3            eye,
     });
 
     // Desired resident set = the top `max_resident_tiles` candidates by score.
-    std::vector<u32> candidates;
-    candidates.reserve(n);
+    candidates_.clear();
     for (u32 i = 0; i < n; ++i) {
         if (score_[i] > kNegInf) {
-            candidates.push_back(i);
+            candidates_.push_back(i);
         }
     }
     const auto by_priority = [&](u32 a, u32 b) {
@@ -98,23 +102,23 @@ void LightmapStreamer::update(math::Vec3            eye,
         return tiles_[a].lightmap_id < tiles_[b].lightmap_id;  // stable tiebreak
     };
     const u32 budget = cfg_.max_resident_tiles;
-    if (budget < candidates.size()) {
-        std::nth_element(candidates.begin(),
-                         candidates.begin() + budget,
-                         candidates.end(), by_priority);
-        candidates.resize(budget);
+    if (budget < candidates_.size()) {
+        std::nth_element(candidates_.begin(),
+                         candidates_.begin() + budget,
+                         candidates_.end(), by_priority);
+        candidates_.resize(budget);
     }
 
-    std::vector<u8> want(n, 0);
-    for (const u32 i : candidates) {
-        want[i] = 1;
+    std::fill(want_.begin(), want_.end(), static_cast<u8>(0));
+    for (const u32 i : candidates_) {
+        want_[i] = 1;
     }
 
     // Diff against current residency, then commit.
     u32 rc = 0;
     for (u32 i = 0; i < n; ++i) {
         const bool was = resident_[i] == static_cast<u8>(TileResidency::Resident);
-        const bool now = want[i] != 0;
+        const bool now = want_[i] != 0;
         if (now && !was) {
             delta.paged_in.push_back(tiles_[i].lightmap_id);
         } else if (!now && was) {
