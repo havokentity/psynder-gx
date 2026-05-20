@@ -408,6 +408,12 @@ struct LmmWriter {
         if (submeshes.size() > 0xFFFFu) return false;
         if (vertex_data.size() != u64(vertex_count) * vstride) return false;
         if (index_data.size() != u64(index_count) * lmm_index_stride(vertex_count)) return false;
+        // Mirror parse_lmm's structural rules so the writer can't emit a blob
+        // the runtime would reject: triangle list + in-range submeshes.
+        if (index_count % 3u != 0u) return false;
+        for (const auto& sm : submeshes) {
+            if (u64(sm.index_start) + u64(sm.index_count) > u64(index_count)) return false;
+        }
 
         const u64 sub_bytes = u64(submeshes.size()) * sizeof(LmmSubmesh);
         const u64 total =
@@ -533,6 +539,7 @@ struct LmaWriter {
     bool build(std::vector<u8>& out) const {
         const u32 bps = lma_bytes_per_sample(sample_fmt);
         if (bps == 0) return false;
+        if (sample_rate == 0) return false;  // mirror parse_lma (0 Hz is invalid)
         if (channels != 1 && channels != 2) return false;
         const u64 frame_bytes = u64(channels) * bps;
         if (frame_bytes == 0 || pcm.size() % frame_bytes != 0) return false;

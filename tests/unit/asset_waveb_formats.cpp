@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -161,6 +162,49 @@ TEST_CASE("asset/formats: .lmm picks 32-bit indices past 65535 verts",
     REQUIRE(v.index_stride == 4);
     REQUIRE(v.vertices.size() == w.vertex_data.size());
     REQUIRE(span_equals(v.indices, w.index_data));
+}
+
+TEST_CASE("asset/formats: writers reject structurally invalid input",
+          "[asset][formats]") {
+    SECTION(".lmm writer rejects a non-triangle index count") {
+        fio::LmmWriter w;
+        w.vertex_count = 4;
+        w.index_count = 4;  // not a multiple of 3
+        w.vertex_data = pattern_bytes(4 * 32, 1);
+        w.index_data = pattern_bytes(4 * 2, 2);
+        std::vector<u8> b;
+        REQUIRE_FALSE(w.build(b));
+    }
+    SECTION(".lmm writer rejects an out-of-range submesh") {
+        fio::LmmWriter w;
+        w.vertex_count = 4;
+        w.index_count = 6;
+        w.vertex_data = pattern_bytes(4 * 32, 1);
+        w.index_data = pattern_bytes(6 * 2, 2);
+        w.submeshes.push_back(fio::LmmSubmesh{0, 9, 0, 0});  // 0 + 9 > 6
+        std::vector<u8> b;
+        REQUIRE_FALSE(w.build(b));
+    }
+    SECTION(".lma writer rejects sample_rate == 0") {
+        fio::LmaWriter w;
+        w.sample_rate = 0;
+        w.channels = 1;
+        w.pcm = pattern_bytes(8 * 2, 3);
+        std::vector<u8> b;
+        REQUIRE_FALSE(w.build(b));
+    }
+    SECTION(".lma parser rejects a patched sample_rate == 0") {
+        fio::LmaWriter w;
+        w.sample_rate = 48000;
+        w.channels = 1;
+        w.pcm = pattern_bytes(8 * 2, 4);
+        std::vector<u8> b;
+        REQUIRE(w.build(b));
+        const u32 zero = 0;
+        std::memcpy(b.data() + offsetof(fio::LmaHeader, sample_rate), &zero, sizeof(zero));
+        fio::LmaView v;
+        REQUIRE_FALSE(fio::parse_lma(b.data(), b.size(), v));
+    }
 }
 
 TEST_CASE("asset/formats: .lmm rejects a submesh range past the index buffer",
