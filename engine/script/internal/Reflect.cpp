@@ -24,6 +24,7 @@ extern "C" {
 #endif
 
 #include <deque>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -32,18 +33,32 @@ namespace psynder::script {
 
 namespace {
 
+// Transparent string hash so name lookups accept a std::string_view without
+// allocating a temporary std::string (these run on the live Lua path). A
+// single string_view overload also hashes std::string / const char* keys via
+// their implicit conversions, so it serves the stored std::string keys too.
+struct StringHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view s) const noexcept {
+        return std::hash<std::string_view>{}(s);
+    }
+};
+
+template <class V>
+using NameMap = std::unordered_map<std::string, V, StringHash, std::equal_to<>>;
+
 // Stable-address storage. std::deque never relocates existing elements on
 // push_back, so the pointers we hand out (and the spans into the name arrays)
 // stay valid for the life of the process.
 struct Registry {
-    std::deque<ComponentReflection>                            components;
-    std::vector<const ComponentReflection*>                    component_ptrs;
-    std::unordered_map<std::string, const ComponentReflection*> component_by_name;
+    std::deque<ComponentReflection>         components;
+    std::vector<const ComponentReflection*> component_ptrs;
+    NameMap<const ComponentReflection*>     component_by_name;
 
-    std::deque<SystemReflection>                            systems;
-    std::vector<const SystemReflection*>                    system_ptrs;
-    std::unordered_map<std::string, const SystemReflection*> system_by_name;
-    std::deque<std::vector<const char*>>                    name_arrays;
+    std::deque<SystemReflection>         systems;
+    std::vector<const SystemReflection*> system_ptrs;
+    NameMap<const SystemReflection*>     system_by_name;
+    std::deque<std::vector<const char*>> name_arrays;
 };
 
 Registry& registry() {
@@ -101,7 +116,7 @@ const ComponentReflection* register_component_reflection(const char* name,
 
 const ComponentReflection* find_component_reflection(std::string_view name) noexcept {
     Registry& r = registry();
-    auto it = r.component_by_name.find(std::string{name});
+    auto it = r.component_by_name.find(name);  // heterogeneous: no allocation
     return it == r.component_by_name.end() ? nullptr : it->second;
 }
 
@@ -133,7 +148,7 @@ const SystemReflection* register_system_reflection(
 
 const SystemReflection* find_system_reflection(std::string_view name) noexcept {
     Registry& r = registry();
-    auto it = r.system_by_name.find(std::string{name});
+    auto it = r.system_by_name.find(name);  // heterogeneous: no allocation
     return it == r.system_by_name.end() ? nullptr : it->second;
 }
 

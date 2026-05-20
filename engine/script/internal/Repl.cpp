@@ -33,6 +33,7 @@ extern "C" {
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -51,11 +52,13 @@ namespace {
 // outlives any number of Vm start/shutdown cycles.
 std::atomic<bool> g_console_registered{false};
 
-// Thread that started the VM (Vm::start -> install_repl). The Lua VM and
-// g_capture are single-thread by contract (DESIGN.md §10.5), but Console
-// commands can be dispatched from any thread, so the `lua` command refuses
-// to run anywhere else rather than risk unsynchronised VM access.
-std::thread::id g_script_thread{};
+// Hash of the thread that started the VM, atomically published so the `lua`
+// command's thread check is data-race-free. The Lua VM and g_capture are
+// single-thread by contract (DESIGN.md §10.5), but Console commands can be
+// dispatched from any thread; the command refuses to run anywhere else. The
+// script thread is invariant (the dedicated game thread), so this is published
+// once, on first command registration.
+std::atomic<std::size_t> g_script_thread_hash{0};
 
 // Overridden Lua `print`: gather all arguments (honouring __tostring) into a
 // single tab-separated line and hand it to the active sink.
@@ -88,7 +91,8 @@ int l_print(lua_State* L) {
 // line and has no such limitation.
 void lua_console_cmd(std::span<const std::string_view> args,
                      ::psynder::console::Output& out) {
-    if (std::this_thread::get_id() != g_script_thread) {
+    if (std::hash<std::thread::id>{}(std::this_thread::get_id()) !=
+        g_script_thread_hash.load(std::memory_order_relaxed)) {
         out.PrintLine(
             "error: 'lua' must run on the script thread (the Vm is single-thread)");
         return;
@@ -122,16 +126,18 @@ void lua_console_cmd(std::span<const std::string_view> args,
 }  // namespace
 
 void install_repl(lua_State* L) {
-    // Record the owning (script) thread so the `lua` command can reject any
-    // off-thread dispatch. Vm::start() runs on the dedicated game thread.
-    g_script_thread = std::this_thread::get_id();
-
     // Replace the stock base-library print with our console-routing version.
     lua_pushcfunction(L, l_print);
     lua_setglobal(L, "print");
 
-    // Register the developer-console entry point exactly once.
+    // Register the developer-console entry point exactly once, publishing the
+    // owning (script) thread at the same time. Vm::start() runs on the
+    // dedicated game thread, invariant across restarts, so a single
+    // publication is correct and the read in lua_console_cmd is race-free.
     if (!g_console_registered.exchange(true)) {
+        g_script_thread_hash.store(
+            std::hash<std::thread::id>{}(std::this_thread::get_id()),
+            std::memory_order_relaxed);
         ::psynder::console::Console::Get().RegisterCommand(
             "lua", "Evaluate a Lua REPL line against the live script VM",
             lua_console_cmd);
