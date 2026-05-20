@@ -151,7 +151,7 @@ TEST_CASE("post: ACES Narkowicz curve hits the reference values exactly",
     REQUIRE_THAT(static_cast<double>(aces_cpu(10.0f)), WithinAbs(1.0,          kTol));
 }
 
-TEST_CASE("post: ACES curve is monotone-increasing on [0, +inf)",
+TEST_CASE("post: ACES curve is monotone-increasing on positive HDR",
           "[post][tonemap]") {
     // Sanity: ACES is a tone-mapping curve -- brighter input never maps
     // to dimmer output. This catches sign-flip / coefficient-swap edits.

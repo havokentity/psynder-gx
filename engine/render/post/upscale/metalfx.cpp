@@ -46,15 +46,18 @@ MetalFx::~MetalFx()
 
 bool MetalFx::is_supported() const noexcept
 {
-#if defined(PSYNDER_PLATFORM_MACOS) || defined(PSYNDER_GX_PLATFORM_MACOS) || defined(__APPLE__)
-    // Apple Silicon + macOS 13.0 deployment target (CMakePresets enforces
-    // -mmacosx-version-min=14.0, so MetalFX is guaranteed available).
-    // The .mm rewrite will replace this with
-    //   [MTLFXTemporalScalerDescriptor supportsDevice:mtl_device_].
-    return true;
-#else
+    // While evaluate() remains a documented no-op, is_supported() MUST
+    // return false on every platform — otherwise PostProcess::run_frame
+    // would route the upscale request through a stub that writes nothing
+    // to `tonemap_out`, leaving the destination untouched and silently
+    // breaking the upscale path.  Copilot PR #17 review caught the gap.
+    //
+    // The .mm rewrite (M3+) will replace this with a real
+    // `[MTLFXTemporalScalerDescriptor supportsDevice:mtl_device_]` check
+    // and ALSO narrow the platform guard to `__APPLE__ && TARGET_OS_OSX`
+    // so iOS / tvOS / visionOS hosts don't accidentally enter the
+    // macOS-13+-only API path.
     return false;
-#endif
 }
 
 void MetalFx::evaluate(const UpscaleInput& /*input*/)
