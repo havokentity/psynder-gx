@@ -79,6 +79,7 @@ void vk_anchor_unused() noexcept {}
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <vector>
 
@@ -782,10 +783,18 @@ struct Entry {
     VkPipelineBindPoint   bind_point  = VK_PIPELINE_BIND_POINT_GRAPHICS;
 };
 
+// Writers: psynder_gx_vk_register_pipeline() called from lane 08's worker
+// threads after a VkPipeline is built.  Reader: bind_pipeline() runs on
+// the render thread.  Both take g_mu.  The shim is small (<= 64 entries)
+// and lookups are linear, so a plain std::mutex is fine — readers and
+// writers don't contend much in practice (registration is bursty at
+// startup / hot-reload, binds are per-frame).
 static Entry        g_entries[kMaxPipelines] = {};
 static std::uint32_t g_count = 0;
+static std::mutex   g_mu;
 
-static Entry* find(std::uint32_t id) {
+// Locked find — caller must already hold g_mu.
+static Entry* find_locked(std::uint32_t id) {
     for (std::uint32_t i = 0; i < g_count; ++i) {
         if (g_entries[i].id == id) return &g_entries[i];
     }
@@ -806,7 +815,6 @@ void psynder_gx_vk_register_pipeline(std::uint32_t id,
                                      void*         vk_pipeline_layout,
                                      std::uint32_t bind_point /*0=gfx 1=compute*/) {
     namespace s = psynder::gpu::vk_be::vk_pipeline_shim;
-    auto& cnt = s::g_count;
     VkPipelineBindPoint bp = (bind_point == 1)
         ? VK_PIPELINE_BIND_POINT_COMPUTE
         : VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -816,7 +824,12 @@ void psynder_gx_vk_register_pipeline(std::uint32_t id,
     // under VK_DEFINE_NON_DISPATCHABLE_HANDLE's default pointer form.
     VkPipeline       pso    = reinterpret_cast<VkPipeline>(vk_pipeline);
     VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(vk_pipeline_layout);
-    if (auto* e = s::find(id)) {
+
+    // Lock the shim — lane 08 may call this from a worker thread while the
+    // render thread is in bind_pipeline() walking g_entries.
+    std::lock_guard<std::mutex> _(s::g_mu);
+    auto& cnt = s::g_count;
+    if (auto* e = s::find_locked(id)) {
         e->pipeline   = pso;
         e->layout     = layout;
         e->bind_point = bp;
@@ -982,8 +995,25 @@ void VulkanBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHan
         w->bound_pipeline_layout = VK_NULL_HANDLE;
         return;
     }
-    auto* e = vk_pipeline_shim::find(h.id);
-    if (!e || e->pipeline == VK_NULL_HANDLE) {
+    // Snapshot the shim under the lock so a concurrent
+    // psynder_gx_vk_register_pipeline() from a worker thread doesn't tear
+    // the read.  Copy the small Entry POD out then release the lock —
+    // vkCmdBindPipeline() doesn't need to be serialised against the shim.
+    VkPipeline           pipeline    = VK_NULL_HANDLE;
+    VkPipelineLayout     layout      = VK_NULL_HANDLE;
+    VkPipelineBindPoint  bind_point  = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    bool                 found       = false;
+    {
+        std::lock_guard<std::mutex> _(vk_pipeline_shim::g_mu);
+        if (auto* e = vk_pipeline_shim::find_locked(h.id);
+            e && e->pipeline != VK_NULL_HANDLE) {
+            pipeline   = e->pipeline;
+            layout     = e->layout;
+            bind_point = e->bind_point;
+            found      = true;
+        }
+    }
+    if (!found) {
         // Lane 08 hasn't published a VkPipeline for this handle yet.
         static std::uint32_t s_last_warned_id = 0;
         if (h.id != s_last_warned_id) {
@@ -997,10 +1027,10 @@ void VulkanBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHan
         w->bound_pipeline_layout = VK_NULL_HANDLE;
         return;
     }
-    w->bound_pipeline        = e->pipeline;
-    w->bound_pipeline_layout = e->layout;
-    w->bound_bind_point      = e->bind_point;
-    vkCmdBindPipeline(w->cb, e->bind_point, e->pipeline);
+    w->bound_pipeline        = pipeline;
+    w->bound_pipeline_layout = layout;
+    w->bound_bind_point      = bind_point;
+    vkCmdBindPipeline(w->cb, bind_point, pipeline);
 }
 
 void VulkanBackend::bind_vertex_buffer(CmdBuffer* cmd, std::uint32_t binding,
