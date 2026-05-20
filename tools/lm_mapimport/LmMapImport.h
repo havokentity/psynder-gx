@@ -88,6 +88,9 @@ struct ImportStats {
 // ─────────────────────────────────────────────────────────────────────────
 
 inline void put_bytes(std::vector<std::uint8_t>& out, const void* src, std::size_t n) {
+    if (n == 0) {
+        return;  // src may be nullptr for an empty field; avoid an invalid range
+    }
     const auto* p = static_cast<const std::uint8_t*>(src);
     out.insert(out.end(), p, p + n);
 }

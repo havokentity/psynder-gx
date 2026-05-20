@@ -396,6 +396,9 @@ inline int locate_leaf(const std::vector<BuildNode>& nodes, int root_code, Vec3 
 // format's documented stride). See INTEGRATION.txt for the 44-vs-48 note.
 // ─────────────────────────────────────────────────────────────────────────
 inline void write_le_bytes(std::vector<std::uint8_t>& out, const void* src, std::size_t n) {
+    if (n == 0) {
+        return;  // src may be nullptr for an empty chunk; avoid an invalid range
+    }
     const auto* p = static_cast<const std::uint8_t*>(src);
     out.insert(out.end(), p, p + n);
 }
@@ -562,16 +565,21 @@ inline bool compile_map(const lmtools::MapFile& map,
             }
         }
         std::size_t inside_empty = 0;
+        std::size_t any_empty = 0;
         for (std::size_t i = 0; i < leaf_count; ++i) {
-            if (!leaves[i].solid && !is_void[i]) {
-                ++inside_empty;
+            if (!leaves[i].solid) {
+                ++any_empty;
+                if (!is_void[i]) {
+                    ++inside_empty;
+                }
             }
             leaves[i].reachable_void = (is_void[i] != 0);
         }
-        // If every empty cell flooded to the boundary there is no sealed
-        // interior (a leak, or an open/unbounded map). Keep all empty cells
-        // rather than emit a faceless, clusterless blob.
-        if (inside_empty == 0 && have_world) {
+        // A leak is when empty space EXISTS but all of it flooded to the
+        // boundary (no sealed interior). A fully-solid map (any_empty == 0)
+        // is not a leak — it just has zero clusters. In the leak case keep
+        // all empty cells rather than emit a faceless, clusterless blob.
+        if (any_empty > 0 && inside_empty == 0 && have_world) {
             leaked = true;
             for (BuildLeaf& l : leaves) {
                 l.reachable_void = false;

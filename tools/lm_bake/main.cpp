@@ -136,10 +136,13 @@ int main(int argc, char** argv) {
             const char* p = next_arg(name);
             if (!p)
                 return false;
+            errno = 0;
             char* end = nullptr;
-            const long v = std::strtol(p, &end, 10);
-            if (end == p || *end != '\0' || v < 0) {
-                std::fprintf(stderr, "lm_bake: error: %s expects a non-negative integer\n", name);
+            const unsigned long long v = std::strtoull(p, &end, 10);
+            // Reject empty/garbage, negatives (strtoull would wrap them),
+            // ERANGE, and anything beyond u32 so values can't truncate/wrap.
+            if (end == p || *end != '\0' || p[0] == '-' || errno != 0 || v > 0xFFFFFFFFull) {
+                std::fprintf(stderr, "lm_bake: error: %s expects an integer in [0, 4294967295]\n", name);
                 return false;
             }
             dst = static_cast<std::uint32_t>(v);

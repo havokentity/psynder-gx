@@ -703,6 +703,11 @@ inline bool bake(const Scene& scene,
     tracer.scene = &scene;
     tracer.bvh = &bvh;
     tracer.opts = opts;
+    // The indirect gather branches `samples` rays at each bounce, so cost is
+    // ~samples^bounces; clamp both so a careless (or overflowing) value can't
+    // wedge the bake into an effectively unbounded run.
+    tracer.opts.samples = std::min(opts.samples, 4096u);
+    tracer.opts.bounces = std::min(opts.bounces, 8u);
 
     std::uint32_t texels_lit = 0u;
     double max_lum = 0.0;
