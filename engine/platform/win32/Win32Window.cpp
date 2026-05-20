@@ -275,33 +275,30 @@ LRESULT CALLBACK Win32Window::static_wnd_proc(
     HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     if (msg == WM_NCCREATE) {
-        auto* cs   = reinterpret_cast<CREATESTRUCTW*>(lparam);
-        auto* self = cs ? reinterpret_cast<Win32Window*>(cs->lpCreateParams)
-                        : nullptr;
-        // Bind the real HWND before the first WM_NCCALCSIZE. wnd_proc() routes
-        // unhandled messages to DefWindowProcW(hwnd_, ...) using the member
-        // handle, but during CreateWindowExW the ctor has not yet assigned
-        // hwnd_ (it is set only after the call returns). Without this, the
-        // creation-time WM_NCCALCSIZE hit DefWindowProcW(NULL, ...), which
-        // reserves no non-client area — the client filled the whole window and
-        // no caption/border was drawn (the "borderless window" bug).
-        //
-        // self is normally the Win32Window* we passed as CreateWindowExW's
-        // lpParam; guard anyway so a foreign WM_NCCREATE (null lParam / not
-        // our pointer) can't crash creation — fall through to DefWindowProcW.
-        if (self) {
-            self->hwnd_ = hwnd;
-            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        // Associate the Win32Window* (passed as CreateWindowExW's lpParam)
+        // with the HWND so subsequent messages route back to the instance.
+        // Guard the cast so a foreign/null lParam can't crash creation.
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        if (cs) {
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                                reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
         }
+        // Deliberately do NOT touch the Win32Window member hwnd_ here: the
+        // ctor has not assigned it yet (CreateWindowExW has not returned).
+        // wnd_proc() takes the message HWND as a parameter and uses that, so
+        // the creation-time WM_NCCALCSIZE is dispatched with a valid HWND and
+        // the non-client frame (caption + border) is computed correctly.
+        // Depending on the member here was the original borderless-window bug;
+        // routing the message HWND through instead mirrors GLFW / demont-engine.
         return ::DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     auto* self = reinterpret_cast<Win32Window*>(
         ::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!self) return ::DefWindowProcW(hwnd, msg, wparam, lparam);
-    return self->wnd_proc(msg, wparam, lparam);
+    return self->wnd_proc(hwnd, msg, wparam, lparam);
 }
 
-LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
+LRESULT Win32Window::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     auto& in = input_singleton();
     switch (msg) {
         case WM_CLOSE:
@@ -316,8 +313,8 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
             // Engine drives presents from its frame loop; validate the dirty
             // rect so WM_PAINT doesn't keep re-queuing.
             PAINTSTRUCT ps{};
-            ::BeginPaint(hwnd_, &ps);
-            ::EndPaint(hwnd_, &ps);
+            ::BeginPaint(hwnd, &ps);
+            ::EndPaint(hwnd, &ps);
             return 0;
         }
 
@@ -382,12 +379,12 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
 
         case WM_INPUT:
             on_wm_input(lparam);
-            return ::DefWindowProcW(hwnd_, msg, wparam, lparam);
+            return ::DefWindowProcW(hwnd, msg, wparam, lparam);
 
         default:
             break;
     }
-    return ::DefWindowProcW(hwnd_, msg, wparam, lparam);
+    return ::DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 }  // namespace psynder::platform::win32
