@@ -2,6 +2,7 @@
 // Psynder — Lane 06 refittable BVH (see Spatial.h for the design overview).
 
 #include <algorithm>
+#include <cassert>
 #include <vector>
 
 #include "Spatial.h"
@@ -169,7 +170,13 @@ void Bvh::build_levels() {
 void Bvh::refit(std::span<const math::Aabb> aabbs) {
     if (nodes_.empty())
         return;
-    prims_ = aabbs;  // re-borrow; length must equal the built primitive count
+    // order_ indexes into the primitive array, so a different count would read
+    // prims_ out of bounds in the leaf-bounds pass and in queries. Reject the
+    // mismatch — a topology/count change must go through build().
+    assert(aabbs.size() == order_.size());
+    if (aabbs.size() != order_.size())
+        return;
+    prims_ = aabbs;  // re-borrow; length equals the built primitive count
 
     jobs::JobSystem& js = jobs::JobSystem::Get();
     const u32 groups = static_cast<u32>(level_offsets_.size()) - 1u;

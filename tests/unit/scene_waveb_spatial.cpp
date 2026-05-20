@@ -172,6 +172,33 @@ TEST_CASE("scene spatial BVH matches brute force", "[scene][spatial][bvh]") {
     }
 }
 
+TEST_CASE("scene spatial ray robust to axis-aligned directions", "[scene][spatial][bvh]") {
+    // Zero direction components make the slab reciprocal +/-inf; verify the BVH
+    // ray query stays consistent with brute force (no NaN-poisoned misses).
+    const std::vector<math::Aabb> boxes = make_proxies(4000, 88);
+    const std::span<const math::Aabb> span{boxes};
+    Bvh bvh;
+    bvh.build(span);
+
+    std::mt19937 rng(17);
+    std::uniform_real_distribution<f32> pos(0.0f, kSceneMetres);
+    const math::Vec3 dirs[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    std::vector<u32> got, ref;
+    for (const math::Vec3 d : dirs) {
+        for (int q = 0; q < 8; ++q) {
+            Ray ray;
+            ray.origin = {pos(rng), pos(rng), pos(rng)};
+            ray.dir = d;
+            ray.tmax = kSceneMetres * 2.0f;
+            got.clear();
+            ref.clear();
+            bvh.query_ray(ray, got);
+            brute::query_ray(span, ray, ref);
+            REQUIRE(sorted(got) == sorted(ref));
+        }
+    }
+}
+
 TEST_CASE("scene spatial uniform grid matches brute force", "[scene][spatial][grid]") {
     const std::vector<math::Aabb> boxes = make_proxies(8000, 4242);
     const std::span<const math::Aabb> span{boxes};

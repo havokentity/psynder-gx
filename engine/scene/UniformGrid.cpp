@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "Spatial.h"
@@ -23,7 +24,8 @@ u32 cell_hash(i32 x, i32 y, i32 z) noexcept {
 
 usize next_pow2(usize x) noexcept {
     usize p = 16;
-    while (p < x)
+    // Stop before the shift would wrap to 0, which would spin the loop forever.
+    while (p < x && (p << 1u) > p)
         p <<= 1u;
     return p;
 }
@@ -111,6 +113,12 @@ void UniformGrid::rebuild_internal() {
         total += static_cast<usize>(r.x1 - r.x0 + 1) * static_cast<usize>(r.y1 - r.y0 + 1) *
                  static_cast<usize>(r.z1 - r.z0 + 1);
     }
+
+    // Keep the flat layout within the u32 offsets (entries_/run) and u32 mask_
+    // used below. ~1e9 (proxy, cell) insertions is unreachable at engine scale
+    // (2 km^2 maps); on the absurd case leave an empty grid rather than overflow.
+    if (total > (static_cast<usize>(1) << 30))
+        return;
 
     const usize cap = next_pow2(total * 2u);  // load factor <= 0.5
     table_.assign(cap, Cell{});

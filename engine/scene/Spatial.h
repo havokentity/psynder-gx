@@ -28,6 +28,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <span>
 #include <utility>
@@ -113,29 +114,31 @@ PSY_FORCEINLINE bool aabb_intersects_sphere(const math::Aabb& b, math::Vec3 c, f
     return aabb_dist2_to_point(b, c) <= r * r;
 }
 
-// Branchless slab test against a precomputed reciprocal direction. Robust for
-// finite `inv_dir`; rays used by the engine carry an all-nonzero direction so
-// the 0*inf indeterminate form on a face boundary (measure-zero) never arises.
+// Branchless slab test against a precomputed reciprocal direction. Uses
+// fmin/fmax (not std::min/std::max) so a zero direction component — whose
+// reciprocal is +/-inf — is handled robustly: fmin/fmax discard the NaN that a
+// 0*inf product would yield on a slab boundary, so the slab simply imposes no
+// constraint instead of poisoning the result. Axis-aligned rays are fine.
 PSY_FORCEINLINE bool aabb_intersects_ray(const math::Aabb& b,
                                          math::Vec3 origin,
                                          math::Vec3 inv_dir,
                                          f32 tmax) noexcept {
     const f32 tx1 = (b.min.x - origin.x) * inv_dir.x;
     const f32 tx2 = (b.max.x - origin.x) * inv_dir.x;
-    f32 tmin = std::min(tx1, tx2);
-    f32 texit = std::max(tx1, tx2);
+    f32 tmin = std::fmin(tx1, tx2);
+    f32 texit = std::fmax(tx1, tx2);
 
     const f32 ty1 = (b.min.y - origin.y) * inv_dir.y;
     const f32 ty2 = (b.max.y - origin.y) * inv_dir.y;
-    tmin = std::max(tmin, std::min(ty1, ty2));
-    texit = std::min(texit, std::max(ty1, ty2));
+    tmin = std::fmax(tmin, std::fmin(ty1, ty2));
+    texit = std::fmin(texit, std::fmax(ty1, ty2));
 
     const f32 tz1 = (b.min.z - origin.z) * inv_dir.z;
     const f32 tz2 = (b.max.z - origin.z) * inv_dir.z;
-    tmin = std::max(tmin, std::min(tz1, tz2));
-    texit = std::min(texit, std::max(tz1, tz2));
+    tmin = std::fmax(tmin, std::fmin(tz1, tz2));
+    texit = std::fmin(texit, std::fmax(tz1, tz2));
 
-    return texit >= std::max(tmin, 0.0f) && tmin <= tmax;
+    return texit >= std::fmax(tmin, 0.0f) && tmin <= tmax;
 }
 
 PSY_FORCEINLINE math::Vec3 ray_inv_dir(const Ray& ray) noexcept {
