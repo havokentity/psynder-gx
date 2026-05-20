@@ -87,7 +87,9 @@ enum class Format : std::uint16_t {
     Undefined,
     Rgba8Unorm,
     Rgba8Srgb,
+    Bgra8Unorm,       // linear swapchain-compatible format
     Bgra8Srgb,        // common swapchain format on macOS/Vulkan
+    R8Unorm,          // single-channel (font glyph atlases, SDF masks)
     Rgba16Float,
     Rgba32Float,
     Depth32Float,
@@ -123,6 +125,36 @@ struct TextureDesc {
     std::uint32_t usage  = 0; // bitmask of TextureUsage
     HeapKind      heap   = HeapKind::DeviceLocal;
     const char*   debug_name = nullptr;
+
+    // ─── Optional: synchronous mip-0 upload at create time ─────────────────
+    //
+    // M1 contract (DESIGN §4.4, no mid-frame GPU allocations applies to the
+    // texture creation only — uploads bundled into create_texture run during
+    // level load / startup, never inside the frame loop):
+    //
+    //   * initial_data: tightly-packed mip-0 pixel buffer (row pitch =
+    //     width * bytes_per_pixel(format)). nullptr leaves the texture
+    //     uninitialised (prior behaviour preserved).
+    //   * initial_data_size: byte count of the buffer above. MUST equal
+    //     width * height * bytes_per_pixel(format) — backends reject
+    //     mismatches by returning an invalid Handle (no crash, log once).
+    //
+    // Supported M1 formats: Rgba8Unorm, Bgra8Unorm, R8Unorm. Anything else
+    // (including SRGB variants and compressed BC*/ASTC*) is rejected at the
+    // upload path — M3 will broaden this when the offline cooker (lane 09)
+    // grows BC7 / ASTC pipelines. mip-1+ array slices and 3D textures are
+    // also deferred to M3 (synchronous mip generation + cube map upload).
+    //
+    // Backend mapping:
+    //   Metal (Apple Silicon, unified memory) — direct
+    //     [id<MTLTexture> replaceRegion:mipmapLevel:withBytes:bytesPerRow:].
+    //     No staging buffer needed; the texture's storage is host-visible.
+    //   Vulkan — host-visible staging buffer + vkCmdCopyBufferToImage on a
+    //     one-shot transfer command buffer, with UNDEFINED → TRANSFER_DST
+    //     → SHADER_READ_ONLY layout transitions. Synchronous (waits before
+    //     returning). M3 will batch uploads through the JobSystem.
+    const void* initial_data      = nullptr;
+    std::size_t initial_data_size = 0;
 };
 
 // ─── Device — top-level GPU handle ──────────────────────────────────────
