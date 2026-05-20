@@ -98,6 +98,10 @@ TEST_CASE("script: reflect exposes a macro-declared component", "[script][reflec
     // An unknown component reflects as nil, not an error.
     REQUIRE(fix.vm().execute_repl("reflect.component('NotAComponent')", out));
     REQUIRE(out == "nil");
+
+    // The reflect global is read-only: writes are rejected, not silently kept.
+    REQUIRE_FALSE(fix.vm().execute_repl("reflect.components = nil", out));
+    REQUIRE(out.find("read-only") != std::string::npos);
 }
 
 TEST_CASE("script: reflect exposes the frozen GX components", "[script][reflect]") {
@@ -122,11 +126,11 @@ TEST_CASE("script: reflect exposes the frozen GX components", "[script][reflect]
 
     // reflect.components() lists the registered set.
     REQUIRE(fix.vm().execute_repl(
-        "(function()"
-        "  for _, n in ipairs(reflect.components()) do"
-        "    if n == 'CameraComponent' then return true end"
-        "  end"
-        "  return false"
+        "(function()\n"
+        "  for _, n in ipairs(reflect.components()) do\n"
+        "    if n == 'CameraComponent' then return true end\n"
+        "  end\n"
+        "  return false\n"
         "end)()",
         out));
     REQUIRE(out == "true");

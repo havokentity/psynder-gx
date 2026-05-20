@@ -51,6 +51,7 @@
 #include <initializer_list>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 namespace psynder::script {
 
@@ -182,8 +183,13 @@ inline constexpr FieldKind field_kind_v<Handle<Tag>> = FieldKind::Handle;
 // Use at namespace scope only; requires at least one PSYNDER_SCRIPT_FIELD.
 #define PSYNDER_SCRIPT_COMPONENT(Type, ...)                                 \
     namespace {                                                             \
+    static_assert(::std::is_standard_layout_v<Type>,                        \
+                  "PSYNDER_SCRIPT_COMPONENT requires a standard-layout "    \
+                  "type (offsetof is UB otherwise)");                       \
     [[maybe_unused]] const ::psynder::script::FieldDesc                     \
         psy_refl_fields_##Type[] = {__VA_ARGS__};                           \
+    static_assert(sizeof(psy_refl_fields_##Type) != 0,                      \
+                  "PSYNDER_SCRIPT_COMPONENT requires at least one field");  \
     [[maybe_unused]] const ::psynder::script::ComponentReflection* const    \
         psy_refl_##Type = ::psynder::script::register_component_reflection( \
             #Type, ::psynder::scene::component_id<Type>(),                  \

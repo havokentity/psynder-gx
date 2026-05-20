@@ -258,15 +258,35 @@ const luaL_Reg kReflectFns[] = {
     {nullptr, nullptr},
 };
 
+// __newindex handler for the read-only `reflect` proxy: rejects all writes.
+int l_reflect_readonly(lua_State* L) {
+    return luaL_error(L, "reflect is read-only");
+}
+
 }  // namespace
 
 void install_reflect_api(lua_State* L) {
     // Force GX component/system registrations to be linked + initialised.
     anchor_gx_reflections();
 
-    lua_newtable(L);
+    // Expose the function table through a locked read-only proxy: reads go via
+    // __index, every write raises, and the metatable is hidden so a script
+    // cannot peel the guard off (`reflect.components = nil` errors).
+    lua_newtable(L);  // fns
     luaL_setfuncs(L, kReflectFns, 0);
-    lua_setglobal(L, "reflect");
+
+    lua_newtable(L);  // proxy
+    lua_newtable(L);  // metatable
+    lua_pushvalue(L, -3);
+    lua_setfield(L, -2, "__index");  // mt.__index = fns
+    lua_pushcfunction(L, l_reflect_readonly);
+    lua_setfield(L, -2, "__newindex");  // mt.__newindex = reject
+    lua_pushboolean(L, 0);
+    lua_setfield(L, -2, "__metatable");  // hide the metatable
+    lua_setmetatable(L, -2);             // setmetatable(proxy, mt)
+
+    lua_setglobal(L, "reflect");  // _G.reflect = proxy
+    lua_pop(L, 1);                // drop fns
 }
 
 }  // namespace detail
