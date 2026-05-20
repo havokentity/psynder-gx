@@ -29,7 +29,7 @@ option(PSYNDER_GX_ENABLE_SANITIZERS   "Enable ASan + UBSan (debug Linux/Mac only
 option(PSYNDER_GX_ENABLE_AVX2         "Build x86-64 AVX2 fast-path kernels"                       ON)
 option(PSYNDER_GX_ENABLE_AVX512       "Build x86-64 AVX-512 wide-path kernels (opportunistic)"    ON)
 # AVX-512 is ON by default because lane 03-simd uses per-function target
-# attributes (__attribute__((target("avx512f,avx512bw,avx512vl")))) on every
+# attributes (__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq")))) on every
 # wide kernel in Simd_avx512.cpp.  The compiler only emits AVX-512 inside
 # those decorated functions; auto-vectorisation elsewhere stays at the SSE4.2
 # / AVX2 baseline, and Dispatch.cpp gates every call on the runtime tier

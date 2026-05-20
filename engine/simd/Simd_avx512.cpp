@@ -37,7 +37,7 @@ namespace psynder::simd {
 
 // f32x16 stores two AVX2 halves (defined in Simd_internal.h).  Inside the
 // target-attributed bodies below the compiler may freely use _mm512_* because
-// the attribute has enabled AVX-512F/BW/VL for each function scope.
+// the attribute has enabled AVX-512F/BW/VL/DQ for each function scope.
 
 PSY_AVX512 f32x16 add16(f32x16 a, f32x16 b) noexcept {
     // Reinterpret the two __m256 halves into a __m512, add, split back.

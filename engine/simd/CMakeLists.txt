@@ -9,7 +9,7 @@ psynder_add_lane(simd LINKS psynder_math psynder_core)
 # (2017); runtime dispatch still gates usage on CpuFeatures::avx2.
 #
 # AVX-512 wide path: NOT a TU-wide flag any more. Simd_avx512.cpp carries
-# __attribute__((target("avx512f,avx512bw,avx512vl"))) on each kernel so the
+# __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq"))) on each kernel so the
 # compiler emits AVX-512 instructions only inside those function bodies.
 # The rest of psynder_simd compiles at SSE4.2 / AVX2 baseline — auto-
 # vectorisation never touches AVX-512 elsewhere (the SIGILL fix).
@@ -30,7 +30,7 @@ if(PSYNDER_ARCH_X64 AND NOT MSVC)
     endif()
 
     # No TU-wide -mavx512f. The wide-path kernels in Simd_avx512.cpp carry
-    # __attribute__((target("avx512f,avx512bw,avx512vl"))) per-function;
+    # __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq"))) per-function;
     # no extra compile flag is needed for that TU either — the attribute
     # unlocks the intrinsics locally. PSYNDER_ENABLE_AVX512 is kept as a
     # CMake option so downstream consumers can query whether the wide path
