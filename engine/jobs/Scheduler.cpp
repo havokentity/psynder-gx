@@ -51,6 +51,9 @@ constexpr u32 kJobPoolMask = kJobPoolPow2 - 1u;
 constexpr u32 kClosedDeps = 0xFFFFFFFFu;  // dependents-stack "job finished" marker
 constexpr usize kFiberStack = 128u * 1024u;
 constexpr u32 kMaxWorkers = 256u;
+// Upper bound on parallel_for chunk count: keeps the fan-out (and the in-flight
+// job-slot pressure + the chunk descriptor vector) far below the slot ring.
+constexpr usize kMaxParChunks = usize{1} << 14;  // 16384
 
 struct JobFiber;  // forward
 
@@ -109,7 +112,8 @@ struct Worker {
 struct Sched {
     std::atomic<bool> running{false};
     std::atomic<bool> stopping{false};
-    Backend backend = Backend::Thread;
+    Backend backend = Backend::Thread;                      // backend workers were launched with
+    std::atomic<Backend> active_backend{Backend::Thread};   // reflects runtime fiber->thread fallback
     PoolPlan plan;
     u32 total_workers = 0;
 
@@ -249,7 +253,24 @@ void push_resumable(JobFiber* jf) {
 
 // ---- job pool + completion ----------------------------------------------
 
+void execute_job(u32 id);  // fwd: alloc_job help-drains while the slot ring is full
+
 JobHandle alloc_job(const JobDesc& desc) {
+    // Backpressure: if the whole slot ring is live, advancing the monotonic
+    // allocator would lap a still-live slot and corrupt its handle/generation.
+    // Help-drain ready work (or yield) until a slot frees instead of silently
+    // overwriting it. parallel_for caps its chunk fan-out far below the ring,
+    // so this is a safety net for pathological direct-submit storms rather than
+    // a steady-state path; draining ready jobs keeps it deadlock-free.
+    while (g->live_jobs.load(std::memory_order_acquire) >= static_cast<i64>(kJobPoolPow2)) {
+        u32 drain_id = 0;
+        if (try_get_job(t_worker, drain_id)) {
+            execute_job(drain_id);
+        } else {
+            std::this_thread::yield();
+        }
+    }
+
     const u64 c = g->alloc_counter.fetch_add(1, std::memory_order_relaxed);
     const u32 slot = static_cast<u32>(c) & kJobPoolMask;
     const u32 gen = static_cast<u32>(c >> 16) + 1u;
@@ -360,8 +381,12 @@ void idle_wait(Worker* /*self*/) {
     g->idle_count.fetch_add(1, std::memory_order_release);
     {
         std::unique_lock<std::mutex> lk(g->idle_mu);
-        g->idle_cv.wait_for(lk, std::chrono::microseconds(300),
-                            [] { return g->stopping.load(std::memory_order_acquire); });
+        // No predicate: a plain timed wait returns on notify_one() from
+        // wake_one_worker() (so submitting work actually cuts latency), on a
+        // spurious wakeup, or at the timeout. The worker loop re-checks for
+        // ready work and the stopping flag on return, so any wakeup is safe;
+        // the short timeout is just a backstop against a missed notification.
+        g->idle_cv.wait_for(lk, std::chrono::microseconds(300));
     }
     g->idle_count.fetch_sub(1, std::memory_order_release);
 }
@@ -512,7 +537,9 @@ void worker_thread_main(Worker* self) {
             t_worker = nullptr;
             return;
         }
-        // fiber_for_thread() failed -> degrade to the thread backend.
+        // fiber_for_thread() failed -> degrade to the thread backend, and
+        // publish the fallback so sched_active_backend() reports it honestly.
+        g->active_backend.store(Backend::Thread, std::memory_order_release);
     }
     thread_sched_loop(self);
     t_worker = nullptr;
@@ -552,7 +579,9 @@ Backend preferred_backend() noexcept { return g_pref_backend.load(std::memory_or
 
 bool sched_running() noexcept { return g != nullptr && g->running.load(std::memory_order_acquire); }
 
-Backend sched_active_backend() noexcept { return g ? g->backend : Backend::Thread; }
+Backend sched_active_backend() noexcept {
+    return g ? g->active_backend.load(std::memory_order_acquire) : Backend::Thread;
+}
 
 u32 sched_worker_count() noexcept { return g ? g->total_workers : 0u; }
 
@@ -586,6 +615,7 @@ void sched_start(u32 worker_count) {
         }
     }
     s->backend = backend;
+    s->active_backend.store(backend, std::memory_order_relaxed);
 
     s->jobs = std::make_unique<Job[]>(kJobPoolPow2);
     s->stopping.store(false, std::memory_order_relaxed);
@@ -668,9 +698,16 @@ void sched_parallel_for(usize begin, usize end, usize grain,
     if (begin >= end || !body) {
         return;
     }
-    const usize g_grain = grain ? grain : usize{1};
+    usize eff_grain = grain ? grain : usize{1};
     const usize span = end - begin;
-    const usize nchunks = (span + g_grain - 1) / g_grain;
+    usize nchunks = (span + eff_grain - 1) / eff_grain;
+    // Coarsen the grain if the requested chunk count would overrun the cap. The
+    // body still covers [begin,end) exactly once, so this is over-decomposition
+    // tuning, not a behaviour change.
+    if (nchunks > kMaxParChunks) {
+        eff_grain = (span + kMaxParChunks - 1) / kMaxParChunks;
+        nchunks = (span + eff_grain - 1) / eff_grain;
+    }
     if (nchunks <= 1) {
         body(begin, end);
         return;
@@ -679,8 +716,8 @@ void sched_parallel_for(usize begin, usize end, usize grain,
     std::atomic<i64> remaining{static_cast<i64>(nchunks)};
     std::vector<ParChunk> chunks(nchunks);
     for (usize k = 0; k < nchunks; ++k) {
-        const usize lo = begin + k * g_grain;
-        usize hi = lo + g_grain;
+        const usize lo = begin + k * eff_grain;
+        usize hi = lo + eff_grain;
         if (hi > end) {
             hi = end;
         }

@@ -122,15 +122,18 @@ TEST_CASE("jobs: parallel_for visits every index exactly once", "[jobs]") {
     constexpr usize kN = 100000;
     for_each_backend([&](detail::Backend backend) {
         PoolGuard guard(backend, 4);
-        std::vector<unsigned char> visited(kN, 0);
+        // Atomic per index: if the scheduler ever double-visited (the failure
+        // mode under test), a plain counter would be a data race (UB) and could
+        // mask the bug. fetch_add keeps the test well-defined regardless.
+        std::vector<std::atomic<int>> visited(kN);
         jobs::JobSystem::Get().parallel_for(0, kN, 1000, [&](usize a, usize b) {
             for (usize i = a; i < b; ++i) {
-                visited[i] = static_cast<unsigned char>(visited[i] + 1);
+                visited[i].fetch_add(1, std::memory_order_relaxed);
             }
         });
         usize ones = 0;
         for (usize i = 0; i < kN; ++i) {
-            if (visited[i] == 1) {
+            if (visited[i].load(std::memory_order_relaxed) == 1) {
                 ++ones;
             }
         }

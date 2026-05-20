@@ -155,8 +155,10 @@ RawTopo probe_linux() {
     }
 
     if (!any_cap) {
-        // No capacity info -> treat as homogeneous.
-        r.perf_phys = static_cast<u32>(ncpu);
+        // No capacity info -> leave perf_phys/eff_phys at 0 so plan_pools()
+        // falls back to hardware::detect().cores_physical. Seeding perf_phys
+        // with the logical-CPU count here would oversubscribe on SMT hosts and
+        // contradict the "one worker per physical core" contract in Topology.h.
         return r;
     }
 
@@ -255,9 +257,15 @@ void bind_calling_thread_to_pool([[maybe_unused]] u32 pool, [[maybe_unused]] u32
     if (cpus.empty()) {
         return;
     }
+    const int cpu = cpus[slot % cpus.size()];
+    // CPU_SET on an id >= CPU_SETSIZE is undefined behaviour (mask overrun) on
+    // large hosts; affinity is best-effort, so skip rather than corrupt.
+    if (cpu < 0 || cpu >= CPU_SETSIZE) {
+        return;
+    }
     cpu_set_t set;
     CPU_ZERO(&set);
-    CPU_SET(cpus[slot % cpus.size()], &set);
+    CPU_SET(cpu, &set);
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 #endif
 }

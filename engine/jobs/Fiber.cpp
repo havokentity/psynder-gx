@@ -37,6 +37,7 @@ struct Fiber {
     FiberEntry entry = nullptr;
     void* arg = nullptr;
     bool is_thread = false;
+    bool converted = false;  // true only if WE called ConvertThreadToFiber()
 };
 
 namespace {
@@ -49,7 +50,12 @@ void CALLBACK win_trampoline(void* param) {
 Fiber* fiber_for_thread() {
     auto* f = new Fiber{};
     f->is_thread = true;
-    f->handle = IsThreadAFiber() ? GetCurrentFiber() : ConvertThreadToFiber(nullptr);
+    if (IsThreadAFiber()) {
+        f->handle = GetCurrentFiber();  // already a fiber; we did not convert it
+    } else {
+        f->handle = ConvertThreadToFiber(nullptr);
+        f->converted = f->handle != nullptr;
+    }
     if (!f->handle) {
         delete f;
         return nullptr;
@@ -61,7 +67,9 @@ void fiber_release_thread(Fiber* thread_fiber) {
     if (!thread_fiber) {
         return;
     }
-    if (thread_fiber->is_thread && IsThreadAFiber()) {
+    // Only revert threads we actually promoted; a thread that was already a
+    // fiber before JobSystem touched it must stay one.
+    if (thread_fiber->converted) {
         ConvertFiberToThread();
     }
     delete thread_fiber;
