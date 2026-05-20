@@ -28,6 +28,7 @@
 #include <chrono>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -105,9 +106,8 @@ public:
 
     // ─── Log tap ───────────────────────────────────────────────────────────
     // Forward every psynder::log line into the recorder (FlightCategory::Log).
-    // install adds a sink; uninstall calls log::remove_all_sinks() — the log
-    // API only supports remove-all — so only uninstall when the recorder owns
-    // the sink set.
+    // install adds the tap sink; uninstall removes only that sink (via
+    // log::remove_sink), leaving any other subsystem's sinks untouched.
     void install_log_tap();
     void uninstall_log_tap();
     bool log_tap_installed() const noexcept;

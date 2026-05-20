@@ -236,8 +236,10 @@ bool FlightRecorder::dump_to_file(const char* path) const noexcept {
                                     ev.cat, ev.sev, ev.text, ev.len);
         std::fwrite(line, 1, w, f);
     }
-    std::fclose(f);
-    return true;
+    // ferror() is sticky across every fwrite above; fold it in with the close
+    // result so a partial write or a close failure is reported as failure.
+    const bool write_ok = std::ferror(f) == 0;
+    return (std::fclose(f) == 0) && write_ok;
 }
 
 void FlightRecorder::install_log_tap() {
@@ -247,7 +249,7 @@ void FlightRecorder::install_log_tap() {
 
 void FlightRecorder::uninstall_log_tap() {
     if (!log_tap_.exchange(false)) return;
-    log::remove_all_sinks();
+    log::remove_sink(&log_tap_sink);
 }
 
 bool FlightRecorder::log_tap_installed() const noexcept {
@@ -267,7 +269,10 @@ void FlightRecorder::install_crash_handler(const char* crash_path) {
     g_prev_seh = SetUnhandledExceptionFilter(&crash_seh_filter);
 #else
     for (usize i = 0; i < kNumCrashSignals; ++i) {
-        g_prev_sig[i] = std::signal(kCrashSignals[i], &crash_signal_handler);
+        const SigHandler prev = std::signal(kCrashSignals[i], &crash_signal_handler);
+        // std::signal returns SIG_ERR (non-null) on failure; never keep that
+        // as a "previous handler" we might later try to reinstall.
+        g_prev_sig[i] = (prev == SIG_ERR) ? nullptr : prev;
     }
 #endif
 }
