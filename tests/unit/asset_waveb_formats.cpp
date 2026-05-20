@@ -94,9 +94,9 @@ TEST_CASE("asset/formats: .lmm mesh round-trips byte-for-byte", "[asset][formats
     REQUIRE(v.header.bbox_min[0] == -1.5f);
     REQUIRE(v.header.bbox_max[2] == 0.75f);
 
-    REQUIRE(v.submeshes.size() == 2);
-    REQUIRE(v.submeshes[1].index_start == 9);
-    REQUIRE(v.submeshes[1].material_hash == 0x12345678u);
+    REQUIRE(v.submesh_count() == 2);
+    REQUIRE(v.submesh(1).index_start == 9);
+    REQUIRE(v.submesh(1).material_hash == 0x12345678u);
     REQUIRE(span_equals(v.vertices, w.vertex_data));
     REQUIRE(span_equals(v.indices, w.index_data));
 
@@ -107,7 +107,7 @@ TEST_CASE("asset/formats: .lmm mesh round-trips byte-for-byte", "[asset][formats
     rebuild.index_count = v.header.index_count;
     rebuild.vertex_data.assign(v.vertices.begin(), v.vertices.end());
     rebuild.index_data.assign(v.indices.begin(), v.indices.end());
-    rebuild.submeshes.assign(v.submeshes.begin(), v.submeshes.end());
+    for (u32 i = 0; i < v.submesh_count(); ++i) rebuild.submeshes.push_back(v.submesh(i));
     std::memcpy(rebuild.bbox_min, v.header.bbox_min, sizeof(rebuild.bbox_min));
     std::memcpy(rebuild.bbox_max, v.header.bbox_max, sizeof(rebuild.bbox_max));
     std::vector<u8> rebytes;
@@ -158,8 +158,8 @@ TEST_CASE("asset/formats: .lmt texture round-trips (RGBA8 mipchain + P8 palette)
         REQUIRE(v.header.mip_count == 3);
         REQUIRE(v.header.palette_offset == 0);
         REQUIRE(v.palette.empty());
-        REQUIRE(v.mips.size() == 3);
-        REQUIRE(v.header.pixels_offset == v.mips[0].offset);
+        REQUIRE(v.mip_count() == 3);
+        REQUIRE(v.header.pixels_offset == v.mip(0).offset);
         REQUIRE(span_equals(v.mip_pixels(0), w.mips[0].pixels));
         REQUIRE(span_equals(v.mip_pixels(1), w.mips[1].pixels));
         REQUIRE(span_equals(v.mip_pixels(2), w.mips[2].pixels));
@@ -350,7 +350,7 @@ TEST_CASE("asset/formats: cooked .lmt round-trips through the VFS .lmpak path",
     fio::LmtView v;
     REQUIRE(fio::parse_lmt(b.data, b.bytes, v));
     REQUIRE(v.header.width == 8);
-    REQUIRE(v.mips.size() == 2);
+    REQUIRE(v.mip_count() == 2);
     REQUIRE(span_equals(v.mip_pixels(0), w.mips[0].pixels));
     REQUIRE(span_equals(v.mip_pixels(1), w.mips[1].pixels));
 }

@@ -127,11 +127,22 @@ inline constexpr u32 lma_bytes_per_sample(LmaSampleFmt fmt) noexcept {
 
 struct LmmView {
     LmmHeader header{};
-    std::span<const LmmSubmesh> submeshes{};
-    std::span<const u8> vertices{};  // vertex_count * vertex_stride bytes
-    std::span<const u8> indices{};   // index_count * index_stride bytes
-    u32 index_stride = 0;            // 2 or 4
+    const u8* submesh_data = nullptr;  // submesh_count * sizeof(LmmSubmesh) bytes
+    std::span<const u8> vertices{};    // vertex_count * vertex_stride bytes
+    std::span<const u8> indices{};     // index_count * index_stride bytes
+    u32 index_stride = 0;              // 2 or 4
     bool valid = false;
+
+    u16 submesh_count() const noexcept { return header.submesh_count; }
+    // Submeshes are read out by value via memcpy so the parse is alignment-
+    // safe no matter how the caller's buffer is aligned (the records are
+    // alignas(8), but `data` may point anywhere).
+    LmmSubmesh submesh(u32 i) const noexcept {
+        LmmSubmesh s{};
+        if (i < header.submesh_count)
+            std::memcpy(&s, submesh_data + usize(i) * sizeof(LmmSubmesh), sizeof(s));
+        return s;
+    }
     explicit operator bool() const noexcept { return valid; }
 };
 
@@ -167,8 +178,7 @@ inline bool parse_lmm(const u8* data, usize bytes, LmmView& out) noexcept {
     if (cursor != u64(bytes)) return false;  // no trailing slack
 
     out.header = h;
-    out.submeshes = std::span<const LmmSubmesh>(
-        reinterpret_cast<const LmmSubmesh*>(data + sub_off), h.submesh_count);
+    out.submesh_data = data + sub_off;
     out.vertices = std::span<const u8>(data + vtx_off, static_cast<usize>(vtx_bytes));
     out.indices = std::span<const u8>(data + idx_off, static_cast<usize>(idx_bytes));
     out.index_stride = istride;
@@ -178,14 +188,23 @@ inline bool parse_lmm(const u8* data, usize bytes, LmmView& out) noexcept {
 
 struct LmtView {
     LmtHeader header{};
-    std::span<const u8> palette{};    // kLmtPaletteBytes when P8, else empty
-    std::span<const LmtMip> mips{};
-    const u8* base = nullptr;         // header start; mip i px at base+mip.offset
+    std::span<const u8> palette{};  // kLmtPaletteBytes when P8, else empty
+    const u8* mip_table = nullptr;  // mip_count * sizeof(LmtMip) bytes
+    const u8* base = nullptr;       // header start; mip i px at base + mip.offset
     bool valid = false;
 
+    u32 mip_count() const noexcept { return header.mip_count; }
+    // Read out by value via memcpy: alignment-safe for any caller buffer.
+    LmtMip mip(u32 i) const noexcept {
+        LmtMip m{};
+        if (i < header.mip_count)
+            std::memcpy(&m, mip_table + usize(i) * sizeof(LmtMip), sizeof(m));
+        return m;
+    }
     std::span<const u8> mip_pixels(u32 i) const noexcept {
-        if (!valid || i >= mips.size()) return {};
-        return std::span<const u8>(base + mips[i].offset, mips[i].byte_size);
+        if (!valid || i >= header.mip_count) return {};
+        const LmtMip m = mip(i);
+        return std::span<const u8>(base + m.offset, m.byte_size);
     }
     explicit operator bool() const noexcept { return valid; }
 };
@@ -207,7 +226,7 @@ inline bool parse_lmt(const u8* data, usize bytes, LmtView& out) noexcept {
     const u64 table_off = sizeof(LmtHeader);
     const u64 table_bytes = u64(h.mip_count) * sizeof(LmtMip);
     if (table_bytes > u64(bytes) - table_off) return false;
-    const auto* mips = reinterpret_cast<const LmtMip*>(data + table_off);
+    const u8* mip_table = data + table_off;
 
     // Palette: present iff P8. Bounds-check the stored offset.
     const bool is_p8 = (h.pixel_fmt == LmtPixelFmt::P8);
@@ -221,8 +240,11 @@ inline bool parse_lmt(const u8* data, usize bytes, LmtView& out) noexcept {
 
     // Validate each mip: dimensions self-consistent, payload in bounds.
     const u32 mip_count = h.mip_count;
+    LmtMip mip0{};
     for (u32 i = 0; i < mip_count; ++i) {
-        const LmtMip& m = mips[i];
+        LmtMip m{};
+        std::memcpy(&m, mip_table + usize(i) * sizeof(LmtMip), sizeof(m));
+        if (i == 0) mip0 = m;
         // Cap dims to the header's u16 range before multiplying so a hostile
         // mip cannot overflow u64 and slip past the byte_size check.
         if (m.width > 0xFFFFu || m.height > 0xFFFFu) return false;
@@ -233,11 +255,11 @@ inline bool parse_lmt(const u8* data, usize bytes, LmtView& out) noexcept {
     }
     // mip 0 dimensions must match the header, and pixels_offset must point
     // at mip 0's payload.
-    if (mips[0].width != u32(h.width) || mips[0].height != u32(h.height)) return false;
-    if (h.pixels_offset != mips[0].offset) return false;
+    if (mip0.width != u32(h.width) || mip0.height != u32(h.height)) return false;
+    if (h.pixels_offset != mip0.offset) return false;
 
     out.header = h;
-    out.mips = std::span<const LmtMip>(mips, h.mip_count);
+    out.mip_table = mip_table;
     if (is_p8) {
         out.palette = std::span<const u8>(data + h.palette_offset, kLmtPaletteBytes);
     }
