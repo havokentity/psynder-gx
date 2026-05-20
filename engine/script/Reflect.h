@@ -171,9 +171,14 @@ inline constexpr FieldKind field_kind_v<Handle<Tag>> = FieldKind::Handle;
 
 // Build a FieldDesc for `Type::Member`. `Type` is used only inside
 // decltype / offsetof / sizeof, so it MAY be namespace-qualified here.
+// decltype(Type::Member) naming a non-static data member is well-formed in an
+// unevaluated operand (the canonical reflection idiom); cv/ref are stripped
+// before the field-kind lookup so a `const`/reference member still maps.
 #define PSYNDER_SCRIPT_FIELD(Type, Member)                                  \
     ::psynder::script::FieldDesc {                                          \
-        #Member, ::psynder::script::field_kind_v<decltype(Type::Member)>,   \
+        #Member,                                                            \
+            ::psynder::script::field_kind_v<::std::remove_cv_t<             \
+                ::std::remove_reference_t<decltype(Type::Member)>>>,        \
             static_cast<::psynder::u32>(offsetof(Type, Member)),            \
             static_cast<::psynder::u32>(sizeof(decltype(Type::Member)))     \
     }
