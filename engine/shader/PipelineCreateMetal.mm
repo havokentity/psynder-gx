@@ -196,7 +196,9 @@ MTLVertexDescriptor* make_vertex_descriptor_from(const VertexInputDesc& vi) {
     for (std::uint8_t b = 0; b < vi.binding_count; ++b) {
         const VertexBufferBinding& B = vi.bindings[b];
         const std::uint32_t mtl_slot = b + kMtlPushConstantReserved;
-        vd.layouts[mtl_slot].stride       = B.stride;
+        // Resolve the implicit (0) stride to the tightly-packed stride; a 0
+        // layout stride is invalid for an attributed Metal buffer layout.
+        vd.layouts[mtl_slot].stride       = effective_binding_stride(vi, b);
         vd.layouts[mtl_slot].stepRate     = 1;
         vd.layouts[mtl_slot].stepFunction = to_mtl_step(B.input_rate);
     }

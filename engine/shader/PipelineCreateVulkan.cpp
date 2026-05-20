@@ -24,9 +24,11 @@
 // dynamic-rendering pass lane 09 opens.
 //
 // Push-constant ABI: a single 128-byte (kMaxPushConstantBytes) range at
-// offset 0. Graphics layouts span VK_SHADER_STAGE_ALL_GRAPHICS so lane 07's
-// push_constants() encoder (which falls back to ALL_GRAPHICS on an unknown
-// stage mask) is always covered; compute layouts span COMPUTE only.
+// offset 0. Graphics layouts declare the range over VERTEX|FRAGMENT — exactly
+// the stages lane 07's push_constants() encoder emits (ShaderStage::AllGfx, and
+// its unknown-mask fallback). vkCmdPushConstants checks both directions, so the
+// layout range and the pushed stageFlags must match exactly
+// (VUID-vkCmdPushConstants-offset-01795/01796). Compute layouts span COMPUTE only.
 //
 // Descriptor sets (M1): graphics layouts attach lane 07's set-0 layout
 // (sampled image + sampler) via psynder_gx_vk_m1_texture_set_layout() so the
@@ -282,7 +284,10 @@ bool build_gfx_now(const DeferredGfx& d) {
         }
         for (std::uint8_t b = 0; b < d.vi.binding_count; ++b) {
             vk_bindings[b].binding   = b;
-            vk_bindings[b].stride    = d.vi.bindings[b].stride;
+            // effective_binding_stride() resolves a 0 stride to the tightly-
+            // packed implicit stride; reading .stride directly would leave a
+            // stride-0 binding (invalid for an attributed binding).
+            vk_bindings[b].stride    = effective_binding_stride(d.vi, b);
             vk_bindings[b].inputRate = to_vk_input_rate(d.vi.bindings[b].input_rate);
         }
         n_bindings = d.vi.binding_count;

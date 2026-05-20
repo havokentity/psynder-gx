@@ -155,6 +155,29 @@ constexpr bool validate(const VertexInputDesc& d) {
     return true;
 }
 
+// Concrete stride the backend builders must program for binding `b`. Resolves
+// the "implicit stride" case validate() permits: a caller-supplied stride of 0
+// means "tightly packed", so the real stride is max(offset_in_buffer +
+// attr_format_size) over every attribute that references binding `b` (which,
+// per validate(), all start at offset 0 for a stride==0 binding). Returns the
+// explicit stride unchanged when non-zero. Backends MUST call this rather than
+// reading VertexBufferBinding::stride directly, or a stride==0 binding produces
+// an invalid pipeline (Vulkan binding stride 0 / Metal layout stride 0).
+constexpr std::uint16_t effective_binding_stride(const VertexInputDesc& d,
+                                                 std::uint8_t b) {
+    if (b < d.binding_count && d.bindings[b].stride != 0u)
+        return d.bindings[b].stride;
+    std::uint32_t s = 0;
+    for (std::uint8_t i = 0; i < d.attr_count; ++i) {
+        if (d.attrs[i].buffer_slot != b) continue;
+        const std::uint32_t end =
+            static_cast<std::uint32_t>(d.attrs[i].offset_in_buffer)
+            + attr_format_size(d.attrs[i].format);
+        if (end > s) s = end;
+    }
+    return static_cast<std::uint16_t>(s);
+}
+
 struct GraphicsPipelineDesc {
     const char* slang_path        = nullptr; // e.g. "shaders/forward.slang"
     const char* entry_point_vs    = "vs_main";

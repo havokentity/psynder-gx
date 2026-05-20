@@ -114,6 +114,7 @@ public:
     void bind_pipeline     (CmdBuffer*, ::psynder::shader::PipelineHandle) override;
     void bind_vertex_buffer(CmdBuffer*, std::uint32_t, Buffer*, std::uint64_t) override;
     void bind_index_buffer (CmdBuffer*, Buffer*, IndexType, std::uint64_t) override;
+    void bind_texture      (CmdBuffer*, std::uint32_t, Texture*, Sampler*) override;
     void push_constants    (CmdBuffer*, const void*, std::uint32_t, std::uint32_t) override;
     void draw        (CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override;
     void draw_indexed(CmdBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) override;
@@ -936,6 +937,22 @@ void MetalBackend::bind_index_buffer(CmdBuffer* cmd, Buffer* buf,
     c->index_mtl        = mb->handle;
     c->index_mtl_type   = (type == IndexType::U32) ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
     c->index_mtl_offset = offset;
+}
+
+void MetalBackend::bind_texture(CmdBuffer* cmd, std::uint32_t slot,
+                                Texture* tex, Sampler* samp) {
+    auto* c = static_cast<MtlCmdBuf*>(cmd);
+    if (!c || !c->encoder || !tex || !samp) return;
+    id<MTLTexture>      mtl_tex  = static_cast<MtlTexture*>(tex)->handle;
+    id<MTLSamplerState> mtl_samp = static_cast<MtlSampler*>(samp)->handle;
+    if (!mtl_tex || !mtl_samp) return;
+    // Metal keeps textures + samplers in argument tables separate from the
+    // buffer table (kVertexBufferSlot0 / kPushConstantSlot), so `slot` maps
+    // straight to the fragment texture + sampler index. slang lowers
+    // register(tN)/register(sN) to [[texture(N)]]/[[sampler(N)]], matching the
+    // Vulkan [[vk::binding(N,0)]] the textured-triangle shader declares.
+    [c->encoder setFragmentTexture:mtl_tex      atIndex:(NSUInteger)slot];
+    [c->encoder setFragmentSamplerState:mtl_samp atIndex:(NSUInteger)slot];
 }
 
 void MetalBackend::push_constants(CmdBuffer* cmd, const void* data,

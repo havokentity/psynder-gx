@@ -1073,7 +1073,16 @@ void VulkanBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
     }
 
     if (vkEndCommandBuffer(f.cb) != VK_SUCCESS) {
-        std::fputs("[psy::gpu::vk] vkEndCommandBuffer failed\n", stderr);
+        // We never submit, so sc_render_done_[image_index_] will not be
+        // signalled. end_frame() presents waiting on that semaphore, which
+        // would hang forever — halt rendering gracefully instead (begin_frame
+        // and end_frame both early-out on device_lost_). Leave the fence
+        // unsignalled-but-reset: the next begin_frame on this slot resets it
+        // again before reuse, and device_lost_ stops us reaching that path.
+        std::fputs("[psy::gpu::vk] vkEndCommandBuffer failed — entering device-lost (skipping present)\n", stderr);
+        device_lost_ = true;
+        w->open      = false;
+        w->submitted = false;
         return;
     }
 
@@ -1089,16 +1098,22 @@ void VulkanBackend::cmd_submit(Device* dev, CmdBuffer* cmd) {
     // Signal the render-finished semaphore for THIS image (present waits on it).
     si.pSignalSemaphores    = &sc_render_done_[image_index_];
     VkResult sr = vkQueueSubmit(gfx_queue_, 1, &si, f.in_flight);
-    if (sr == VK_ERROR_DEVICE_LOST) {
-        std::fputs("[psy::gpu::vk] vkQueueSubmit: VK_ERROR_DEVICE_LOST — halting render\n", stderr);
+    if (sr != VK_SUCCESS) {
+        // ANY submit failure means sc_render_done_[image_index_] is never
+        // signalled; presenting on it in end_frame would stall forever. Halt
+        // rendering gracefully (device-lost) rather than hang. We do NOT mark
+        // the frame submitted, so end_frame skips present for it.
+        std::fprintf(stderr,
+                     "[psy::gpu::vk] vkQueueSubmit failed: %s — entering device-lost\n",
+                     result_str(sr));
         device_lost_ = true;
-    } else if (sr != VK_SUCCESS) {
-        std::fprintf(stderr, "[psy::gpu::vk] vkQueueSubmit failed: %s\n", result_str(sr));
-    } else {
-        // Record which frame this slot's fence now gates so begin_frame can
-        // advance the GPU-completed watermark when it waits on the fence.
-        slot_frame_[frame_slot_] = dev->current_frame_index;
+        w->open      = false;
+        w->submitted = false;
+        return;
     }
+    // Record which frame this slot's fence now gates so begin_frame can
+    // advance the GPU-completed watermark when it waits on the fence.
+    slot_frame_[frame_slot_] = dev->current_frame_index;
     w->open      = false;
     w->submitted = true;
 }
