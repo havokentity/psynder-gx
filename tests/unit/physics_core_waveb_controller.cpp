@@ -424,4 +424,25 @@ TEST_CASE("physics-core wave-b: character tuning round-trips",
     REQUIRE(approx_eq(got.max_push_strength_n, 300.0f));
     REQUIRE(approx_eq(got.lean_offset_m, 0.30f));
     REQUIRE(approx_eq(got.lean_speed_mps, 4.0f));
+
+    // Degenerate tuning is clamped to physical ranges (slope <= 89 deg, the
+    // rest non-negative) so it can't reach Jolt or make negative step /
+    // ground-snap vectors.
+    CharacterTuning bad{};
+    bad.max_slope_angle_deg = 120.0f;
+    bad.mass_kg             = -5.0f;
+    bad.max_push_strength_n = -1.0f;
+    bad.step_offset_m       = -0.2f;
+    bad.ground_snap_dist_m  = -0.3f;
+    bad.lean_offset_m       = -0.1f;
+    bad.lean_speed_mps      = -2.0f;
+    set_character_tuning(cc, bad);
+    const CharacterTuning cl = character_tuning(cc);
+    REQUIRE(approx_eq(cl.max_slope_angle_deg, 89.0f));
+    REQUIRE(approx_eq(cl.mass_kg, 0.0f));
+    REQUIRE(approx_eq(cl.max_push_strength_n, 0.0f));
+    REQUIRE(approx_eq(cl.step_offset_m, 0.0f));
+    REQUIRE(approx_eq(cl.ground_snap_dist_m, 0.0f));
+    REQUIRE(approx_eq(cl.lean_offset_m, 0.0f));
+    REQUIRE(approx_eq(cl.lean_speed_mps, 0.0f));
 }

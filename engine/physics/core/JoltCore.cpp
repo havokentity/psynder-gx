@@ -804,11 +804,27 @@ CharacterTuning character_tuning(const CharacterController* cc) {
 
 void set_character_tuning(CharacterController* cc, const CharacterTuning& cfg) {
     if (!cc || cc->character == nullptr) return;
-    cc->tuning = cfg; // step / ground-snap / lean are read from here in tick
+    // Clamp to physically meaningful ranges so degenerate input can't reach
+    // Jolt (negative mass / strength) or produce negative step / ground-snap
+    // vectors in ExtendedUpdate. The slope angle is bounded to [0, 89] deg —
+    // 90+ is a vertical "wall" the controller could never climb anyway.
+    const auto nonneg = [](float v) { return v > 0.0f ? v : 0.0f; };
+    CharacterTuning t = cfg;
+    t.max_slope_angle_deg = t.max_slope_angle_deg < 0.0f  ? 0.0f
+                          : (t.max_slope_angle_deg > 89.0f ? 89.0f
+                                                           : t.max_slope_angle_deg);
+    t.mass_kg             = nonneg(t.mass_kg);
+    t.max_push_strength_n = nonneg(t.max_push_strength_n);
+    t.step_offset_m       = nonneg(t.step_offset_m);
+    t.ground_snap_dist_m  = nonneg(t.ground_snap_dist_m);
+    t.lean_offset_m       = nonneg(t.lean_offset_m);
+    t.lean_speed_mps      = nonneg(t.lean_speed_mps);
+
+    cc->tuning = t; // step / ground-snap / lean are read from here in tick
     // Mirror the knobs Jolt owns onto the live CharacterVirtual.
-    cc->character->SetMaxSlopeAngle(JPH::DegreesToRadians(cfg.max_slope_angle_deg));
-    cc->character->SetMass(cfg.mass_kg);
-    cc->character->SetMaxStrength(cfg.max_push_strength_n);
+    cc->character->SetMaxSlopeAngle(JPH::DegreesToRadians(t.max_slope_angle_deg));
+    cc->character->SetMass(t.mass_kg);
+    cc->character->SetMaxStrength(t.max_push_strength_n);
 }
 
 CharacterGroundState character_ground_state(const CharacterController* cc) {
