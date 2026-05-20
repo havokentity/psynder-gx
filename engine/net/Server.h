@@ -129,6 +129,10 @@ private:
     SteadyDur          frame_period_   = SteadyDur::zero();
     std::atomic<bool>  stop_requested_{false};
     bool               spin_lock_final_ = true;
+    // Windows only: true while we hold a 1 ms system timer-resolution request
+    // (timeBeginPeriod). Raised in start(), released in stop(); the flag keeps
+    // the begin/end calls balanced. Unused on other platforms.
+    bool               win_timer_period_set_ = false;
     ServerStats        stats_;
 };
 
