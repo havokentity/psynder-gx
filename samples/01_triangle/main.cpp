@@ -330,7 +330,16 @@ bool init_resources(psynder::gpu::Device* dev,
     // ── Graphics pipeline ──────────────────────────────────────────────
     {
         psynder::shader::GraphicsPipelineDesc gp{};
+        // Absolute path baked at build time (see CMakeLists) so the runtime
+        // slangc compile finds the shader regardless of the working directory.
+        // Falls back to the repo-root-relative path if the define is absent
+        // (e.g. a non-CMake build) — that path only resolves when launched
+        // from the repo root.
+#if defined(PSYNDER_GX_SAMPLE_01_SHADER_PATH)
+        gp.slang_path        = PSYNDER_GX_SAMPLE_01_SHADER_PATH;
+#else
         gp.slang_path        = "samples/01_triangle/shaders/triangle_textured.slang";
+#endif
         gp.entry_point_vs    = "vs_main";
         gp.entry_point_fs    = "fs_main";
         gp.color_format_count = 1;

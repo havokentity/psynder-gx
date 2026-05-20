@@ -31,6 +31,15 @@ if(NOT APPLE)
     target_compile_definitions(sample_01_triangle PRIVATE PSYNDER_GX_SAMPLE_01_USE_ENCODER)
 endif()
 
+# Bake the shader's absolute source path so the runtime slangc compile (lane 08)
+# resolves it regardless of the process working directory. The path was
+# repo-root-relative, so the sample only ran when launched from the repo root;
+# launching the exe directly (CLion, a shortcut, or from bin/) left slangc
+# unable to open the .slang and the triangle fell back to the M0 clear.
+# CMAKE_CURRENT_SOURCE_DIR uses forward slashes — slangc-friendly on Windows.
+target_compile_definitions(sample_01_triangle PRIVATE
+    "PSYNDER_GX_SAMPLE_01_SHADER_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_textured.slang\"")
+
 target_link_libraries(sample_01_triangle PRIVATE
     psynder_common
     psynder_core
