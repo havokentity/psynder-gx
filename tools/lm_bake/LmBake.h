@@ -601,7 +601,10 @@ inline bool bake(const Scene& scene,
     // ── Plan the atlas: one rectangular patch per surface, shelf-packed ───
     std::vector<Patch> patches;
     patches.reserve(scene.surfaces.size());
-    const std::uint32_t max_dim = std::max(opts.max_atlas_dim, 8u);
+    // Clamp to a sane bound: width/height must fit the LmtHeader u16 fields,
+    // and width*height*4 must stay within the 32-bit byte offsets in the file
+    // (an 8192x8192 RGBA8 atlas is already 256 MB).
+    const std::uint32_t max_dim = std::min(std::max(opts.max_atlas_dim, 8u), 8192u);
     for (std::uint32_t si = 0; si < scene.surfaces.size(); ++si) {
         const BakeSurface& surf = scene.surfaces[si];
         if (surf.vertices.size() < 3) {
@@ -643,13 +646,17 @@ inline bool bake(const Scene& scene,
         std::uint32_t pen_y = gutter;
         std::uint32_t shelf_h = 0u;
         std::uint32_t packed_w = 0u;
+        // Bound each patch so a placed patch (origin >= gutter) plus its right
+        // gutter never crosses max_dim — otherwise edge texels would fall
+        // outside the atlas and be silently dropped.
+        const std::uint32_t cell_max = (max_dim > 2u * gutter) ? (max_dim - 2u * gutter) : 1u;
         for (Patch& patch : patches) {
             const float uw = std::max(patch.u_hi - patch.u_lo, 1e-4f);
             const float vh = std::max(patch.v_hi - patch.v_lo, 1e-4f);
             patch.w =
-                std::min(max_dim, std::max(1u, static_cast<std::uint32_t>(std::ceil(uw * density))));
+                std::min(cell_max, std::max(1u, static_cast<std::uint32_t>(std::ceil(uw * density))));
             patch.h =
-                std::min(max_dim, std::max(1u, static_cast<std::uint32_t>(std::ceil(vh * density))));
+                std::min(cell_max, std::max(1u, static_cast<std::uint32_t>(std::ceil(vh * density))));
             if (pen_x + patch.w + gutter > max_dim && pen_x > gutter) {
                 pen_x = gutter;
                 pen_y += shelf_h + gutter;
@@ -749,17 +756,19 @@ inline bool bake(const Scene& scene,
     }
 
     // ── Assemble the .lmt blob ────────────────────────────────────────────
-    const std::uint32_t pixels_bytes = width * height * 4u;
+    // 64-bit byte math (width/height are clamped to <= 8192, so this never
+    // overflows, but compute in u64 regardless to be robust to the bound).
+    const std::uint64_t pixels_bytes = static_cast<std::uint64_t>(width) * height * 4u;
     const std::uint32_t header_bytes = static_cast<std::uint32_t>(sizeof(fmt::LmtHeader));
     const std::uint32_t mip_bytes = static_cast<std::uint32_t>(sizeof(fmt::LmtMip));
     const std::uint32_t pixels_offset = header_bytes + mip_bytes;  // single mip
-    const std::uint32_t total = pixels_offset + pixels_bytes;
+    const std::uint64_t total = static_cast<std::uint64_t>(pixels_offset) + pixels_bytes;
 
     fmt::LmtHeader header{};
     header.file.magic = fmt::kLmtMagic;
     header.file.version = fmt::kLmtVersion;
     header.file.flags = fmt::kLmtFlagSRGB;
-    header.file.payload_size = total - static_cast<std::uint32_t>(sizeof(fmt::FileHeader));
+    header.file.payload_size = total - sizeof(fmt::FileHeader);
     header.width = static_cast<std::uint16_t>(width);
     header.height = static_cast<std::uint16_t>(height);
     header.mip_count = 1u;
@@ -772,10 +781,10 @@ inline bool bake(const Scene& scene,
     mip0.width = width;
     mip0.height = height;
     mip0.offset = pixels_offset;
-    mip0.byte_size = pixels_bytes;
+    mip0.byte_size = static_cast<std::uint32_t>(pixels_bytes);
 
     std::vector<std::uint8_t> blob;
-    blob.reserve(total);
+    blob.reserve(static_cast<std::size_t>(total));
     auto append = [&](const void* src, std::size_t n) {
         const auto* p = static_cast<const std::uint8_t*>(src);
         blob.insert(blob.end(), p, p + n);

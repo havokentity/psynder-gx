@@ -46,6 +46,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -240,6 +241,47 @@ inline bool aabb_face_adjacent(const Aabb& a, const Aabb& b, float eps) noexcept
         }
     }
     return true;
+}
+
+// Face-adjacency lists for every leaf, bucketed by the touching coordinate so
+// neighbour search is near-linear instead of O(N^2) all-pairs. Two cells are
+// adjacent only if one's hi[axis] face meets the other's lo[axis] face at the
+// same coordinate, so we only ever test pairs that share a quantised plane.
+inline std::vector<std::vector<std::uint32_t>> build_leaf_adjacency(const std::vector<BuildLeaf>& leaves,
+                                                                    float eps) {
+    std::vector<std::vector<std::uint32_t>> adj(leaves.size());
+    const float quant = std::max(eps, 1e-4f);
+    for (int axis = 0; axis < 3; ++axis) {
+        std::map<long long, std::vector<std::uint32_t>> lo_at;
+        std::map<long long, std::vector<std::uint32_t>> hi_at;
+        for (std::uint32_t i = 0; i < leaves.size(); ++i) {
+            const long long lo_key =
+                static_cast<long long>(std::llround(axis_get(leaves[i].bounds.lo, axis) / quant));
+            const long long hi_key =
+                static_cast<long long>(std::llround(axis_get(leaves[i].bounds.hi, axis) / quant));
+            lo_at[lo_key].push_back(i);
+            hi_at[hi_key].push_back(i);
+        }
+        for (const auto& bucket : hi_at) {
+            const auto it = lo_at.find(bucket.first);
+            if (it == lo_at.end()) {
+                continue;
+            }
+            for (std::uint32_t a : bucket.second) {
+                for (std::uint32_t b : it->second) {
+                    if (a != b && aabb_face_adjacent(leaves[a].bounds, leaves[b].bounds, eps)) {
+                        adj[a].push_back(b);
+                        adj[b].push_back(a);
+                    }
+                }
+            }
+        }
+    }
+    for (auto& nbrs : adj) {
+        std::sort(nbrs.begin(), nbrs.end());
+        nbrs.erase(std::unique(nbrs.begin(), nbrs.end()), nbrs.end());
+    }
+    return adj;
 }
 
 // ─── The recursive SolidBSP builder ──────────────────────────────────────
@@ -476,6 +518,11 @@ inline bool compile_map(const lmtools::MapFile& map,
         leaves = std::move(builder.leaves());
     }
 
+    // Face-adjacency among cells (bucketed; near-linear). Shared by the
+    // exterior flood-fill and the PVS connectivity pass.
+    const std::vector<std::vector<std::uint32_t>> leaf_adjacency =
+        detail::build_leaf_adjacency(leaves, 1e-3f);
+
     // ── Exterior cull: flood the void inward from boundary-touching empties ─
     bool leaked = false;
     {
@@ -502,14 +549,12 @@ inline bool compile_map(const lmtools::MapFile& map,
         while (!stack.empty()) {
             const std::uint32_t cur = stack.back();
             stack.pop_back();
-            for (std::size_t j = 0; j < leaf_count; ++j) {
+            for (std::uint32_t j : leaf_adjacency[cur]) {
                 if (is_void[j] || leaves[j].solid) {
                     continue;
                 }
-                if (detail::aabb_face_adjacent(leaves[cur].bounds, leaves[j].bounds, kEps)) {
-                    is_void[j] = 1;
-                    stack.push_back(static_cast<std::uint32_t>(j));
-                }
+                is_void[j] = 1;
+                stack.push_back(j);
             }
         }
         std::size_t inside_empty = 0;
@@ -598,19 +643,13 @@ inline bool compile_map(const lmtools::MapFile& map,
             uf[static_cast<std::size_t>(std::max(ra, rb))] = std::min(ra, rb);
         }
     };
-    {
-        constexpr float kEps = 1e-3f;
-        for (std::size_t i = 0; i < leaves.size(); ++i) {
-            if (leaves[i].cluster < 0) {
-                continue;
-            }
-            for (std::size_t j = i + 1; j < leaves.size(); ++j) {
-                if (leaves[j].cluster < 0) {
-                    continue;
-                }
-                if (detail::aabb_face_adjacent(leaves[i].bounds, leaves[j].bounds, kEps)) {
-                    unite(leaves[i].cluster, leaves[j].cluster);
-                }
+    for (std::size_t i = 0; i < leaves.size(); ++i) {
+        if (leaves[i].cluster < 0) {
+            continue;
+        }
+        for (std::uint32_t j : leaf_adjacency[i]) {
+            if (leaves[j].cluster >= 0) {
+                unite(leaves[i].cluster, leaves[j].cluster);
             }
         }
     }

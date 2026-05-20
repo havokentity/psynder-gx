@@ -275,19 +275,75 @@ class MapLexer {
 // Numeric parsing helpers (locale-independent strtod over a bounded copy).
 // ─────────────────────────────────────────────────────────────────────────
 
+// Locale-independent decimal parser ('.'-only). std::strtod honours the
+// process numeric locale, so under a non-"C" locale it can mis-parse map
+// numbers like "1.5" and break determinism. This hand-rolled parser accepts
+// [sign] digits ['.' digits] [('e'|'E') [sign] digits] and never touches the
+// locale. Powers of ten are built by repeated multiply (no libm pow) so the
+// common no-exponent path is exact and reproducible.
 inline bool parse_float(std::string_view tok, float& out) noexcept {
-    if (tok.empty() || tok.size() >= 64) {
+    if (tok.empty()) {
         return false;
     }
-    char buf[64];
-    std::memcpy(buf, tok.data(), tok.size());
-    buf[tok.size()] = '\0';
-    char* end = nullptr;
-    const double v = std::strtod(buf, &end);
-    if (end != buf + tok.size()) {
+    std::size_t i = 0;
+    const std::size_t n = tok.size();
+    bool negative = false;
+    if (tok[i] == '+' || tok[i] == '-') {
+        negative = (tok[i] == '-');
+        ++i;
+    }
+    double mantissa = 0.0;
+    int frac_digits = 0;
+    bool seen_dot = false;
+    bool any_digit = false;
+    for (; i < n; ++i) {
+        const char c = tok[i];
+        if (c >= '0' && c <= '9') {
+            mantissa = mantissa * 10.0 + static_cast<double>(c - '0');
+            if (seen_dot) {
+                ++frac_digits;
+            }
+            any_digit = true;
+        } else if (c == '.' && !seen_dot) {
+            seen_dot = true;
+        } else {
+            break;
+        }
+    }
+    if (!any_digit) {
         return false;
     }
-    out = static_cast<float>(v);
+    int exponent = -frac_digits;
+    if (i < n && (tok[i] == 'e' || tok[i] == 'E')) {
+        ++i;
+        bool exp_negative = false;
+        if (i < n && (tok[i] == '+' || tok[i] == '-')) {
+            exp_negative = (tok[i] == '-');
+            ++i;
+        }
+        bool exp_digit = false;
+        int exp_value = 0;
+        for (; i < n && tok[i] >= '0' && tok[i] <= '9'; ++i) {
+            exp_value = exp_value * 10 + (tok[i] - '0');
+            exp_digit = true;
+        }
+        if (!exp_digit) {
+            return false;
+        }
+        exponent += exp_negative ? -exp_value : exp_value;
+    }
+    if (i != n) {
+        return false;  // trailing garbage
+    }
+    double scale = 1.0;
+    for (int k = 0; k < (exponent < 0 ? -exponent : exponent); ++k) {
+        scale *= 10.0;
+    }
+    double value = (exponent < 0) ? (mantissa / scale) : (mantissa * scale);
+    if (negative) {
+        value = -value;
+    }
+    out = static_cast<float>(value);
     return true;
 }
 
@@ -354,6 +410,15 @@ inline bool parse_face(MapLexer& lex, MapFace& out, MapParseError& err) {
     }
     out.texture.assign(tex);
     out.plane = plane_from_points(out.points[0], out.points[1], out.points[2]);
+    // A unit normal squares to 1; v3_normalize returns the zero vector for a
+    // degenerate (collinear / coincident) triple. Fail with a line number
+    // rather than letting an invalid plane propagate into geometry.
+    if (v3_dot(out.plane.n, out.plane.n) < 0.5f) {
+        err = MapParseError{false,
+                            lex.line(),
+                            "degenerate face plane (collinear or coincident points)"};
+        return false;
+    }
 
     if (lex.peek() == '[') {
         out.valve220 = true;
@@ -376,6 +441,20 @@ inline bool parse_face(MapLexer& lex, MapFace& out, MapParseError& err) {
             return false;
         }
         axial_texture_basis(out.plane.n, out.u_axis, out.v_axis);
+    }
+
+    // Tolerate + skip any trailing per-face fields (Quake II/III surface +
+    // content flags) so the next face parses cleanly. Stop at the next face
+    // '(' or a brace/quote/EOF that ends the brush or entity.
+    while (true) {
+        const char c = lex.peek();
+        if (c == '(' || c == '{' || c == '}' || c == '"' || c == '\0') {
+            break;
+        }
+        std::string_view extra;
+        if (!lex.read_bare(extra)) {
+            break;
+        }
     }
     return true;
 }
