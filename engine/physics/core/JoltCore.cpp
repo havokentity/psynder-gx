@@ -205,6 +205,14 @@ public:
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+// Clamp helpers for the tuning setters — keep degenerate (negative / out-of-
+// range) config out of Jolt and out of the ExtendedUpdate step vectors.
+inline float NonNeg(float v) { return v > 0.0f ? v : 0.0f; }
+inline float ClampRange(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
 inline JPH::RVec3 R3(const float p[3]) {
     return JPH::RVec3(static_cast<JPH::Real>(p[0]),
                       static_cast<JPH::Real>(p[1]),
@@ -746,12 +754,16 @@ NarrowphaseConfig narrowphase_config(const World* world) {
 void set_narrowphase_config(World* world, const NarrowphaseConfig& cfg) {
     if (!world) return;
     JPH::PhysicsSettings s = world->system.GetPhysicsSettings();
-    s.mSpeculativeContactDistance = cfg.speculative_contact_distance_m;
-    s.mPenetrationSlop            = cfg.penetration_slop_m;
-    s.mManifoldTolerance          = cfg.manifold_tolerance_m;
-    s.mMaxPenetrationDistance     = cfg.max_penetration_distance_m;
-    s.mLinearCastThreshold        = cfg.linear_cast_threshold;
-    s.mLinearCastMaxPenetration   = cfg.linear_cast_max_penetration;
+    // These are physical distances/tolerances — negatives are nonsensical and
+    // would destabilise collision detection, so floor them at 0.
+    s.mSpeculativeContactDistance = NonNeg(cfg.speculative_contact_distance_m);
+    s.mPenetrationSlop            = NonNeg(cfg.penetration_slop_m);
+    s.mManifoldTolerance          = NonNeg(cfg.manifold_tolerance_m);
+    s.mMaxPenetrationDistance     = NonNeg(cfg.max_penetration_distance_m);
+    // Fractions of a body's inner radius; a value > 1 is a valid (very
+    // conservative) CCD setting, so only floor at 0.
+    s.mLinearCastThreshold        = NonNeg(cfg.linear_cast_threshold);
+    s.mLinearCastMaxPenetration   = NonNeg(cfg.linear_cast_max_penetration);
     s.mUseManifoldReduction       = cfg.use_manifold_reduction;
     s.mUseBodyPairContactCache    = cfg.use_body_pair_cache;
     s.mCheckActiveEdges           = cfg.check_active_edges;
@@ -784,11 +796,11 @@ void set_island_solver_config(World* world, const IslandSolverConfig& cfg) {
     s.mNumVelocitySteps           = cfg.velocity_steps < 2u ? 2u : cfg.velocity_steps;
     s.mNumPositionSteps           = cfg.position_steps;
     // Baumgarte is a 0..1 fraction of positional error corrected per step.
-    s.mBaumgarte                  = cfg.baumgarte < 0.0f ? 0.0f
-                                  : (cfg.baumgarte > 1.0f ? 1.0f : cfg.baumgarte);
-    s.mMinVelocityForRestitution  = cfg.min_velocity_for_restitution_mps;
-    s.mTimeBeforeSleep            = cfg.time_before_sleep_s;
-    s.mPointVelocitySleepThreshold = cfg.point_velocity_sleep_threshold_mps;
+    s.mBaumgarte                  = ClampRange(cfg.baumgarte, 0.0f, 1.0f);
+    // Speeds / durations: negatives are nonsensical, floor at 0.
+    s.mMinVelocityForRestitution  = NonNeg(cfg.min_velocity_for_restitution_mps);
+    s.mTimeBeforeSleep            = NonNeg(cfg.time_before_sleep_s);
+    s.mPointVelocitySleepThreshold = NonNeg(cfg.point_velocity_sleep_threshold_mps);
     s.mUseLargeIslandSplitter     = cfg.use_large_island_splitter;
     s.mConstraintWarmStart        = cfg.constraint_warm_start;
     s.mAllowSleeping              = cfg.allow_sleeping;
@@ -808,17 +820,14 @@ void set_character_tuning(CharacterController* cc, const CharacterTuning& cfg) {
     // Jolt (negative mass / strength) or produce negative step / ground-snap
     // vectors in ExtendedUpdate. The slope angle is bounded to [0, 89] deg —
     // 90+ is a vertical "wall" the controller could never climb anyway.
-    const auto nonneg = [](float v) { return v > 0.0f ? v : 0.0f; };
     CharacterTuning t = cfg;
-    t.max_slope_angle_deg = t.max_slope_angle_deg < 0.0f  ? 0.0f
-                          : (t.max_slope_angle_deg > 89.0f ? 89.0f
-                                                           : t.max_slope_angle_deg);
-    t.mass_kg             = nonneg(t.mass_kg);
-    t.max_push_strength_n = nonneg(t.max_push_strength_n);
-    t.step_offset_m       = nonneg(t.step_offset_m);
-    t.ground_snap_dist_m  = nonneg(t.ground_snap_dist_m);
-    t.lean_offset_m       = nonneg(t.lean_offset_m);
-    t.lean_speed_mps      = nonneg(t.lean_speed_mps);
+    t.max_slope_angle_deg = ClampRange(t.max_slope_angle_deg, 0.0f, 89.0f);
+    t.mass_kg             = NonNeg(t.mass_kg);
+    t.max_push_strength_n = NonNeg(t.max_push_strength_n);
+    t.step_offset_m       = NonNeg(t.step_offset_m);
+    t.ground_snap_dist_m  = NonNeg(t.ground_snap_dist_m);
+    t.lean_offset_m       = NonNeg(t.lean_offset_m);
+    t.lean_speed_mps      = NonNeg(t.lean_speed_mps);
 
     cc->tuning = t; // step / ground-snap / lean are read from here in tick
     // Mirror the knobs Jolt owns onto the live CharacterVirtual.

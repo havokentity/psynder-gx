@@ -339,6 +339,23 @@ TEST_CASE("physics-core wave-b: narrowphase and island tuning round-trip",
         const IslandSolverConfig isl = island_solver_config(scope.w);
         REQUIRE(isl.velocity_steps == 10u);
         REQUIRE(isl.position_steps == 2u);
+
+        // Negative distances/tolerances are floored at 0.
+        NarrowphaseConfig negc{};
+        negc.speculative_contact_distance_m = -1.0f;
+        negc.penetration_slop_m             = -0.5f;
+        negc.manifold_tolerance_m           = -0.1f;
+        negc.max_penetration_distance_m     = -0.2f;
+        negc.linear_cast_threshold          = -0.3f;
+        negc.linear_cast_max_penetration    = -0.4f;
+        set_narrowphase_config(scope.w, negc);
+        const NarrowphaseConfig nc = narrowphase_config(scope.w);
+        REQUIRE(approx_eq(nc.speculative_contact_distance_m, 0.0f));
+        REQUIRE(approx_eq(nc.penetration_slop_m, 0.0f));
+        REQUIRE(approx_eq(nc.manifold_tolerance_m, 0.0f));
+        REQUIRE(approx_eq(nc.max_penetration_distance_m, 0.0f));
+        REQUIRE(approx_eq(nc.linear_cast_threshold, 0.0f));
+        REQUIRE(approx_eq(nc.linear_cast_max_penetration, 0.0f));
     }
 
     SECTION("island solver config") {
@@ -387,9 +404,16 @@ TEST_CASE("physics-core wave-b: narrowphase and island tuning round-trip",
         REQUIRE(approx_eq(clamped.baumgarte, 1.0f));
 
         IslandSolverConfig neg{};
-        neg.baumgarte = -0.5f; // below the valid range
+        neg.baumgarte                          = -0.5f; // below the valid range
+        neg.min_velocity_for_restitution_mps   = -1.0f; // speeds/durations can't
+        neg.time_before_sleep_s                = -0.5f; // be negative -> floored
+        neg.point_velocity_sleep_threshold_mps = -0.2f;
         set_island_solver_config(scope.w, neg);
-        REQUIRE(approx_eq(island_solver_config(scope.w).baumgarte, 0.0f));
+        const IslandSolverConfig nn = island_solver_config(scope.w);
+        REQUIRE(approx_eq(nn.baumgarte, 0.0f));
+        REQUIRE(approx_eq(nn.min_velocity_for_restitution_mps, 0.0f));
+        REQUIRE(approx_eq(nn.time_before_sleep_s, 0.0f));
+        REQUIRE(approx_eq(nn.point_velocity_sleep_threshold_mps, 0.0f));
     }
 }
 
