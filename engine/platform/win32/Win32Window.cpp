@@ -366,15 +366,25 @@ LRESULT Win32Window::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         }
 
         case WM_DPICHANGED: {
-            // lParam points to the RECT Windows suggests for the new DPI,
-            // keeping the window correctly sized + positioned when dragged to a
-            // monitor with different scaling (per-monitor-v2). Honor it.
-            const RECT* r = reinterpret_cast<const RECT*>(lparam);
-            if (r) {
-                ::SetWindowPos(hwnd, nullptr, r->left, r->top,
-                               r->right - r->left, r->bottom - r->top,
-                               SWP_NOZORDER | SWP_NOACTIVATE);
-            }
+            // Game-correct DPI handling: keep the CLIENT at its current
+            // PHYSICAL resolution (the render-target size). Deliberately do
+            // NOT apply the OS-suggested rect (lParam) — that scales the whole
+            // window, and thus the client, by the DPI ratio (the desktop-app
+            // convention: a 1280x720 client would balloon to ~5120x2880 at
+            // 400%). A fixed-resolution game window must stick to its
+            // resolution; we only re-fit the non-client frame so the caption/
+            // border are sized for the new monitor's DPI, and reposition onto
+            // the target monitor.
+            const UINT  new_dpi = HIWORD(wparam);
+            const RECT* sug     = reinterpret_cast<const RECT*>(lparam);
+            const DWORD style   = static_cast<DWORD>(::GetWindowLongPtrW(hwnd, GWL_STYLE));
+            const DWORD exst    = static_cast<DWORD>(::GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+            RECT wr{ 0, 0, static_cast<LONG>(window_w_), static_cast<LONG>(window_h_) };
+            ::AdjustWindowRectExForDpi(&wr, style, FALSE, exst, new_dpi);
+            const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (sug ? 0u : SWP_NOMOVE);
+            ::SetWindowPos(hwnd, nullptr,
+                           sug ? sug->left : 0, sug ? sug->top : 0,
+                           wr.right - wr.left, wr.bottom - wr.top, flags);
             return 0;
         }
 
