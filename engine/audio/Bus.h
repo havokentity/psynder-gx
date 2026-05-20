@@ -95,11 +95,17 @@ BusGains get_bus_gains(BusId bus) noexcept;
 // voice is no longer alive (stale generation or never opened) or if
 // `bus` is out of range.
 //
-// Thread-safe — serialised against the voice pool's existing mutex.
+// Thread-safe AND lock-free.  The per-slot state ({active, gen, bus}) is
+// packed into a single std::atomic<uint32_t>; this setter does a CAS
+// loop that refuses to update on a stale generation, and the audio
+// thread's slot lookup is a single acquire-load.  The audio callback
+// therefore NEVER blocks on a UI thread mid-route, satisfying the RT
+// "no blocking on a non-RT thread" guarantee from DESIGN §10.2.
 bool route_voice_to_bus(VoiceId voice, BusId bus) noexcept;
 
 // Read the bus a voice is currently routed to. Returns BusId::Sfx (the
-// default) for unknown voices. Thread-safe.
+// default) for unknown voices.  Thread-safe AND lock-free — single
+// acquire-load, no mutex.
 BusId voice_bus(VoiceId voice) noexcept;
 
 }  // namespace psynder::audio

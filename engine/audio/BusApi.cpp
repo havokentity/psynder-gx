@@ -25,8 +25,8 @@
 #include "core/Types.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
-#include <mutex>
 
 namespace psynder::audio {
 
@@ -34,19 +34,46 @@ namespace detail {
 
 namespace {
 
-// Per-voice-slot liveness shadow + bus assignment. Independent of the
-// voice pool in Audio.cpp — Engine::play()/stop_voice() drive these via
-// mark_voice_live / mark_voice_dead.
+// Per-voice-slot state packed into a single std::atomic<uint32_t> so the
+// audio callback's slot_bus() read is lock-free.  The pre-PR-#19 version
+// used a per-pool std::mutex and the audio thread did a blocking
+// lock_guard — which Copilot caught as an RT-deadline hazard: a UI
+// thread mid-route_voice_to_bus would block the audio callback long
+// enough to miss a Wasapi / CoreAudio / PipeWire frame.
+//
+// Bit layout (LSB → MSB):
+//   bit  0   : active flag        (1 bit)
+//   bits 1..8: generation         (8 bits, matches VoicePool's packed gen)
+//   bits 9..16: bus id            (8 bits, supports up to 256 buses;
+//                                  the public cap is kMaxBuses == 16)
+//   bits 17..31: reserved (zero)
+//
+// Writers (mark_voice_live / _dead / route_voice_to_bus) use a CAS loop
+// to preserve cross-field invariants — e.g. route_voice_to_bus refuses
+// to update the bus on a slot whose active/gen has changed underneath it.
+// Reader (slot_bus on the audio thread) is a single relaxed load + decode.
+inline constexpr std::uint32_t kSlotActiveBit  = 1u << 0;
+inline constexpr std::uint32_t kSlotGenShift   = 1u;
+inline constexpr std::uint32_t kSlotGenMask    = 0xFFu << kSlotGenShift;
+inline constexpr std::uint32_t kSlotBusShift   = 9u;
+inline constexpr std::uint32_t kSlotBusMask    = 0xFFu << kSlotBusShift;
+
+inline std::uint32_t pack_slot(bool active, std::uint8_t gen, BusId bus) noexcept {
+    return (active ? kSlotActiveBit : 0u)
+         | (static_cast<std::uint32_t>(gen) << kSlotGenShift)
+         | (static_cast<std::uint32_t>(bus) << kSlotBusShift);
+}
+inline bool        unpack_active(std::uint32_t v) noexcept { return (v & kSlotActiveBit) != 0u; }
+inline std::uint8_t unpack_gen(std::uint32_t v)   noexcept { return static_cast<std::uint8_t>((v & kSlotGenMask) >> kSlotGenShift); }
+inline BusId       unpack_bus(std::uint32_t v)    noexcept { return static_cast<BusId>((v & kSlotBusMask) >> kSlotBusShift); }
+
 struct VoiceSlotShadow {
-    bool        active = false;
-    std::uint8_t gen   = 0;  // matches the 8-bit gen in VoicePool's packed id
-    BusId       bus    = BusId::Sfx;
+    std::atomic<std::uint32_t> packed{0};
 };
 
 struct RouterState {
     BusMixer                                            mixer{};
     std::array<VoiceSlotShadow, kBusRouterMaxVoices>    slots{};
-    mutable std::mutex                                  slots_mu{};
 };
 
 RouterState& router_state() noexcept {
@@ -73,13 +100,11 @@ BusMixer& bus_mixer() noexcept {
 
 void router_reset() noexcept {
     RouterState& r = router_state();
-    {
-        std::lock_guard<std::mutex> lk(r.slots_mu);
-        for (auto& s : r.slots) {
-            s.active = false;
-            s.gen    = 0;
-            s.bus    = BusId::Sfx;
-        }
+    // Atomic per-slot reset — no mutex.  Each store is release-ordered so
+    // any subsequent acquire-load on the audio thread sees a coherent
+    // zeroed slot.
+    for (auto& s : r.slots) {
+        s.packed.store(0u, std::memory_order_release);
     }
     r.mixer.reset();
 }
@@ -91,24 +116,40 @@ bool router_init_mixer(u32 sample_rate, u32 max_frames) noexcept {
 void mark_voice_live(u32 slot_idx, u32 generation) noexcept {
     if (slot_idx >= kBusRouterMaxVoices) return;
     RouterState& r = router_state();
-    std::lock_guard<std::mutex> lk(r.slots_mu);
-    r.slots[slot_idx].active = true;
-    r.slots[slot_idx].gen    = static_cast<std::uint8_t>(generation & 0xFFu);
-    r.slots[slot_idx].bus    = BusId::Sfx;  // reset to default on each play()
+    // Active=true, gen=given, bus=default Sfx.  Single store — no
+    // intermediate "half-updated" state visible to the audio thread.
+    const std::uint32_t new_val = pack_slot(
+        /*active=*/true,
+        static_cast<std::uint8_t>(generation & 0xFFu),
+        BusId::Sfx);
+    r.slots[slot_idx].packed.store(new_val, std::memory_order_release);
 }
 
 void mark_voice_dead(u32 slot_idx) noexcept {
     if (slot_idx >= kBusRouterMaxVoices) return;
     RouterState& r = router_state();
-    std::lock_guard<std::mutex> lk(r.slots_mu);
-    r.slots[slot_idx].active = false;
+    // CAS-flip only the active bit; preserve gen + bus (so a re-play
+    // that bumps gen can distinguish "dead with the same generation"
+    // from "dead with an earlier generation").
+    std::uint32_t old = r.slots[slot_idx].packed.load(std::memory_order_relaxed);
+    std::uint32_t new_val;
+    do {
+        new_val = old & ~kSlotActiveBit;
+    } while (!r.slots[slot_idx].packed.compare_exchange_weak(
+        old, new_val,
+        std::memory_order_release,
+        std::memory_order_relaxed));
 }
 
 BusId slot_bus(u32 slot_idx) noexcept {
+    // LOCK-FREE.  Called on the audio thread once per active voice every
+    // pull — must not acquire a mutex.  Single acquire-load pairs with
+    // the release-store in mark_voice_live / route_voice_to_bus.
     if (slot_idx >= kBusRouterMaxVoices) return BusId::Sfx;
     RouterState& r = router_state();
-    std::lock_guard<std::mutex> lk(r.slots_mu);
-    return r.slots[slot_idx].bus;
+    const std::uint32_t v = r.slots[slot_idx].packed.load(std::memory_order_acquire);
+    if (!unpack_active(v)) return BusId::Sfx;
+    return unpack_bus(v);
 }
 
 // ─── Test hook ───────────────────────────────────────────────────────────
@@ -137,13 +178,24 @@ bool route_voice_to_bus(VoiceId voice, BusId bus) noexcept {
     if (idx >= detail::kBusRouterMaxVoices) return false;
 
     detail::RouterState& r = detail::router_state();
-    std::lock_guard<std::mutex> lk(r.slots_mu);
-    const detail::VoiceSlotShadow& s = r.slots[idx];
-    if (!s.active || s.gen != static_cast<std::uint8_t>(gen & 0xFFu)) {
-        return false;  // stale or never-played
+    const std::uint8_t want_gen = static_cast<std::uint8_t>(gen & 0xFFu);
+    // CAS loop — refuse to update if the slot has gone dead OR its
+    // generation has bumped (a stop_voice → re-play race).  Lock-free
+    // so the audio thread's slot_bus() never blocks on a UI thread
+    // mid-route.
+    std::uint32_t old = r.slots[idx].packed.load(std::memory_order_acquire);
+    for (;;) {
+        if (!detail::unpack_active(old))            return false;
+        if (detail::unpack_gen(old) != want_gen)    return false;
+        const std::uint32_t new_val = detail::pack_slot(true, want_gen, bus);
+        if (r.slots[idx].packed.compare_exchange_weak(
+                old, new_val,
+                std::memory_order_release,
+                std::memory_order_acquire)) {
+            return true;
+        }
+        // CAS failed — `old` reloaded; retry.
     }
-    r.slots[idx].bus = bus;
-    return true;
 }
 
 BusId voice_bus(VoiceId voice) noexcept {
@@ -153,12 +205,13 @@ BusId voice_bus(VoiceId voice) noexcept {
     if (idx >= detail::kBusRouterMaxVoices) return BusId::Sfx;
 
     detail::RouterState& r = detail::router_state();
-    std::lock_guard<std::mutex> lk(r.slots_mu);
-    const detail::VoiceSlotShadow& s = r.slots[idx];
-    if (!s.active || s.gen != static_cast<std::uint8_t>(gen & 0xFFu)) {
+    const std::uint32_t v =
+        r.slots[idx].packed.load(std::memory_order_acquire);
+    if (!detail::unpack_active(v)) return BusId::Sfx;
+    if (detail::unpack_gen(v) != static_cast<std::uint8_t>(gen & 0xFFu)) {
         return BusId::Sfx;
     }
-    return s.bus;
+    return detail::unpack_bus(v);
 }
 
 }  // namespace psynder::audio

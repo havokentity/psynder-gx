@@ -61,14 +61,43 @@ inline constexpr u32 kMaxBlockFrames = 4096;
 
 // One bus's runtime state. POD layout — no constructors that require
 // non-trivial destruction; safe to memset to zero on init().
+//
+// THREADING — see BusMixer below for the mutex / latch invariants:
+//   * `target`           — written by setters under `target_mu_`.
+//   * `latched`          — written ONLY by the audio thread inside
+//                          begin_frame() (under try_lock); read by the
+//                          audio thread in process_bus_block().  No
+//                          cross-thread access — no lock needed for
+//                          read in the hot path.
+//   * `current`          — audio-thread-only.
+//   * `ramp_*` / `lp_*`  — audio-thread-only.
 struct BusState {
-    // Current applied gains (interpolated toward `target` each block).
+    // Current applied gains (interpolated toward `latched` each block).
     BusGains current{};
-    // Target gains set by set_bus_gains().
+    // Target gains set by set_bus_gains() — touched ONLY under target_mu_.
     BusGains target{};
+    // Latched snapshot of `target` taken under target_mu_ in begin_frame().
+    // The audio thread reads only this in the hot DSP path; setters never
+    // touch `latched`.  Closes the data-race Copilot caught on PR #19:
+    // previously process_bus_block read `target.*` without holding
+    // target_mu_, which the setters were writing under it.
+    BusGains latched{};
     // 1-pole LP filter state (per-channel last output).
     f32      lp_prev_l = 0.0f;
     f32      lp_prev_r = 0.0f;
+    // Per-bus gain ramp — fixed-rate so a 1.0 → 0.0 hop takes EXACTLY
+    // kRampSamples samples regardless of audio-callback block size.
+    // Earlier the step was recomputed as `(target - current) /
+    // kRampSamples` at every block, which converged geometrically and
+    // never quite hit the target.  Copilot PR #19 review caught the bug.
+    //   ramp_remaining == 0 ⇒ no ramp in progress (current == latched).
+    //   ramp_step       — per-sample increment applied while remaining > 0.
+    u32 ramp_remaining = 0;
+    f32 ramp_step      = 0.0f;
+    // Target the ramp converges toward.  Captured when the ramp starts so
+    // a mid-ramp set_bus_gains() that re-arms the ramp uses the new
+    // latched target (consistent with the BusMixer-level latch).
+    f32 ramp_target_gain = 1.0f;
 
     // The per-bus stereo accumulator is held in the BusMixer's heap-
     // allocated `accum_storage_` (see private members below) — too big

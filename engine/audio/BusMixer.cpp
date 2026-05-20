@@ -122,19 +122,37 @@ void BusMixer::begin_frame(u32 frames) noexcept {
     }
     std::memset(reverb_send_.data(), 0, sizeof(f32) * frames);
 
-    // Latch target gains under try_lock. On contention (a UI thread is
-    // mid-set_target), skip the latch — the audio thread keeps the
-    // previously-latched target. This is the canonical "RT thread never
-    // blocks on a non-RT thread" pattern (see DESIGN.md §10.2).
+    // Latch target gains under try_lock and copy them into each bus's
+    // `latched` snapshot.  On contention (a UI thread is mid-set_target),
+    // we skip the copy and keep the previously-latched values — this is
+    // the canonical "RT thread never blocks on a non-RT thread" pattern.
+    //
+    // The audio thread reads ONLY from `latched.*` in process_bus_block;
+    // it never reads `target.*` directly.  That closes the data race
+    // Copilot PR #19 review caught: previously the audio thread read
+    // `s.target.*` under no lock while setters wrote `s.target` under
+    // target_mu_, which is UB by the C++ memory model.
     if (target_mu_.try_lock()) {
-        // No copy needed — target_ is already up to date in `states_`.
-        // The lock acquisition is itself the synchronisation: any in-flight
-        // setter has either completed before us or will run after this
-        // unlock and pick up the next frame.
+        for (u32 i = 0; i < kMaxBuses; ++i) {
+            const BusGains new_target = states_[i].target;
+            BusState& s = states_[i];
+            // Detect a target-gain change: re-arm the gain ramp with a
+            // FIXED per-sample step over kRampSamples, so the ramp's
+            // wall-clock duration doesn't depend on the audio backend's
+            // block size (Copilot PR #19 review caught the geometric
+            // convergence bug here too).
+            if (new_target.gain_linear != s.latched.gain_linear) {
+                const f32 delta = new_target.gain_linear - s.current.gain_linear;
+                s.ramp_step       = delta / static_cast<f32>(kRampSamples);
+                s.ramp_remaining  = kRampSamples;
+                s.ramp_target_gain = new_target.gain_linear;
+            }
+            s.latched = new_target;
+        }
         target_mu_.unlock();
     }
-    // If try_lock fails, the audio thread proceeds with the values
-    // currently in states_[i].target. These are coherent (mutex pairs
+    // If try_lock fails, the audio thread proceeds with whatever each
+    // bus's `latched` already holds.  These are coherent (mutex pairs
     // with prior writes), and the next pull will pick up newer values.
 }
 
@@ -157,31 +175,33 @@ void BusMixer::accumulate_voice(BusId bus, const f32* src, u32 frames) noexcept 
 
 void BusMixer::process_bus_block(BusState& s, f32* accum_stereo,
                                  u32 frames, f32* out_stereo) noexcept {
-    const f32 g_target  = s.target.gain_linear;
-    const f32 lp_target = s.target.lp_hz;
-    // Per-frame ramp step. kRampSamples is the worst-case ramp length;
-    // the per-sample increment equals (target - current) / kRampSamples
-    // so a 1.0 → 0.0 hop takes exactly 256 samples.
-    f32 g_cur = s.current.gain_linear;
-    const f32 g_step = (g_target - g_cur) / static_cast<f32>(kRampSamples);
+    // The hot path reads ONLY from `latched.*` (snapshot of target taken
+    // by begin_frame under target_mu_) and the per-bus ramp state.  No
+    // mutex acquisition here — the audio thread is the sole writer of
+    // `current`, `latched`, `ramp_*`, and `lp_prev_*`.
+    const f32 lp_target = s.latched.lp_hz;
 
     // LP coefficient. If we're at or above bypass, skip the filter math.
     const bool lp_enabled = (lp_target < kLpBypassHz);
     const f32  alpha      = lp_enabled ? lp_alpha(lp_target, sample_rate_) : 1.0f;
 
-    f32 lp_l = s.lp_prev_l;
-    f32 lp_r = s.lp_prev_r;
+    f32 g_cur = s.current.gain_linear;
+    f32 lp_l  = s.lp_prev_l;
+    f32 lp_r  = s.lp_prev_r;
 
     for (u32 i = 0; i < frames; ++i) {
-        // Advance gain ramp toward target, clamped to not overshoot.
-        if (g_step > 0.0f && g_cur < g_target) {
-            g_cur += g_step;
-            if (g_cur > g_target) g_cur = g_target;
-        } else if (g_step < 0.0f && g_cur > g_target) {
-            g_cur += g_step;
-            if (g_cur < g_target) g_cur = g_target;
-        } else {
-            g_cur = g_target;
+        // Advance gain ramp toward `ramp_target_gain`.  The per-sample
+        // step is FIXED at ramp-arm time (= delta / kRampSamples) and
+        // counted down by `ramp_remaining` so a 1.0 → 0.0 hop takes
+        // EXACTLY kRampSamples samples, regardless of audio-callback
+        // block size.  When `ramp_remaining` hits zero we snap to target
+        // to absorb any float drift.
+        if (s.ramp_remaining > 0u) {
+            g_cur += s.ramp_step;
+            --s.ramp_remaining;
+            if (s.ramp_remaining == 0u) {
+                g_cur = s.ramp_target_gain;
+            }
         }
 
         f32 l = accum_stereo[2*i + 0] * g_cur;
@@ -202,14 +222,14 @@ void BusMixer::process_bus_block(BusState& s, f32* accum_stereo,
     s.lp_prev_l           = lp_l;
     s.lp_prev_r           = lp_r;
     s.current.gain_linear = g_cur;
-    // lp_hz / reverb_send are read directly from `target` per sample —
+    // lp_hz / reverb_send are read directly from `latched` per sample —
     // there's no separate per-sample interpolation for those because
     // (a) lp_hz changes from gameplay are rare (per-bus mood / EQ tweak,
     // not per-event), and (b) reverb_send rides on top of the bus signal,
     // which is already gain-ramped, so a reverb_send jump can't produce a
     // discontinuity larger than the bus signal itself.
     s.current.lp_hz       = lp_target;
-    s.current.reverb_send = s.target.reverb_send;
+    s.current.reverb_send = s.latched.reverb_send;
 }
 
 void BusMixer::mix_buses(f32* master_stereo, f32* reverb_send_mono, u32 frames) noexcept {
@@ -229,13 +249,14 @@ void BusMixer::mix_buses(f32* master_stereo, f32* reverb_send_mono, u32 frames) 
         f32* acc    = accum_ptr(i);
 
         // Early-out for buses that have no signal AND no in-flight gain
-        // ramp. We must still process when the gain is mid-ramp (current
-        // != target) because the current value has to converge to the
-        // target even when the bus is silent — otherwise a UI thread
-        // setting gain on an empty bus would never see it take effect.
+        // ramp.  We must still process when a ramp is in flight (counter
+        // > 0 OR latched.lp_hz changed) — otherwise a UI thread setting
+        // gain on an empty bus would never see it take effect.  Reads
+        // come from `latched.*` (snapshot) and the per-bus ramp counter,
+        // never from `target.*` (which the setters write under target_mu_).
         const bool mid_ramp =
-            s.current.gain_linear != s.target.gain_linear ||
-            s.current.lp_hz != s.target.lp_hz;
+            s.ramp_remaining > 0u ||
+            s.current.lp_hz != s.latched.lp_hz;
         bool needs_processing = mid_ramp;
         if (!needs_processing) {
             for (u32 k = 0; k < stereo_floats; ++k) {
