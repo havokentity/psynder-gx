@@ -505,6 +505,11 @@ void body_get_transform(const RigidBody* rb, float out_pos[3], float out_quat[4]
 
 namespace {
 
+// Minimum cylinder half-height for a character capsule: a capsule needs a
+// non-zero segment between its two hemispheres. This is also the floor that
+// keeps StanceHeight's clamp in agreement with the shape actually built.
+constexpr float kMinCapsuleHalfSegment = 0.01f;
+
 JPH::RefConst<JPH::Shape> MakeCharacterShape(float radius, float total_height) {
     // CharacterVirtual expects its shape to have its origin at the foot
     // (not centre-of-mass). The standard recipe is a capsule rotated /
@@ -515,7 +520,7 @@ JPH::RefConst<JPH::Shape> MakeCharacterShape(float radius, float total_height) {
     const float half_segment =
         (total_height - 2.0f * radius) * 0.5f;
     const float clamped_half =
-        half_segment > 0.0f ? half_segment : 0.01f;
+        half_segment > 0.0f ? half_segment : kMinCapsuleHalfSegment;
 
     JPH::CapsuleShapeSettings cs(clamped_half, radius);
     cs.SetEmbedded();
@@ -531,18 +536,26 @@ JPH::RefConst<JPH::Shape> MakeCharacterShape(float radius, float total_height) {
     return rts_result.IsValid() ? rts_result.Get() : nullptr;
 }
 
-float StanceHeight(float base_height, psynder::physics::CharacterStance s) {
+float StanceHeight(float base_height, float radius, psynder::physics::CharacterStance s) {
     using S = psynder::physics::CharacterStance;
     // Real FPS-scale silhouettes for a 1.8 m adult: ~1.17 m crouched (knees
-    // bent, torso upright) and ~0.54 m prone (lying with head raised).
+    // bent, torso upright) and a low prone profile.
     constexpr float kCrouchFraction = 0.65f;
     constexpr float kProneFraction  = 0.30f;
+    float h = base_height;
     switch (s) {
-        case S::Stand:  return base_height;
-        case S::Crouch: return base_height * kCrouchFraction;
-        case S::Prone:  return base_height * kProneFraction;
+        case S::Stand:  h = base_height;                  break;
+        case S::Crouch: h = base_height * kCrouchFraction; break;
+        case S::Prone:  h = base_height * kProneFraction;  break;
     }
-    return base_height;
+    // A capsule of this radius can be no shorter than its two hemispheres
+    // plus MakeCharacterShape's minimum cylinder segment. Clamp so the value
+    // we report actually matches the shape that gets built — without it a
+    // prone request below that floor silently became a near-sphere while
+    // character_capsule_height_m() still reported the shorter, unbuildable
+    // height. With the 0.40 m default radius this floors prone at 0.82 m.
+    const float min_h = 2.0f * (radius + kMinCapsuleHalfSegment);
+    return h > min_h ? h : min_h;
 }
 
 } // anonymous
@@ -605,7 +618,7 @@ void character_tick(CharacterController* cc,
     else if (in.crouch) want = CharacterStance::Crouch;
     if (want != cc->stance) {
         const float new_height =
-            StanceHeight(cc->capsule_height, want);
+            StanceHeight(cc->capsule_height, cc->capsule_radius, want);
         JPH::RefConst<JPH::Shape> new_shape =
             MakeCharacterShape(cc->capsule_radius, new_height);
         if (new_shape != nullptr) {
@@ -764,9 +777,14 @@ IslandSolverConfig island_solver_config(const World* world) {
 void set_island_solver_config(World* world, const IslandSolverConfig& cfg) {
     if (!world) return;
     JPH::PhysicsSettings s = world->system.GetPhysicsSettings();
-    s.mNumVelocitySteps           = cfg.velocity_steps;
+    // Friction is applied from the previous iteration's non-penetration
+    // impulse, so the velocity solver needs >= 2 iterations or friction
+    // silently breaks (Jolt invariant). Clamp rather than trust the caller.
+    s.mNumVelocitySteps           = cfg.velocity_steps < 2u ? 2u : cfg.velocity_steps;
     s.mNumPositionSteps           = cfg.position_steps;
-    s.mBaumgarte                  = cfg.baumgarte;
+    // Baumgarte is a 0..1 fraction of positional error corrected per step.
+    s.mBaumgarte                  = cfg.baumgarte < 0.0f ? 0.0f
+                                  : (cfg.baumgarte > 1.0f ? 1.0f : cfg.baumgarte);
     s.mMinVelocityForRestitution  = cfg.min_velocity_for_restitution_mps;
     s.mTimeBeforeSleep            = cfg.time_before_sleep_s;
     s.mPointVelocitySleepThreshold = cfg.point_velocity_sleep_threshold_mps;
@@ -825,7 +843,7 @@ CharacterStance character_stance(const CharacterController* cc) {
 
 float character_capsule_height_m(const CharacterController* cc) {
     if (!cc) return 0.0f;
-    return StanceHeight(cc->capsule_height, cc->stance);
+    return StanceHeight(cc->capsule_height, cc->capsule_radius, cc->stance);
 }
 
 float character_lean(const CharacterController* cc) {

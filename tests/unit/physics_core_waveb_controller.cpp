@@ -26,6 +26,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <vector>
 
 using namespace psynder::physics;
 
@@ -50,28 +51,32 @@ WorldDesc unit_world_desc() {
 
 struct WorldScope {
     World* w = nullptr;
+    std::vector<RigidBody*> bodies;
     WorldScope() {
         w = create_world(unit_world_desc());
         REQUIRE(w != nullptr);
     }
-    ~WorldScope() { destroy_world(w); }
-};
-
-// Static (mass 0) box. Half-extents in metres; quaternion {x,y,z,w}.
-RigidBody* add_box(World* w,
-                   float cx, float cy, float cz,
+    ~WorldScope() {
+        for (RigidBody* b : bodies) destroy_body(w, b);
+        destroy_world(w);
+    }
+    // Static (mass 0) box, tracked so the scope tears it down on exit.
+    // Half-extents in metres; quaternion {x,y,z,w}.
+    RigidBody* box(float cx, float cy, float cz,
                    float hx, float hy, float hz,
                    float qx = 0.0f, float qy = 0.0f, float qz = 0.0f, float qw = 1.0f) {
-    BodyDesc d{};
-    d.shape    = Shape::Box;
-    d.pos[0]   = cx; d.pos[1] = cy; d.pos[2] = cz;
-    d.rot_quat[0] = qx; d.rot_quat[1] = qy; d.rot_quat[2] = qz; d.rot_quat[3] = qw;
-    d.mass_kg  = 0.0f; // static
-    d.dims[0]  = hx; d.dims[1] = hy; d.dims[2] = hz;
-    RigidBody* b = create_body(w, d);
-    REQUIRE(b != nullptr);
-    return b;
-}
+        BodyDesc d{};
+        d.shape    = Shape::Box;
+        d.pos[0]   = cx; d.pos[1] = cy; d.pos[2] = cz;
+        d.rot_quat[0] = qx; d.rot_quat[1] = qy; d.rot_quat[2] = qz; d.rot_quat[3] = qw;
+        d.mass_kg  = 0.0f; // static
+        d.dims[0]  = hx; d.dims[1] = hy; d.dims[2] = hz;
+        RigidBody* b = create_body(w, d);
+        REQUIRE(b != nullptr);
+        bodies.push_back(b);
+        return b;
+    }
+};
 
 CharacterController* spawn_character(World* w, float x, float y, float z) {
     CharacterDesc cd{};
@@ -118,10 +123,9 @@ TEST_CASE("physics-core wave-b: capsule climbs a ramp within the slope limit",
     const float tan_a = sin_a / cos_a;
     const float half  = 0.5f * ramp_rad;
     const float hy    = 0.5f;
-    add_box(scope.w,
-            0.0f, -hy * cos_a, hy * sin_a, // centre puts the top face on y=tan*z
-            20.0f, hy, 15.0f,
-            -std::sin(half), 0.0f, 0.0f, std::cos(half)); // rotate -30 deg about X
+    scope.box(0.0f, -hy * cos_a, hy * sin_a, // centre puts the top face on y=tan*z
+              20.0f, hy, 15.0f,
+              -std::sin(half), 0.0f, 0.0f, std::cos(half)); // rotate -30 deg about X
 
     const float z0 = -4.0f;
     CharacterController* cc =
@@ -149,8 +153,8 @@ TEST_CASE("physics-core wave-b: capsule steps up a curb within the step offset",
 
     // Flat floor (top at y=0) + a 0.20 m curb (< 0.30 m default step offset)
     // occupying z >= 0 with its front face at z=0.
-    add_box(scope.w, 0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
-    add_box(scope.w, 0.0f,  0.1f, 10.0f, 20.0f, 0.1f, 10.0f);        // curb top y=0.2
+    scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
+    scope.box(0.0f,  0.1f, 10.0f, 20.0f, 0.1f, 10.0f);        // curb top y=0.2
 
     CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -2.0f);
     settle(scope.w, cc, 60);
@@ -174,8 +178,8 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a curb taller than the ste
     WorldScope scope;
 
     // 0.60 m curb (> 0.30 m step offset): the controller can't step it.
-    add_box(scope.w, 0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
-    add_box(scope.w, 0.0f,  0.3f, 10.0f, 20.0f, 0.3f, 10.0f);        // curb top y=0.6
+    scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
+    scope.box(0.0f,  0.3f, 10.0f, 20.0f, 0.3f, 10.0f);        // curb top y=0.6
 
     CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -2.0f);
     settle(scope.w, cc, 60);
@@ -198,8 +202,8 @@ TEST_CASE("physics-core wave-b: capsule is blocked by a wall steeper than the sl
 
     // Vertical wall (90 deg, far above the 45 deg slope limit), front face
     // at z=-0.5, on a flat floor.
-    add_box(scope.w, 0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
-    add_box(scope.w, 0.0f,  2.0f, 0.0f, 20.0f, 2.0f, 0.5f);          // wall y[0,4] z[-0.5,0.5]
+    scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);          // floor
+    scope.box(0.0f,  2.0f, 0.0f, 20.0f, 2.0f, 0.5f);          // wall y[0,4] z[-0.5,0.5]
 
     CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -3.0f);
     settle(scope.w, cc, 60);
@@ -224,8 +228,8 @@ TEST_CASE("physics-core wave-b: ground snap keeps the capsule grounded over a sm
 
     // Upper floor (top y=0) for z in [-20, 0]; lower floor (top y=-0.2) for
     // z in [0, 20]. The 0.20 m drop is within the 0.30 m ground-snap range.
-    add_box(scope.w, 0.0f, -0.5f, -10.0f, 20.0f, 0.5f, 10.0f); // upper, top y=0
-    add_box(scope.w, 0.0f, -0.7f,  10.0f, 20.0f, 0.5f, 10.0f); // lower, top y=-0.2
+    scope.box(0.0f, -0.5f, -10.0f, 20.0f, 0.5f, 10.0f); // upper, top y=0
+    scope.box(0.0f, -0.7f,  10.0f, 20.0f, 0.5f, 10.0f); // lower, top y=-0.2
 
     CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, -3.0f);
     settle(scope.w, cc, 60);
@@ -250,7 +254,7 @@ TEST_CASE("physics-core wave-b: ground snap keeps the capsule grounded over a sm
 TEST_CASE("physics-core wave-b: crouch and prone shrink the capsule, standing restores it",
           "[physics][character][waveb]") {
     WorldScope scope;
-    add_box(scope.w, 0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f); // floor, no ceiling
+    scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f); // floor, no ceiling
 
     CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, 0.0f);
     settle(scope.w, cc, 60);
@@ -280,7 +284,7 @@ TEST_CASE("physics-core wave-b: crouch and prone shrink the capsule, standing re
 TEST_CASE("physics-core wave-b: lean eases toward the input and clamps",
           "[physics][character][waveb]") {
     WorldScope scope;
-    add_box(scope.w, 0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);
+    scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);
 
     CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, 0.0f);
     settle(scope.w, cc, 60);
@@ -376,13 +380,28 @@ TEST_CASE("physics-core wave-b: narrowphase and island tuning round-trip",
         // Independent of the narrowphase group.
         const NarrowphaseConfig np = narrowphase_config(scope.w);
         REQUIRE(approx_eq(np.speculative_contact_distance_m, 0.02f));
+
+        // Degenerate values are clamped: friction needs >= 2 velocity
+        // iterations, and baumgarte is a 0..1 fraction.
+        IslandSolverConfig bad{};
+        bad.velocity_steps = 1u;   // below the friction floor
+        bad.baumgarte      = 1.5f; // above the valid range
+        set_island_solver_config(scope.w, bad);
+        const IslandSolverConfig clamped = island_solver_config(scope.w);
+        REQUIRE(clamped.velocity_steps == 2u);
+        REQUIRE(approx_eq(clamped.baumgarte, 1.0f));
+
+        IslandSolverConfig neg{};
+        neg.baumgarte = -0.5f; // below the valid range
+        set_island_solver_config(scope.w, neg);
+        REQUIRE(approx_eq(island_solver_config(scope.w).baumgarte, 0.0f));
     }
 }
 
 TEST_CASE("physics-core wave-b: character tuning round-trips",
           "[physics][tuning][waveb]") {
     WorldScope scope;
-    add_box(scope.w, 0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);
+    scope.box(0.0f, -0.5f, 0.0f, 20.0f, 0.5f, 20.0f);
     CharacterController* cc = spawn_character(scope.w, 0.0f, 0.1f, 0.0f);
 
     const CharacterTuning def = character_tuning(cc);
