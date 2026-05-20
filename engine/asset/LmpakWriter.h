@@ -32,6 +32,12 @@ namespace psynder::asset::lmpak {
 bool zstd_available() noexcept;
 bool zstd_compress(const u8* src, usize src_len, int level, std::vector<u8>& out);
 
+// Decompress a zstd frame whose decompressed size is known up front (the
+// .lmpak entry table and the .lma header both record it). Writes into the
+// caller-owned `dst` and returns true iff zstd is built in AND the frame
+// inflates to exactly `dst_capacity` bytes. Never allocates, so noexcept.
+bool zstd_decompress(const u8* src, usize src_len, u8* dst, usize dst_capacity) noexcept;
+
 struct WriterEntry {
     std::string path;          // virtual path (normalized inside)
     std::vector<u8> payload;   // raw bytes; if compressed, already zstd-framed

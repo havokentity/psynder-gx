@@ -39,4 +39,17 @@ bool zstd_compress(const u8* src, usize src_len, int level, std::vector<u8>& out
 #endif
 }
 
+bool zstd_decompress(const u8* src, usize src_len, u8* dst, usize dst_capacity) noexcept {
+#if PSYNDER_ASSET_HAS_ZSTD
+    usize n = ZSTD_decompress(dst, dst_capacity, src, src_len);
+    return !ZSTD_isError(n) && n == dst_capacity;
+#else
+    (void)src;
+    (void)src_len;
+    (void)dst;
+    (void)dst_capacity;
+    return false;
+#endif
+}
+
 }  // namespace psynder::asset::lmpak
