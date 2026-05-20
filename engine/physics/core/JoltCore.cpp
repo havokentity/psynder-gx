@@ -23,6 +23,7 @@
 // that change is local to this file and does not touch the public API.
 
 #include "physics/core/PublicPhysicsCore.h"
+#include "physics/core/PhysicsTuning.h"
 
 // Jolt's NEON code path in DVec3.inl trips -Wdouble-promotion (it
 // passes float literals to f64 intrinsics intentionally). The project's
@@ -346,13 +347,21 @@ struct CharacterController {
     JPH::Ref<JPH::CharacterVirtual> character;
     World*                          owner          = nullptr;
     float                           capsule_radius = 0.40f;
-    float                           capsule_height = 1.80f;
+    float                           capsule_height = 1.80f;  // standing height
     float                           walk_speed     = 5.0f;
     float                           run_speed      = 8.0f;
     float                           jump_vel       = 4.5f;
     CharacterStance                 stance         = CharacterStance::Stand;
     float                           yaw_deg        = 0.0f;
     float                           vertical_velocity = 0.0f;
+    // ── Wave-B kinematic-capsule tuning (real metric defaults) ──
+    float                           max_slope_deg      = 45.0f;
+    float                           step_offset_m      = 0.30f;
+    float                           ground_snap_dist_m = 0.30f;
+    float                           lean_offset_max_m  = 0.22f;
+    float                           lean_speed_mps     = 2.5f;
+    // ── Lean state, eased toward the input target each tick ──
+    float                           lean_amount        = 0.0f;  // -1 left .. +1 right
 };
 
 // ─── World lifecycle ─────────────────────────────────────────────────────
@@ -473,14 +482,26 @@ void body_get_transform(const RigidBody* rb, float out_pos[3], float out_quat[4]
 // ─── Character controller ────────────────────────────────────────────────
 //
 // CharacterVirtual is Jolt's recommended FPS controller — it owns its
-// own shape, slides along walls, handles step-up via WalkStairs, and is
-// driven by setting linear velocity each tick. We expose a slim
-// "input → tick → transform" loop that hides the Jolt setup.
+// own shape, slides along walls, and is driven by setting linear velocity
+// each tick. We expose a slim "input → tick → transform" loop that hides
+// the Jolt setup.
 //
-// The capsule shape is rebuilt on stance changes (Stand/Crouch/Prone)
-// so the controller's collision volume actually matches the visual
-// posture. M4 will add lean / ladder / water modes; the public API
-// already carries those bools, but they're no-ops until then.
+// Each tick runs CharacterVirtual::ExtendedUpdate, which composes the
+// three motions an FPS capsule needs:
+//   • Update      — slide the capsule along walls / walkable slopes.
+//   • WalkStairs  — auto-step curbs and stairs up to step_offset_m.
+//   • StickToFloor — project the capsule back onto the floor when
+//                    descending steps / ramps (ground snap) so it doesn't
+//                    launch off small drops at speed.
+// The walkable-slope ceiling is CharacterVirtual's max-slope angle:
+// surfaces steeper than it (e.g. a wall) block horizontal motion instead
+// of being climbed.
+//
+// The capsule shape is rebuilt on stance changes (Stand/Crouch/Prone) so
+// the collision volume matches the posture. Lean eases a lateral shape
+// offset so the capsule physically peeks (and is stopped by a wall it
+// leans into); the camera lane reads character_lean() for the matching
+// roll. Ladder / water modes are still deferred (M6, DESIGN §13).
 
 namespace {
 
@@ -512,10 +533,14 @@ JPH::RefConst<JPH::Shape> MakeCharacterShape(float radius, float total_height) {
 
 float StanceHeight(float base_height, psynder::physics::CharacterStance s) {
     using S = psynder::physics::CharacterStance;
+    // Real FPS-scale silhouettes for a 1.8 m adult: ~1.17 m crouched (knees
+    // bent, torso upright) and ~0.54 m prone (lying with head raised).
+    constexpr float kCrouchFraction = 0.65f;
+    constexpr float kProneFraction  = 0.30f;
     switch (s) {
         case S::Stand:  return base_height;
-        case S::Crouch: return base_height * 0.5f;
-        case S::Prone:  return base_height * 0.3f;
+        case S::Crouch: return base_height * kCrouchFraction;
+        case S::Prone:  return base_height * kProneFraction;
     }
     return base_height;
 }
@@ -543,14 +568,19 @@ CharacterController* create_character(World* w, const CharacterDesc& d) {
 
     JPH::CharacterVirtualSettings cvs;
     cvs.mShape = shape;
-    // SupportingVolume bounds the bottom of the capsule used for ground
-    // detection. A plane at 0.05 m above the foot keeps the controller
-    // standing on steps even with mild surface noise.
+    // SupportingVolume splits supporting contacts from blocking ones: the
+    // plane sits at the centre of the bottom hemisphere (y = radius in foot-
+    // origin local space), so contacts on the lower hemisphere can hold the
+    // character up while contacts higher on the capsule only block motion.
     cvs.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -cc->capsule_radius);
-    cvs.mMaxSlopeAngle    = JPH::DegreesToRadians(50.0f);
+    // Real metric controller defaults (mirror CharacterTuning's defaults).
+    cvs.mMaxSlopeAngle    = JPH::DegreesToRadians(cc->max_slope_deg); // 45 deg
     cvs.mMass             = 80.0f;       // kg (typical adult)
     cvs.mMaxStrength      = 200.0f;      // N — push force ceiling
     cvs.mShapeOffset      = JPH::Vec3::sZero();
+    // Scan a little outside the shape for predictive contacts; 0 would let
+    // the capsule jam against geometry as it can't compute a slide normal.
+    cvs.mPredictiveContactDistance = 0.10f; // m
 
     cc->character = new JPH::CharacterVirtual(
         &cvs, R3(d.pos), JPH::Quat::sIdentity(), 0ULL, &w->system);
@@ -594,46 +624,63 @@ void character_tick(CharacterController* cc,
         }
     }
 
-    // ── 2. Build planar move vector in character-local axes ──
-    // For Wave-B we keep input in world space (no yaw rotation yet);
-    // the FPS camera will own yaw and feed pre-rotated XY values once
-    // lane 06 (scene) wires the camera component. This keeps the
-    // character self-contained.
-    const float mx = in.move_xy[0];
-    const float mz = in.move_xy[1];
-    float planar_len = std::sqrt(mx * mx + mz * mz);
-    if (planar_len > 1.0f) planar_len = 1.0f;
+    // ── 2. Planar move (world space for Wave-B; the FPS camera owns yaw
+    //      and will feed pre-rotated XY once lane 06 wires the camera). ──
+    float mx = in.move_xy[0];
+    float mz = in.move_xy[1];
+    // Clamp the input to the unit disc so diagonal input isn't faster than
+    // cardinal input.
+    const float planar_len = std::sqrt(mx * mx + mz * mz);
+    if (planar_len > 1.0f) {
+        mx /= planar_len;
+        mz /= planar_len;
+    }
     const float speed = cc->run_speed; // sprint by default; lane 06 hooks the toggle later
 
-    JPH::Vec3 desired_velocity(
-        mx * speed,
-        cc->character->GetLinearVelocity().GetY(),
-        mz * speed);
-
-    // ── 3. Gravity + jump ──
+    // ── 3. Vertical velocity: reset on the ground (or launch on jump),
+    //      otherwise integrate gravity. We read the ground state left by
+    //      the previous ExtendedUpdate. The `vertical_velocity <= 0` guard
+    //      stops a fresh jump from being cancelled while the controller is
+    //      still reported as grounded on the launch tick. ──
     const JPH::Vec3 gravity = cc->owner->system.GetGravity();
-    if (cc->character->GetGroundState() ==
-        JPH::CharacterVirtual::EGroundState::OnGround) {
-        cc->vertical_velocity = 0.0f;
-        if (in.jump) {
-            cc->vertical_velocity = cc->jump_vel;
-        }
+    const bool on_ground = cc->character->GetGroundState() ==
+                           JPH::CharacterVirtual::EGroundState::OnGround;
+    if (on_ground && cc->vertical_velocity <= 0.0f) {
+        cc->vertical_velocity = in.jump ? cc->jump_vel : 0.0f;
     } else {
         cc->vertical_velocity += gravity.GetY() * dt;
     }
-    desired_velocity.SetY(cc->vertical_velocity);
-    cc->character->SetLinearVelocity(desired_velocity);
+    cc->character->SetLinearVelocity(
+        JPH::Vec3(mx * speed, cc->vertical_velocity, mz * speed));
 
-    // ── 4. Lean is cosmetic (camera roll); handled by render lane. ──
-    (void)in.lean_left;
-    (void)in.lean_right;
+    // ── 4. Lean: ease a lateral shape offset toward the input target so
+    //      the capsule physically peeks. The offset is local-space, so it
+    //      rotates with facing once yaw is wired. Easing it gently (rather
+    //      than snapping) keeps SetShapeOffset from teleporting the capsule
+    //      into geometry; any overlap with a wall it leans into is resolved
+    //      by the ExtendedUpdate below. ──
+    const float lean_target =
+        (in.lean_right ? 1.0f : 0.0f) - (in.lean_left ? 1.0f : 0.0f);
+    const float lean_step = (cc->lean_offset_max_m > 0.0f)
+        ? (cc->lean_speed_mps / cc->lean_offset_max_m) * dt // metres/s -> lean/s
+        : 1.0f;
+    const float lean_delta = lean_target - cc->lean_amount;
+    if (lean_delta > lean_step)       cc->lean_amount += lean_step;
+    else if (lean_delta < -lean_step) cc->lean_amount -= lean_step;
+    else                              cc->lean_amount = lean_target;
+    cc->character->SetShapeOffset(
+        JPH::Vec3(cc->lean_amount * cc->lean_offset_max_m, 0.0f, 0.0f));
 
-    // ── 5. Integrate. Use the basic Update (no stair-walk / stick) for
-    //      the bootstrap; ExtendedUpdate wires in once the scene exposes
-    //      stair-step preferences in M4. ──
-    cc->character->Update(
+    // ── 5. Integrate with ExtendedUpdate = Update + WalkStairs +
+    //      StickToFloor: step up curbs/stairs up to step_offset_m and snap
+    //      back onto the floor within ground_snap_dist_m when descending. ──
+    JPH::CharacterVirtual::ExtendedUpdateSettings eus;
+    eus.mWalkStairsStepUp     = JPH::Vec3(0.0f, cc->step_offset_m, 0.0f);
+    eus.mStickToFloorStepDown = JPH::Vec3(0.0f, -cc->ground_snap_dist_m, 0.0f);
+    cc->character->ExtendedUpdate(
         dt,
         gravity,
+        eus,
         cc->owner->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
         cc->owner->system.GetDefaultLayerFilter(Layers::MOVING),
         /*body_filter=*/{},
@@ -656,6 +703,133 @@ void character_get_transform(const CharacterController* cc,
         const auto fwd = rot.RotateAxisZ();
         *out_yaw_deg = std::atan2(-fwd.GetX(), -fwd.GetZ()) * 180.0f / 3.14159265358979323846f;
     }
+}
+
+// ─── Internal tuning API (PhysicsTuning.h) ───────────────────────────────
+//
+// Narrowphase + island knobs map onto the single JPH::PhysicsSettings the
+// world owns. Each setter reads a copy, overwrites only its own group and
+// writes back, so narrowphase and island config are independent. Reading
+// straight after create_world() returns Jolt's defaults, matching the
+// struct defaults in PhysicsTuning.h.
+
+NarrowphaseConfig narrowphase_config(const World* world) {
+    NarrowphaseConfig cfg{};
+    if (!world) return cfg;
+    const JPH::PhysicsSettings& s = world->system.GetPhysicsSettings();
+    cfg.speculative_contact_distance_m = s.mSpeculativeContactDistance;
+    cfg.penetration_slop_m             = s.mPenetrationSlop;
+    cfg.manifold_tolerance_m           = s.mManifoldTolerance;
+    cfg.max_penetration_distance_m     = s.mMaxPenetrationDistance;
+    cfg.linear_cast_threshold          = s.mLinearCastThreshold;
+    cfg.linear_cast_max_penetration    = s.mLinearCastMaxPenetration;
+    cfg.use_manifold_reduction         = s.mUseManifoldReduction;
+    cfg.use_body_pair_cache            = s.mUseBodyPairContactCache;
+    cfg.check_active_edges             = s.mCheckActiveEdges;
+    return cfg;
+}
+
+void set_narrowphase_config(World* world, const NarrowphaseConfig& cfg) {
+    if (!world) return;
+    JPH::PhysicsSettings s = world->system.GetPhysicsSettings();
+    s.mSpeculativeContactDistance = cfg.speculative_contact_distance_m;
+    s.mPenetrationSlop            = cfg.penetration_slop_m;
+    s.mManifoldTolerance          = cfg.manifold_tolerance_m;
+    s.mMaxPenetrationDistance     = cfg.max_penetration_distance_m;
+    s.mLinearCastThreshold        = cfg.linear_cast_threshold;
+    s.mLinearCastMaxPenetration   = cfg.linear_cast_max_penetration;
+    s.mUseManifoldReduction       = cfg.use_manifold_reduction;
+    s.mUseBodyPairContactCache    = cfg.use_body_pair_cache;
+    s.mCheckActiveEdges           = cfg.check_active_edges;
+    world->system.SetPhysicsSettings(s);
+}
+
+IslandSolverConfig island_solver_config(const World* world) {
+    IslandSolverConfig cfg{};
+    if (!world) return cfg;
+    const JPH::PhysicsSettings& s = world->system.GetPhysicsSettings();
+    cfg.velocity_steps                       = s.mNumVelocitySteps;
+    cfg.position_steps                       = s.mNumPositionSteps;
+    cfg.baumgarte                            = s.mBaumgarte;
+    cfg.min_velocity_for_restitution_mps     = s.mMinVelocityForRestitution;
+    cfg.time_before_sleep_s                  = s.mTimeBeforeSleep;
+    cfg.point_velocity_sleep_threshold_mps   = s.mPointVelocitySleepThreshold;
+    cfg.use_large_island_splitter            = s.mUseLargeIslandSplitter;
+    cfg.constraint_warm_start                = s.mConstraintWarmStart;
+    cfg.allow_sleeping                       = s.mAllowSleeping;
+    cfg.deterministic                        = s.mDeterministicSimulation;
+    return cfg;
+}
+
+void set_island_solver_config(World* world, const IslandSolverConfig& cfg) {
+    if (!world) return;
+    JPH::PhysicsSettings s = world->system.GetPhysicsSettings();
+    s.mNumVelocitySteps           = cfg.velocity_steps;
+    s.mNumPositionSteps           = cfg.position_steps;
+    s.mBaumgarte                  = cfg.baumgarte;
+    s.mMinVelocityForRestitution  = cfg.min_velocity_for_restitution_mps;
+    s.mTimeBeforeSleep            = cfg.time_before_sleep_s;
+    s.mPointVelocitySleepThreshold = cfg.point_velocity_sleep_threshold_mps;
+    s.mUseLargeIslandSplitter     = cfg.use_large_island_splitter;
+    s.mConstraintWarmStart        = cfg.constraint_warm_start;
+    s.mAllowSleeping              = cfg.allow_sleeping;
+    s.mDeterministicSimulation    = cfg.deterministic;
+    world->system.SetPhysicsSettings(s);
+}
+
+CharacterTuning character_tuning(const CharacterController* cc) {
+    CharacterTuning cfg{};
+    if (!cc || cc->character == nullptr) return cfg;
+    // max_slope / step / ground-snap / lean are stored on the controller
+    // (exact round-trip); mass + strength are read straight from Jolt.
+    cfg.max_slope_angle_deg = cc->max_slope_deg;
+    cfg.step_offset_m       = cc->step_offset_m;
+    cfg.ground_snap_dist_m  = cc->ground_snap_dist_m;
+    cfg.mass_kg             = cc->character->GetMass();
+    cfg.max_push_strength_n = cc->character->GetMaxStrength();
+    cfg.lean_offset_m       = cc->lean_offset_max_m;
+    cfg.lean_speed_mps      = cc->lean_speed_mps;
+    return cfg;
+}
+
+void set_character_tuning(CharacterController* cc, const CharacterTuning& cfg) {
+    if (!cc || cc->character == nullptr) return;
+    cc->max_slope_deg      = cfg.max_slope_angle_deg;
+    cc->step_offset_m      = cfg.step_offset_m;
+    cc->ground_snap_dist_m = cfg.ground_snap_dist_m;
+    cc->lean_offset_max_m  = cfg.lean_offset_m;
+    cc->lean_speed_mps     = cfg.lean_speed_mps;
+    cc->character->SetMaxSlopeAngle(JPH::DegreesToRadians(cfg.max_slope_angle_deg));
+    cc->character->SetMass(cfg.mass_kg);
+    cc->character->SetMaxStrength(cfg.max_push_strength_n);
+}
+
+CharacterGroundState character_ground_state(const CharacterController* cc) {
+    if (!cc || cc->character == nullptr) return CharacterGroundState::InAir;
+    switch (cc->character->GetGroundState()) {
+        case JPH::CharacterVirtual::EGroundState::OnGround:
+            return CharacterGroundState::OnGround;
+        case JPH::CharacterVirtual::EGroundState::OnSteepGround:
+            return CharacterGroundState::OnSteepSlope;
+        case JPH::CharacterVirtual::EGroundState::NotSupported:
+            return CharacterGroundState::NotSupported;
+        case JPH::CharacterVirtual::EGroundState::InAir:
+            return CharacterGroundState::InAir;
+    }
+    return CharacterGroundState::InAir;
+}
+
+CharacterStance character_stance(const CharacterController* cc) {
+    return cc ? cc->stance : CharacterStance::Stand;
+}
+
+float character_capsule_height_m(const CharacterController* cc) {
+    if (!cc) return 0.0f;
+    return StanceHeight(cc->capsule_height, cc->stance);
+}
+
+float character_lean(const CharacterController* cc) {
+    return cc ? cc->lean_amount : 0.0f;
 }
 
 } // namespace psynder::physics
