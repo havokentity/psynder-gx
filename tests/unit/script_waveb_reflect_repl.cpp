@@ -172,9 +172,11 @@ TEST_CASE("script: lua console command evaluates against the live VM",
 
     // Lua print() output is captured into the console output during the command.
     auto r2 = con.Execute("lua print('hello-repl')");
+    REQUIRE(r2.ok);
     REQUIRE(r2.output.find("hello-repl") != std::string::npos);
 
     // The REPL sees engine reflection too — evaluated live against the world.
     auto r3 = con.Execute("lua reflect.component('Health').fields[3].kind");
+    REQUIRE(r3.ok);
     REQUIRE(r3.output.find("u32") != std::string::npos);
 }

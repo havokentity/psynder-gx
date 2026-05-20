@@ -36,6 +36,7 @@ extern "C" {
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace psynder::script::detail {
 
@@ -49,6 +50,12 @@ namespace {
 // The `lua` console command is registered once for the process; Console
 // outlives any number of Vm start/shutdown cycles.
 std::atomic<bool> g_console_registered{false};
+
+// Thread that started the VM (Vm::start -> install_repl). The Lua VM and
+// g_capture are single-thread by contract (DESIGN.md §10.5), but Console
+// commands can be dispatched from any thread, so the `lua` command refuses
+// to run anywhere else rather than risk unsynchronised VM access.
+std::thread::id g_script_thread{};
 
 // Overridden Lua `print`: gather all arguments (honouring __tostring) into a
 // single tab-separated line and hand it to the active sink.
@@ -72,13 +79,23 @@ int l_print(lua_State* L) {
     return 0;
 }
 
-// `lua <line>` console command. Re-joins the tokenised arguments with single
-// spaces (the console tokenizer split them) and evaluates the result against
-// the live Vm, capturing any print() output into `out` alongside the value.
+// `lua <line>` console command. The console tokenizer (lane 01) has already
+// split the input on whitespace and consumed any DOUBLE-quoted runs, so we
+// rejoin the tokens with single spaces. Practical contract: write Lua string
+// literals with SINGLE quotes (e.g. `lua print('a b')`), which round-trip
+// intact; double quotes are eaten by the console quote-tokenizer. The editor
+// IPC path (script::repl_eval / Vm::execute_repl) takes the raw, untokenised
+// line and has no such limitation.
 void lua_console_cmd(std::span<const std::string_view> args,
                      ::psynder::console::Output& out) {
+    if (std::this_thread::get_id() != g_script_thread) {
+        out.PrintLine(
+            "error: 'lua' must run on the script thread (the Vm is single-thread)");
+        return;
+    }
     if (args.empty()) {
-        out.PrintLine("usage: lua <expression-or-statement>");
+        out.PrintLine(
+            "usage: lua <expr-or-statement>  (single-quote string literals)");
         return;
     }
     std::string line;
@@ -105,6 +122,10 @@ void lua_console_cmd(std::span<const std::string_view> args,
 }  // namespace
 
 void install_repl(lua_State* L) {
+    // Record the owning (script) thread so the `lua` command can reject any
+    // off-thread dispatch. Vm::start() runs on the dedicated game thread.
+    g_script_thread = std::this_thread::get_id();
+
     // Replace the stock base-library print with our console-routing version.
     lua_pushcfunction(L, l_print);
     lua_setglobal(L, "print");
