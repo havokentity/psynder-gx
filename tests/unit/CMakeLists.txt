@@ -39,9 +39,10 @@ else()
     add_test(NAME psynder_unit_smoke COMMAND psynder_unit)
 endif()
 
-# Make ctest's non-ASCII Catch2 name filters (e.g. "°", "—") match on Windows: the
-# manifest forces the process ANSI code page to UTF-8 so argv is decoded as UTF-8
-# rather than the legacy code page. Embedded by the linker via vs_link_exe/mt.
-if(MSVC)
-    target_sources(psynder_unit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/psynder_unit.manifest")
-endif()
+# ctest passes each discovered Catch2 TEST_CASE name back as a command-line filter.
+# On Windows a non-ASCII name (degree sign, em dash, ...) is mangled by the CRT's
+# legacy code-page argv decoding, so the filter matches nothing and the test is
+# reported as failed even though the product is fine. Keep TEST_CASE names ASCII-only
+# (see AGENTS.md) -- that makes discovery robust on every toolchain. An earlier
+# activeCodePage=UTF-8 manifest tried to paper over this but silently regressed on
+# plain incremental relinks, so it was removed in favour of the naming rule.

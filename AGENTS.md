@@ -54,6 +54,7 @@ These come on top of the design doc's coding standards (see DESIGN §14):
 - **Real metric units.** 1 world unit = 1 metre. Real masses, real torques, real material strengths. No demo-scaled shortcuts.
 - **Public headers are frozen** — `engine/<lane>/Public*.h` is the contract other lanes code against. Don't change without filing an Issue against the orchestrator; a public-header change cascades to every dependent lane and must be coordinated.
 - You may freely edit internal headers (anything `_internal.h`, `Impl/*.h`, or `.cpp` files in your lane).
+- **Catch2 `TEST_CASE` names must be ASCII-only.** ctest records each discovered test name and passes it back as a command-line filter; on Windows a non-ASCII name (a degree sign, an em dash, an arrow, …) is mangled by the CRT's legacy code-page argv decoding, so the filter matches nothing and the test is reported as *failed* even though the product is fine. Spell them out in ASCII instead (` deg`, `-`, `->`). This keeps `catch_discover_tests` robust on every toolchain — see the note in `tests/unit/CMakeLists.txt`.
 
 ## Mac smoke-test serialization
 

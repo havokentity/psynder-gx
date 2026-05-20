@@ -80,7 +80,7 @@ TEST_CASE("script: execute_string runs a chunk", "[script][exec]") {
     REQUIRE(out == "42");
 }
 
-TEST_CASE("script: DOTS — register_system over component arrays",
+TEST_CASE("script: DOTS - register_system over component arrays",
           "[script][dots]") {
     VmFixture fix;
 
@@ -167,7 +167,7 @@ TEST_CASE("script: DOTS — register_system over component arrays",
     REQUIRE(out == "7.0000");
 }
 
-TEST_CASE("script: DOTS — no per-entity OOP escape hatch exists",
+TEST_CASE("script: DOTS - no per-entity OOP escape hatch exists",
           "[script][dots]") {
     VmFixture fix;
 

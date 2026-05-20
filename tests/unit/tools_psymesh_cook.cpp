@@ -311,7 +311,7 @@ TEST_CASE("psymesh: single triangle round-trips through cook + re-parse", "[psym
     REQUIRE(find_vert(0, 1, 0) != static_cast<std::size_t>(-1));
 }
 
-TEST_CASE("psymesh: deterministic — same input produces byte-identical output", "[psymesh][determinism]") {
+TEST_CASE("psymesh: deterministic - same input produces byte-identical output", "[psymesh][determinism]") {
     const std::string obj_path = make_temp_path(".obj");
     write_text_file(obj_path, kUnitCubeObj);
 
@@ -487,7 +487,7 @@ TEST_CASE("psymesh: tangents are computed for a UV-mapped quad and unit length",
     }
 }
 
-TEST_CASE("psymesh: quad input rejection — face with 4 corners errors out", "[psymesh][error]") {
+TEST_CASE("psymesh: quad input rejection - face with 4 corners errors out", "[psymesh][error]") {
     const std::string obj_path = make_temp_path(".obj");
     // 4-corner face — must be rejected.
     write_text_file(obj_path,
