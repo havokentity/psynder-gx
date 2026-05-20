@@ -231,10 +231,12 @@ void substep(Vehicle& v, const VehicleInput& in, float steer_rad, float dt) {
         const float rpm = clampf(raw_rpm, kIdleRpm, v.redline_rpm);
         v.engine_rpm = rpm;
         float t_engine = engine_torque_at(v.curve, v.curve_count, rpm) * throttle;
-        if (throttle < 0.01f) t_engine -= kEngineBrakeNm * (rpm / v.redline_rpm);
-        // Rev limiter (fuel cut at redline) — this is what caps a gear's top
-        // speed and makes upshifting the only way to keep accelerating.
+        // Rev limiter (fuel cut at redline): drops DRIVE torque so each gear's
+        // top speed is capped and upshifting is the only way to keep
+        // accelerating. Applied BEFORE engine braking so off-throttle braking
+        // still acts at redline — the car can't freewheel past it on a coast.
         if (raw_rpm >= v.redline_rpm) t_engine = 0.0f;
+        if (throttle < 0.01f) t_engine -= kEngineBrakeNm * (rpm / v.redline_rpm);
         wheel_drive_torque = t_engine * trans / static_cast<float>(driven);
         reflected_inertia = kEngineInertiaKgM2 * trans * trans;
     } else {
@@ -300,7 +302,11 @@ void substep(Vehicle& v, const VehicleInput& in, float steer_rad, float dt) {
         }
 
         // Suspension pushes the chassis up along its axis.
-        const Vec3 contact = attach_world + axis_down * (center_dist + wd.tire_radius_m);
+        Vec3 contact = attach_world + axis_down * (center_dist + wd.tire_radius_m);
+        // During a penetration-recovery hit the raw contact can sit just below
+        // the plane; keep force application at/above the ground so recovery
+        // doesn't inject torques from a sub-surface lever arm.
+        if (contact.y < kGroundHeight) contact.y = kGroundHeight;
         const Vec3 r_contact = contact - v.position;
         force = force + support_dir * load;
         torque = torque + cross(r_contact, support_dir * load);
@@ -459,10 +465,14 @@ void vehicle_tick(Vehicle* v, const VehicleInput& input, float dt) {
 
     // Substep to a fixed internal dt so behaviour is robust to the caller's dt
     // and the integration stays stable with stiff springs / reflected inertia.
-    int steps = static_cast<int>(std::ceil(dt / kSubStepDt));
+    // Clamp an over-large dt (a hitch/pause) so every internal step stays near
+    // kSubStepDt; excess wall-time is dropped rather than integrated in
+    // oversized steps that would destabilise the stiff suspension.
+    const float max_dt = kSubStepDt * static_cast<float>(kMaxSubSteps);
+    const float clamped_dt = dt < max_dt ? dt : max_dt;
+    int steps = static_cast<int>(std::ceil(clamped_dt / kSubStepDt));
     if (steps < 1) steps = 1;
-    if (steps > kMaxSubSteps) steps = kMaxSubSteps;
-    const float sub_dt = dt / static_cast<float>(steps);
+    const float sub_dt = clamped_dt / static_cast<float>(steps);
     for (int s = 0; s < steps; ++s) substep(*v, input, steer_rad, sub_dt);
 }
 

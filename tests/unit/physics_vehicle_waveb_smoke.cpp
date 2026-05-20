@@ -8,8 +8,9 @@
 //      curve, aero, suspension, quaternion helpers) — deterministic math.
 //   2. Integration smoke through the PublicVehicle.h API: the car accelerates,
 //      a redline-limited first gear is beaten by upshifting through the box,
-//      braking sheds speed, reverse drives backward, hard steer + throttle
-//      breaks traction into a slide, and identical inputs replay bit-exactly.
+//      braking sheds speed, reverse drives backward (and is reachable whatever
+//      the gear-array order), low grip breaks traction into wheelspin, malformed
+//      desc inputs stay finite, and identical inputs replay bit-exactly.
 //
 // TEST_CASE names are ASCII-only (AGENTS.md: ctest re-feeds names as filters
 // and a non-ASCII name is mangled by the Windows CRT argv decode).
