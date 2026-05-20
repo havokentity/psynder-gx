@@ -25,6 +25,11 @@ if(TARGET Catch2::Catch2WithMain)
     if(TARGET psynder_editor_core)
         target_link_libraries(psynder_unit PRIVATE psynder_editor_core)
     endif()
+    # psymesh_cook_lib is only built when PSYNDER_GX_BUILD_TOOLS=ON. The
+    # tools_psymesh_cook.cpp suite drives the cooker through this library.
+    if(TARGET psymesh_cook_lib)
+        target_link_libraries(psynder_unit PRIVATE psymesh_cook_lib)
+    endif()
     include(Catch)
     catch_discover_tests(psynder_unit)
 else()
