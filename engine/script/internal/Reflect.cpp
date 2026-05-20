@@ -3,9 +3,9 @@
 //
 // Two process-wide registries (components, systems) are populated at static
 // init by the PSYNDER_SCRIPT_COMPONENT / PSYNDER_SCRIPT_SYSTEM macros (see
-// script/Reflect.h). install_reflect_api() builds the read-only `reflect`
-// table on a fresh lua_State so scripts and the developer REPL can introspect
-// the engine's DOTS schema.
+// script/Reflect.h). install_reflect_api() builds the `reflect` table on a
+// fresh lua_State so scripts and the developer REPL can introspect the
+// engine's DOTS schema.
 
 #include "script/Reflect.h"
 
@@ -269,9 +269,12 @@ void install_reflect_api(lua_State* L) {
     // Force GX component/system registrations to be linked + initialised.
     anchor_gx_reflections();
 
-    // Expose the function table through a locked read-only proxy: reads go via
-    // __index, every write raises, and the metatable is hidden so a script
-    // cannot peel the guard off (`reflect.components = nil` errors).
+    // Expose the function table through a proxy that guards against accidental
+    // mutation: reads forward via __index, normal assignment (`reflect.x = ...`)
+    // raises through __newindex, and the metatable is hidden. This is NOT a
+    // security boundary — the VM intentionally loads `debug` / `package`, so
+    // `rawset`/`debug` can still bypass it; the guard only stops scripts from
+    // clobbering the API by ordinary assignment.
     lua_newtable(L);  // fns
     luaL_setfuncs(L, kReflectFns, 0);
 
