@@ -2,29 +2,35 @@
 //
 // engine/render/post/shaders/tonemap.slang
 //
-// Lane 11 — ACES filmic tonemapper + exposure.
+// Lane 11 - ACES filmic tonemapper (Narkowicz 2015 approximation) + exposure.
 //
 // Pipeline:
 //   1. Apply camera exposure in EV: linear_scene *= exp2(exposure_ev).
-//   2. RRT (Reference Rendering Transform) approximation — Stephen Hill's
-//      fitted ACES curve that closely matches the full ACES 1.0 RRT+ODT at
-//      a fraction of the cost.
-//   3. Linear → sRGB / Gamma 2.2 gamma correction.
+//      Positive EV brightens, negative EV darkens (matches photography
+//      stops). Applied BEFORE the ACES curve so the curve's shoulder/toe
+//      respond to exposure -- the intuitive behaviour the artists expect.
+//   2. ACES filmic tone-map (Krzysztof Narkowicz 2015 approximation):
+//          color = saturate( (x*(a*x+b)) / (x*(c*x+d)+e) )
+//      with a=2.51, b=0.03, c=2.43, d=0.59, e=0.14.
+//   3. Output is written to a UNORM_SRGB / BGRA8Unorm_sRGB target -- the
+//      swapchain's hardware OETF handles linear -> sRGB. We must NOT
+//      apply a software gamma curve here; doing so would gamma-twice.
 //
 // References:
-//   - Narkowicz 2015 "ACES Filmic Tone Mapping Curve"
-//   - Stephen Hill "Optimized ACES" (fit to the full 3x3 matrix RRT path)
-//   - ACES Central github.com/ampas/aces-dev
+//   - Krzysztof Narkowicz, "ACES Filmic Tone Mapping Curve" (2015):
+//     https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+//   - ACES Central / AMPAS aces-dev (RRT+ODT reference path).
 //
-// The psy::render::post host code calls set_exposure_ev() which updates the
-// uniform buffer backing BloomParams.exposure_ev each frame.
+// The post host (PostProcess.cpp) sets exposure_ev each frame via the
+// uniform buffer; auto-exposure / camera EV / r_exposure cvar all funnel
+// through that path.
 //
 // Slang compiles to SPIR-V (Vulkan) and Metal IR (macOS) via psy::shader.
 
-// ── Uniform block ─────────────────────────────────────────────────────────
+// ─── Uniform block ───────────────────────────────────────────────────────
 struct TonemapParams
 {
-    float exposure_ev; // camera EV compensation (0 = no change; neg = darker)
+    float exposure_ev; // camera EV (0 = no change; positive = brighter)
     float _pad0;
     float _pad1;
     float _pad2;
@@ -32,54 +38,25 @@ struct TonemapParams
 
 ParameterBlock<TonemapParams> g_tonemap;
 
-// ── Textures ──────────────────────────────────────────────────────────────
-Texture2D<float4>   t_hdr;       // linear HDR input (post-bloom, pre-tonemap)
-SamplerState        s_point;     // point clamp; no filtering needed here
+// ─── Textures ────────────────────────────────────────────────────────────
+Texture2D<float4>   t_hdr;       // linear HDR input (post-bloom-composite)
+SamplerState        s_point;     // point clamp; one input texel == one output pixel
 
-// ── ACES helpers ──────────────────────────────────────────────────────────
-
-// Input transform matrix: converts sRGB linear to ACEScg.
-// From ACES CTL: https://github.com/ampas/aces-dev
-static const float3x3 k_aces_input_mat = float3x3(
-     0.59719f,  0.35458f,  0.04823f,
-     0.07600f,  0.90834f,  0.01566f,
-     0.02840f,  0.13383f,  0.83777f
-);
-
-// Output transform matrix: converts ACEScg to sRGB linear (inverse of input).
-static const float3x3 k_aces_output_mat = float3x3(
-     1.60475f, -0.53108f, -0.07367f,
-    -0.10208f,  1.10813f, -0.00605f,
-    -0.00327f, -0.07276f,  1.07602f
-);
-
-// RRTAndODTFit — Stephen Hill's fitted ACES RRT+ODT curve.
-// Optimized rational polynomial, valid for x in [0, +inf).
-float3 rrt_and_odt_fit(float3 v)
+// ─── ACES tone-map (Narkowicz 2015) ──────────────────────────────────────
+//
+// Curve coefficients are fixed -- DO NOT change without updating the
+// regression-test reference values in tests/unit/post_smoke.cpp.
+float3 aces_tonemap(float3 x)
 {
-    float3 a = v * (v + 0.0245786f) - 0.000090537f;
-    float3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
-    return a / b;
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.14f;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
 }
 
-// Full ACES tone-map path (input: linear sRGB; output: sRGB [0,1]).
-float3 aces_fitted(float3 color)
-{
-    color = mul(k_aces_input_mat, color);
-    color = rrt_and_odt_fit(color);
-    color = mul(k_aces_output_mat, color);
-    return saturate(color);
-}
-
-// Linear → sRGB gamma correction.
-float3 linear_to_srgb(float3 c)
-{
-    float3 lo = c * 12.92;
-    float3 hi = 1.055 * pow(max(c, float3(0.0, 0.0, 0.0)), float3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) - 0.055;
-    return lerp(lo, hi, step(float3(0.0031308, 0.0031308, 0.0031308), c));
-}
-
-// ── Vertex shader (full-screen triangle, no vertex buffer) ────────────────
+// ─── Vertex shader (full-screen triangle, no vertex buffer) ──────────────
 struct VSOut
 {
     float4 pos : SV_Position;
@@ -89,29 +66,29 @@ struct VSOut
 [shader("vertex")]
 VSOut vs_tonemap(uint vid : SV_VertexID)
 {
-    float2 pos2 = float2((vid & 1u) ? 3.0 : -1.0,
-                         (vid & 2u) ? 3.0 : -1.0);
+    float2 pos2 = float2((vid & 1u) ? 3.0f : -1.0f,
+                         (vid & 2u) ? 3.0f : -1.0f);
     VSOut o;
-    o.pos = float4(pos2, 0.0, 1.0);
-    o.uv  = pos2 * float2(0.5, -0.5) + 0.5;
+    o.pos = float4(pos2, 0.0f, 1.0f);
+    o.uv  = pos2 * float2(0.5f, -0.5f) + 0.5f;
     return o;
 }
 
-// ── Fragment shader ───────────────────────────────────────────────────────
+// ─── Fragment shader ─────────────────────────────────────────────────────
 [shader("fragment")]
 float4 fs_tonemap(VSOut i) : SV_Target
 {
-    // Point-sample: one texel = one output pixel.
+    // One input texel == one output pixel (no upscale/filter here).
     float4 hdr = t_hdr.Sample(s_point, i.uv);
 
-    // 1. Apply exposure compensation (EV units, perceptual stops).
+    // 1. Exposure in EV (perceptual stops) -- apply BEFORE the curve so
+    //    the shoulder/toe respond to exposure (the artist-intuitive form).
     float3 exposed = hdr.rgb * exp2(g_tonemap.exposure_ev);
 
-    // 2. ACES filmic tone-map.
-    float3 mapped = aces_fitted(exposed);
+    // 2. ACES tone-map (Narkowicz 2015).
+    float3 mapped = aces_tonemap(exposed);
 
-    // 3. Linear → sRGB gamma encode for display.
-    float3 srgb = linear_to_srgb(mapped);
-
-    return float4(srgb, 1.0);
+    // 3. Write linear -- the swapchain BGRA8Unorm_sRGB / Rgba8Srgb format
+    //    applies the OETF in hardware on store. NO software gamma here.
+    return float4(mapped, 1.0f);
 }
