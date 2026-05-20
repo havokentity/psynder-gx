@@ -17,9 +17,31 @@
 
 namespace psynder::gpu {
 
-struct VkBufferRes  : Buffer  { VkBuffer       handle = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
-struct VkTextureRes : Texture { VkImage        handle = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; };
-struct VkSamplerRes : Sampler { VkSampler      handle = VK_NULL_HANDLE; };
+struct VkBufferRes  : Buffer  {
+    VkBuffer       handle             = VK_NULL_HANDLE;
+    VkDeviceMemory mem                = VK_NULL_HANDLE;
+    void*          mapped             = nullptr;
+    VkDevice       device_for_destroy = VK_NULL_HANDLE; // frees handle/mem in dtor (no RTTI; mirrors VkTextureRes)
+    ~VkBufferRes() override;
+};
+// VkTextureRes owns (handle, view, mem) when populated by the M1 upload
+// path. `device_for_destroy` is cached at create time so the virtual
+// destructor (driven by the deferred-destroy queue in Handle<T>) can free
+// the Vulkan objects without a downcast to VulkanBackend* — RTTI is
+// avoided per the DOTS rules in AGENTS.md. M0-stub creates leave the
+// handle/view/mem null and the dtor short-circuits cleanly.
+struct VkTextureRes : Texture {
+    VkImage        handle             = VK_NULL_HANDLE;
+    VkImageView    view               = VK_NULL_HANDLE;
+    VkDeviceMemory mem                = VK_NULL_HANDLE;
+    VkDevice       device_for_destroy = VK_NULL_HANDLE;
+    ~VkTextureRes() override;
+};
+struct VkSamplerRes : Sampler {
+    VkSampler handle             = VK_NULL_HANDLE;
+    VkDevice  device_for_destroy = VK_NULL_HANDLE; // frees handle in dtor (mirrors VkTextureRes/VkBufferRes)
+    ~VkSamplerRes() override;
+};
 struct VkCmdBuf     : CmdBuffer {
     VkCommandBuffer cb     = VK_NULL_HANDLE;
     VkCommandPool   pool   = VK_NULL_HANDLE;

@@ -12,6 +12,7 @@
 
 #include "Audio.h"
 
+#include "AudioClip.h"
 #include "internal/Backend.h"
 #include "internal/MixerCore.h"
 
@@ -24,6 +25,10 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+
+#ifndef PSY_AUDIO_RIR_RELATIVE_PATH
+#  define PSY_AUDIO_RIR_RELATIVE_PATH "engine/audio/builtin/short_room.bin"
+#endif
 
 namespace psynder::audio {
 
@@ -41,7 +46,9 @@ struct State {
     detail::VoicePool           voices{};
     mutable std::mutex          voices_mu{};
 
-    // listener pose
+    // listener pose (world-space). The mixer rotates voice positions into
+    // listener-local coordinates each pull before computing azimuth /
+    // elevation, so a moving listener doesn't break HRTF spatialisation.
     math::Vec3                  eye{0, 0, 0};
     math::Vec3                  forward{0, 0, 1};
     math::Vec3                  up{0, 1, 0};
@@ -49,16 +56,64 @@ struct State {
     // wet/dry reverb chains
     detail::FdnReverb           fdn{};
     detail::FftConvReverb       indoor{};
-    bool                        reverbs_ready = false;
+    bool                        reverbs_ready    = false;
+    bool                        indoor_rir_baked = false;
 
     // mixer scratch — sized once in start(), reused on every pull.
     std::vector<f32>            scratch_stereo{};                // 2*frames
     std::vector<f32>            per_voice_buffers{};             // kMaxVoices*2*frames
+    std::vector<f32>            per_voice_mono{};                // kMaxVoices*frames
 };
 
 State& state() {
     static State s;
     return s;
+}
+
+// Build orthonormal listener-local basis from {forward, up}. Right = up × forward.
+// Returns the 3x3 row-major basis. The mixer uses it to rotate world-space
+// voice positions into a listener-local frame where the HRTF lookup
+// expects +X = right, +Y = up, +Z = forward.
+struct ListenerBasis {
+    math::Vec3 right;
+    math::Vec3 up;
+    math::Vec3 forward;
+};
+
+inline ListenerBasis make_listener_basis(math::Vec3 forward, math::Vec3 up) noexcept {
+    auto norm = [](math::Vec3 v) -> math::Vec3 {
+        const f32 m = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+        if (m < 1e-6f) return math::Vec3{0, 0, 1};
+        return math::Vec3{v.x/m, v.y/m, v.z/m};
+    };
+    auto cross = [](math::Vec3 a, math::Vec3 b) -> math::Vec3 {
+        return math::Vec3{ a.y*b.z - a.z*b.y,
+                           a.z*b.x - a.x*b.z,
+                           a.x*b.y - a.y*b.x };
+    };
+    ListenerBasis lb{};
+    lb.forward = norm(forward);
+    // Right = up × forward in a right-handed coord. If `up` is nearly
+    // parallel to forward we fall back to world up.
+    math::Vec3 r = cross(norm(up), lb.forward);
+    if (std::sqrt(r.x*r.x + r.y*r.y + r.z*r.z) < 1e-4f) {
+        r = cross(math::Vec3{0,1,0}, lb.forward);
+    }
+    lb.right   = norm(r);
+    lb.up      = cross(lb.forward, lb.right);
+    return lb;
+}
+
+inline math::Vec3 to_listener_local(math::Vec3 world_pos, math::Vec3 eye,
+                                    const ListenerBasis& lb) noexcept {
+    const math::Vec3 d{ world_pos.x - eye.x,
+                        world_pos.y - eye.y,
+                        world_pos.z - eye.z };
+    return math::Vec3{
+        d.x*lb.right.x   + d.y*lb.right.y   + d.z*lb.right.z,
+        d.x*lb.up.x      + d.y*lb.up.y      + d.z*lb.up.z,
+        d.x*lb.forward.x + d.y*lb.forward.y + d.z*lb.forward.z,
+    };
 }
 
 void mixer_pull(f32* out_stereo, u32 frames, void* /*user*/) noexcept {
@@ -81,16 +136,34 @@ void mixer_pull(f32* out_stereo, u32 frames, void* /*user*/) noexcept {
               0.0f);
     std::memset(out_stereo, 0, sizeof(f32) * stereo_floats);
 
+    // Build listener-local basis once for the whole pull.
+    const ListenerBasis basis = make_listener_basis(s.forward, s.up);
+
     // Snapshot active voices under the voice lock so the worker jobs can run
     // lock-free against an immutable view of the voice array.
-    detail::Voice snapshot[detail::kMaxVoices];
-    u32           snapshot_count = 0;
+    detail::Voice    snapshot[detail::kMaxVoices];
+    const AudioClip* clip_ptrs[detail::kMaxVoices];
+    u32              snapshot_count = 0;
     {
         std::lock_guard<std::mutex> lk(s.voices_mu);
         for (u32 i = 0; i < detail::kMaxVoices; ++i) {
             const detail::Voice& v = s.voices.at(i);
-            if (v.active) snapshot[snapshot_count++] = v;
+            if (v.active) {
+                snapshot[snapshot_count]   = v;
+                // Transform world position into listener-local space here so
+                // the worker job uses only listener-local coords.
+                snapshot[snapshot_count].position =
+                    to_listener_local(v.position, s.eye, basis);
+                clip_ptrs[snapshot_count]  = nullptr;  // resolved below
+                ++snapshot_count;
+            }
         }
+    }
+    // Resolve clip pointers AFTER the voice lock to avoid holding both
+    // locks at once. clip_by_id() takes its own mutex.
+    for (u32 i = 0; i < snapshot_count; ++i) {
+        const ClipId cid{ snapshot[i].clip_raw };
+        clip_ptrs[i] = clip_by_id(cid);
     }
 
     if (snapshot_count > 0u) {
@@ -101,15 +174,29 @@ void mixer_pull(f32* out_stereo, u32 frames, void* /*user*/) noexcept {
         std::fill(s.per_voice_buffers.begin(),
                   s.per_voice_buffers.begin() + static_cast<isize>(snapshot_count * per_voice_floats),
                   0.0f);
+        // Mono scratch per voice (for the resampler + HRTF input). Sized
+        // once in start() at kMaxVoices*buffer_frames floats.
+        const usize per_voice_mono_floats = static_cast<usize>(frames);
+        std::fill(s.per_voice_mono.begin(),
+                  s.per_voice_mono.begin() + static_cast<isize>(snapshot_count * per_voice_mono_floats),
+                  0.0f);
         js.parallel_for(0u, snapshot_count, 1u,
             [&](usize begin, usize end) {
                 for (usize vi = begin; vi < end; ++vi) {
-                    f32* buf = s.per_voice_buffers.data() + vi * per_voice_floats;
-                    // 440 Hz placeholder tone — real PCM clip streaming
-                    // lands in Wave B. The deliverable here is the mixer
-                    // structure, not playback fidelity.
-                    detail::render_voice_into_stereo(snapshot[vi], 440.0f,
-                                                     s.desc.sample_rate, frames, buf);
+                    f32* buf  = s.per_voice_buffers.data() + vi * per_voice_floats;
+                    f32* mono = s.per_voice_mono.data()    + vi * per_voice_mono_floats;
+                    const AudioClip* clip = clip_ptrs[vi];
+                    if (clip && !clip->empty()) {
+                        // Real PCM clip → 2-D HRTF → stereo.
+                        detail::render_voice_into_stereo_clip(
+                            snapshot[vi], *clip,
+                            s.desc.sample_rate, frames, buf, mono);
+                    } else {
+                        // No clip registered (or empty): emit silence.
+                        // Tone fallback intentionally removed — the
+                        // 440 Hz placeholder caused unintended audio for
+                        // voices whose ClipId failed to register.
+                    }
                 }
             });
         // SIMD-merge per-voice buffers into master scratch.
@@ -117,7 +204,10 @@ void mixer_pull(f32* out_stereo, u32 frames, void* /*user*/) noexcept {
             const f32* buf = s.per_voice_buffers.data() + static_cast<usize>(vi) * per_voice_floats;
             detail::simd_mix_into(s.scratch_stereo.data(), buf, 1.0f, stereo_floats);
         }
-        // bump cursors under lock so next pull continues smoothly.
+        // bump cursors under lock so next pull continues smoothly. We
+        // advance by the number of *destination* frames (the resampler
+        // inside render_voice_into_stereo_clip handles the source-rate
+        // mapping internally per pull).
         {
             std::lock_guard<std::mutex> lk(s.voices_mu);
             for (u32 i = 0; i < detail::kMaxVoices; ++i) {
@@ -162,10 +252,22 @@ bool Engine::start(const DeviceDesc& desc) {
     s.per_voice_buffers.assign(
         static_cast<usize>(detail::kMaxVoices) * 2u * static_cast<usize>(s.desc.buffer_frames),
         0.0f);
+    s.per_voice_mono.assign(
+        static_cast<usize>(detail::kMaxVoices) * static_cast<usize>(s.desc.buffer_frames),
+        0.0f);
 
     s.voices.clear();
     s.fdn.reset(s.desc.sample_rate,        /*decay s*/   2.5f);
-    s.indoor.reset(s.desc.sample_rate,     /*ir s*/      0.12f, /*decay s*/ 1.2f);
+    // Try to load the baked image-source RIR. Fall back to the synthetic
+    // exponential-noise IR if the file isn't where we expect. The PSY_AUDIO
+    // _RIR_RELATIVE_PATH macro comes from engine/audio/CMakeLists.txt.
+    s.indoor_rir_baked = s.indoor.reset(
+        s.desc.sample_rate,                /*fallback ir s*/   0.12f,
+                                           /*fallback decay s*/1.2f,
+        PSY_AUDIO_RIR_RELATIVE_PATH);
+    PSY_LOG_INFO("[audio] indoor reverb IR: {} ({} samples)",
+                 s.indoor_rir_baked ? "baked short_room.bin" : "synthesised fallback",
+                 s.indoor.ir_length());
     s.reverbs_ready = true;
 
     if (!backend_init(s.desc, &mixer_pull, &s, s.chosen_backend)) {

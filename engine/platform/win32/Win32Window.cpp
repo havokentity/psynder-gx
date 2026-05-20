@@ -59,6 +59,25 @@ ATOM register_window_class(HINSTANCE hinst) {
     return s_atom;
 }
 
+// Process-wide DPI awareness — set once, before any window is created. With
+// Per-Monitor-V2 the OS renders us at native resolution (crisp) instead of
+// bitmap-scaling on >100% displays, and reports the real DPI. Benign-fails on
+// older OSes or if awareness was already set (e.g. via an app manifest).
+void ensure_process_dpi_aware() {
+    static const bool s_done = [] {
+        if (::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+            return true;
+        const DWORD err = ::GetLastError();
+        // ERROR_ACCESS_DENIED means awareness was already set — not a failure.
+        if (err != ERROR_ACCESS_DENIED) {
+            PSY_LOG_WARN("[win32] SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) "
+                         "failed (err={}); window may be DPI-virtualised", err);
+        }
+        return false;
+    }();
+    (void)s_done;
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -68,6 +87,10 @@ ATOM register_window_class(HINSTANCE hinst) {
 Win32Window::Win32Window(const WindowDesc& desc)
     : desc_(desc), window_w_(desc.window_width), window_h_(desc.window_height)
 {
+    // Become per-monitor-DPI-aware before creating any window so Windows
+    // renders us at native resolution (crisp) rather than bitmap-scaling.
+    ensure_process_dpi_aware();
+
     hinstance_ = ::GetModuleHandleW(nullptr);
     if (register_window_class(hinstance_) == 0) return;
 
@@ -78,9 +101,14 @@ Win32Window::Win32Window(const WindowDesc& desc)
         style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
     }
 
+    // Size the frame for the current DPI so the *client* ends up the requested
+    // physical pixel size. GetDpiForSystem() is the right pre-creation seed;
+    // WM_DPICHANGED refits the frame if the window opens on / moves to a
+    // monitor with different scaling.
+    const UINT dpi = ::GetDpiForSystem();
     RECT rc{ 0, 0, static_cast<LONG>(desc.window_width),
                   static_cast<LONG>(desc.window_height) };
-    ::AdjustWindowRectEx(&rc, style, FALSE, ex_style);
+    ::AdjustWindowRectExForDpi(&rc, style, FALSE, ex_style, dpi);
 
     const std::wstring wtitle = to_wide(desc.title);
     hwnd_ = ::CreateWindowExW(
@@ -137,6 +165,26 @@ Win32Window::Win32Window(const WindowDesc& desc)
                  static_cast<std::uint64_t>(actual_style),
                  static_cast<std::uint64_t>(actual_ex_style),
                  static_cast<std::uint64_t>(WS_OVERLAPPEDWINDOW));
+
+    // Frame-sanity log: a correctly-chromed WS_OVERLAPPEDWINDOW reserves a
+    // non-client caption (~31px @96dpi) + side/bottom borders, so the client
+    // ends up smaller than the window. top/side == 0 means no chrome was
+    // drawn — this line makes a future borderless-window regression obvious
+    // at startup (see the WM_NCCREATE hwnd_ bind in static_wnd_proc).
+    {
+        RECT wr{}, cr2{};
+        POINT tl{0, 0};
+        if (::GetWindowRect(hwnd_, &wr) && ::GetClientRect(hwnd_, &cr2) &&
+            ::ClientToScreen(hwnd_, &tl)) {
+            PSY_LOG_INFO("[win32] client={}x{} non-client frame: top={}px side={}px dpi={}",
+                         static_cast<int>(cr2.right),    static_cast<int>(cr2.bottom),
+                         static_cast<int>(tl.y - wr.top), static_cast<int>(tl.x - wr.left),
+                         static_cast<unsigned>(::GetDpiForWindow(hwnd_)));
+        } else {
+            PSY_LOG_WARN("[win32] frame-sanity: window-rect query failed (err={})",
+                         static_cast<unsigned>(::GetLastError()));
+        }
+    }
 }
 
 Win32Window::~Win32Window() {
@@ -256,18 +304,30 @@ LRESULT CALLBACK Win32Window::static_wnd_proc(
     HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     if (msg == WM_NCCREATE) {
-        auto* cs   = reinterpret_cast<CREATESTRUCTW*>(lparam);
-        auto* self = reinterpret_cast<Win32Window*>(cs->lpCreateParams);
-        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        // Associate the Win32Window* (passed as CreateWindowExW's lpParam)
+        // with the HWND so subsequent messages route back to the instance.
+        // Guard the cast so a foreign/null lParam can't crash creation.
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        if (cs) {
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                                reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        }
+        // Deliberately do NOT touch the Win32Window member hwnd_ here: the
+        // ctor has not assigned it yet (CreateWindowExW has not returned).
+        // wnd_proc() takes the message HWND as a parameter and uses that, so
+        // the creation-time WM_NCCALCSIZE is dispatched with a valid HWND and
+        // the non-client frame (caption + border) is computed correctly.
+        // Depending on the member here was the original borderless-window bug;
+        // routing the message HWND through instead mirrors GLFW / demont-engine.
         return ::DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     auto* self = reinterpret_cast<Win32Window*>(
         ::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!self) return ::DefWindowProcW(hwnd, msg, wparam, lparam);
-    return self->wnd_proc(msg, wparam, lparam);
+    return self->wnd_proc(hwnd, msg, wparam, lparam);
 }
 
-LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
+LRESULT Win32Window::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     auto& in = input_singleton();
     switch (msg) {
         case WM_CLOSE:
@@ -282,8 +342,8 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
             // Engine drives presents from its frame loop; validate the dirty
             // rect so WM_PAINT doesn't keep re-queuing.
             PAINTSTRUCT ps{};
-            ::BeginPaint(hwnd_, &ps);
-            ::EndPaint(hwnd_, &ps);
+            ::BeginPaint(hwnd, &ps);
+            ::EndPaint(hwnd, &ps);
             return 0;
         }
 
@@ -302,6 +362,29 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
             // loop is expected to check window_width()/window_height() and
             // call resize_swapchain() when they change.
 #endif
+            return 0;
+        }
+
+        case WM_DPICHANGED: {
+            // Game-correct DPI handling: keep the CLIENT at its current
+            // PHYSICAL resolution (the render-target size). Deliberately do
+            // NOT apply the OS-suggested rect (lParam) — that scales the whole
+            // window, and thus the client, by the DPI ratio (the desktop-app
+            // convention: a 1280x720 client would balloon to ~5120x2880 at
+            // 400%). A fixed-resolution game window must stick to its
+            // resolution; we only re-fit the non-client frame so the caption/
+            // border are sized for the new monitor's DPI, and reposition onto
+            // the target monitor.
+            const UINT  new_dpi = HIWORD(wparam);
+            const RECT* sug     = reinterpret_cast<const RECT*>(lparam);
+            const DWORD style   = static_cast<DWORD>(::GetWindowLongPtrW(hwnd, GWL_STYLE));
+            const DWORD exst    = static_cast<DWORD>(::GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+            RECT wr{ 0, 0, static_cast<LONG>(window_w_), static_cast<LONG>(window_h_) };
+            ::AdjustWindowRectExForDpi(&wr, style, FALSE, exst, new_dpi);
+            const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (sug ? 0u : SWP_NOMOVE);
+            ::SetWindowPos(hwnd, nullptr,
+                           sug ? sug->left : 0, sug ? sug->top : 0,
+                           wr.right - wr.left, wr.bottom - wr.top, flags);
             return 0;
         }
 
@@ -348,12 +431,12 @@ LRESULT Win32Window::wnd_proc(UINT msg, WPARAM wparam, LPARAM lparam) {
 
         case WM_INPUT:
             on_wm_input(lparam);
-            return ::DefWindowProcW(hwnd_, msg, wparam, lparam);
+            return ::DefWindowProcW(hwnd, msg, wparam, lparam);
 
         default:
             break;
     }
-    return ::DefWindowProcW(hwnd_, msg, wparam, lparam);
+    return ::DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 }  // namespace psynder::platform::win32

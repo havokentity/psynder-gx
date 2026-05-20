@@ -242,6 +242,12 @@ void bind_index_buffer(CmdBuffer* cb, Buffer* buf,
     be->bind_index_buffer(cb, buf, type, offset);
 }
 
+void bind_texture(CmdBuffer* cb, std::uint32_t slot, Texture* tex, Sampler* samp) {
+    auto* be = backend_for(cb);
+    if (!be) return;
+    be->bind_texture(cb, slot, tex, samp);
+}
+
 void push_constants(CmdBuffer* cb, const void* data,
                     std::uint32_t size, std::uint32_t stage_mask) {
     auto* be = backend_for(cb);

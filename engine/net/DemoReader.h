@@ -100,13 +100,16 @@ public:
     void close() noexcept;
 
 private:
+    void*           file_         = nullptr;
     bool            open_         = false;
     u32             current_tick_ = 0;
     DemoFileHeader  header_{};
     std::vector<DemoRosterEntry> roster_;
     std::vector<DemoTocEntry>    toc_;
     TickConfig      tick_cfg_{};
-    // M6: add FILE*, baseline snapshot buffer for XOR reconstruction.
+    std::vector<u8> baseline_;     // last keyframe snapshot for XOR reconstruction
+    u32             baseline_tick_ = 0;
+    u64             records_end_offset_ = 0;  // file offset where the TOC begins
 };
 
 }  // namespace psynder::net

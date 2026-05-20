@@ -18,14 +18,9 @@
 //                          lights × ~16 affecting clusters average (the
 //                          DESIGN target).
 //
-// Wave-B scope:
-//   - Allocate both buffers via psy::gpu::create_buffer.
-//   - Create the build compute pipeline via psy::shader::create_compute
-//     from shaders/light_cluster_build.slang.
-//   - encode_light_cluster_build is a stub — see Pipeline.cpp + INTEGRATION
-//     for why (no cmd encoder API on PublicGpu.h yet). The resources +
-//     pipeline are ready so the encode lights up once lane 07 expands the
-//     contract.
+// Wave-C update — encode_light_cluster_build now issues a real
+// bind_pipeline + dispatch via the psy::gpu encoder API. The shader binds
+// (light_cluster_build.slang) come from lane 08's PSO registry.
 
 #include "render/pipeline/Pipeline_internal.h"
 
@@ -41,6 +36,21 @@ namespace {
 
 constexpr std::uint32_t kMaxLightsPerScene     = 256;
 constexpr std::uint32_t kAverageLightsPerCluster = 16;
+
+// Workgroup size matching the shader [numthreads(64,1,1)] on
+// light_cluster_build.slang::cs_build. Each group processes one cluster.
+constexpr std::uint32_t kClusterGroupSize = 64;
+
+// Push-constant block sent to the cluster-build compute. Mirrors the
+// cbuffer in shaders/light_cluster_build.slang (PerView) — view + proj
+// matrices live in the per-frame uniform path, but the cluster grid
+// dimensions + light count are small enough to send inline.
+struct ClusterPushConstants {
+    std::uint32_t cluster_x;
+    std::uint32_t cluster_y;
+    std::uint32_t cluster_z;
+    std::uint32_t light_count;
+};
 
 constexpr std::size_t cluster_aabb_bytes(std::uint32_t cluster_count) {
     // Two Vec4 per cluster (min.xyz/pad, max.xyz/pad).
@@ -116,20 +126,41 @@ bool init_light_cluster(Pipeline* p) {
 }
 
 void encode_light_cluster_build(Pipeline* p,
-                                gpu::CmdBuffer* /*cmd*/,
+                                gpu::CmdBuffer* cmd,
                                 const View& /*view*/) {
     if (!p || p->light_cluster.cluster_count == 0) return;
-
-    // The actual encode (cmd_bind_pipeline(cull) + bind cluster_aabb_buffer
-    // + cluster_light_buffer + light_table_buffer + cmd_dispatch(x/y/z)) is
-    // blocked on lane 07 exposing the cmd encoder APIs. Until then we log
-    // the would-be dispatch shape once. See INTEGRATION + Issue lane09-001.
-    if (!p->warned_missing_cmd_encoder) {
-        std::printf("[psy::render::pipeline] light_cluster_build would dispatch "
-                    "%u groups x 1 x 1 (one group per cluster, 32-light test per group)\n",
-                    p->light_cluster.cluster_count / 32u
-                      + (p->light_cluster.cluster_count % 32u ? 1u : 0u));
+    if (!cmd) return;
+    if (!p->light_cluster.build_compute.valid()) {
+        // Compile failed at startup — nothing to dispatch. We already
+        // logged once in init_light_cluster, so stay quiet here.
+        return;
     }
+
+    // Bind the cluster-build compute PSO. If lane 08 hasn't registered a
+    // Metal MTLComputePipelineState for this id yet, MetalBackend silently
+    // drops the dispatch — that's the documented "no PSO bound" path
+    // (closes the encoder cleanly without recording any work). The pipeline
+    // logically still walked the pass.
+    gpu::bind_pipeline(cmd, p->light_cluster.build_compute);
+
+    // Push the per-frame cluster constants. Light count is zero at scaffold
+    // (no ECS lights yet — Issue lane09-003) so the shader writes zeros
+    // into the cluster_light buffer header.
+    ClusterPushConstants pc{};
+    pc.cluster_x   = p->desc.light_clusters_x;
+    pc.cluster_y   = p->desc.light_clusters_y;
+    pc.cluster_z   = p->desc.light_clusters_z;
+    pc.light_count = 0;
+    gpu::push_constants(cmd, &pc, sizeof(pc), gpu::ShaderStage::Compute);
+
+    // One workgroup per cluster (the shader's gid.x indexes the cluster).
+    // The 64-thread group size lets each thread test a 64-stride chunk of
+    // the scene light table; threadgroup atomics aggregate the result into
+    // the per-cluster (offset, count) header.
+    const std::uint32_t groups_x = p->light_cluster.cluster_count;
+    (void)kClusterGroupSize; // documented contract with the shader [numthreads]
+    gpu::dispatch(cmd, groups_x, 1, 1);
+    ++p->stats.cluster_dispatches;
 }
 
 } // namespace psynder::render::pipeline

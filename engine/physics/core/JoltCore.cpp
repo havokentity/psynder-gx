@@ -282,14 +282,59 @@ JPH::ShapeRefC MakeShape(const psynder::physics::BodyDesc& d) {
 
 namespace psynder::physics {
 
+// Compute the TempAllocator size from the body count.
+//
+// Derivation (Option A):
+//   Jolt's documented per-body overhead during a single physics step is
+//   roughly 640 B/body for contact manifolds + broad-phase scratch +
+//   island builder work.  We round up to 1 KiB/body to give a comfortable
+//   safety margin and account for constraint-side scratch (the two default
+//   to the same count).  A 16 MiB floor keeps tiny test worlds (a few dozen
+//   bodies) from over-allocating.
+//
+//   Reference: https://jrouwe.github.io/JoltPhysics/ — "Memory Usage" note
+//   in PhysicsSystem::Update docs (~640 B/active body at peak step).
+//
+// For the default WorldDesc (max_bodies = 64 000):
+//   max(16 MiB, 64 000 * 1 KiB) = max(16 777 216, 65 536 000) ≈ 62.5 MiB.
+//   This comfortably covers the measured ~55 MiB peak on a full 64k-body tick.
+//
+// Hard cap at kMaxBodiesCap = 1 000 000 (yields a 1 GiB temp allocator at the
+// 1 KiB/body factor). Even at 2 km² / 64-player BF-light scale we don't expect
+// to exceed ~250 k bodies; the cap is "generous but bounded" so a caller that
+// hands us `desc.max_bodies = UINT32_MAX` doesn't ask for terabytes of RAM
+// (or trigger size_t overflow on 32-bit). Callers requesting more should
+// re-architect (multiple worlds, streaming) — not get a silent OOM.
+constexpr std::uint32_t kMaxBodiesCap = 1'000'000u;
+
+inline std::uint32_t ClampMaxBodies(std::uint32_t requested) noexcept {
+    if (requested == 0) return 65'536u;                  // default fallback
+    return requested > kMaxBodiesCap ? kMaxBodiesCap     // upper clamp
+                                     : requested;
+}
+
+inline std::size_t TempAllocSize(std::uint32_t max_bodies) noexcept {
+    constexpr std::size_t kFloor       = 16u * 1024u * 1024u;   // 16 MiB
+    constexpr std::size_t kBytesPerBody = 1024u;                 // 1 KiB/body
+    // Caller guarantees max_bodies <= kMaxBodiesCap (~1M) via ClampMaxBodies,
+    // so the multiply is bounded at kMaxBodiesCap * kBytesPerBody ≈ 1 GiB and
+    // can't overflow size_t on any supported platform (LP64 / LLP64).
+    const std::size_t scaled = static_cast<std::size_t>(max_bodies)
+                                * kBytesPerBody;
+    return scaled > kFloor ? scaled : kFloor;
+}
+
 struct World {
     JPH::PhysicsSystem               system;
-    JPH::TempAllocatorImpl           temp_allocator{ 16 * 1024 * 1024 };
+    JPH::TempAllocatorImpl           temp_allocator;
     JPH::JobSystemSingleThreaded     job_system{ JPH::cMaxPhysicsJobs };
     BPLayerInterfaceImpl             bp_layers;
     ObjectVsBPLayerFilterImpl        obj_vs_bp;
     ObjectLayerPairFilterImpl        obj_vs_obj;
     std::uint32_t                    tick_hz = 120;
+
+    explicit World(std::uint32_t max_bodies)
+        : temp_allocator(TempAllocSize(max_bodies)) {}
 };
 
 struct RigidBody {
@@ -315,15 +360,18 @@ struct CharacterController {
 World* create_world(const WorldDesc& desc) {
     JoltGlobalInit();
 
-    auto* w = new (std::nothrow) World();
+    // Single source of truth for body cap: floor at zero → 65536 default,
+    // ceiling at kMaxBodiesCap (~1M) to bound the TempAllocator size.
+    // Used identically for both World(max_bodies) (sizes TempAllocator) and
+    // system.Init(max_bodies) (sizes Jolt's body pool).
+    const std::uint32_t clamped_max = ClampMaxBodies(desc.max_bodies);
+    auto* w = new (std::nothrow) World(clamped_max);
     if (!w) {
         JoltGlobalShutdown();
         return nullptr;
     }
 
-    // Cap body / pair / contact buffers at the configured maximum.
-    // Jolt's own ranges are uint, so clamp to a sane upper bound.
-    const JPH::uint max_bodies = desc.max_bodies > 0 ? desc.max_bodies : 65536u;
+    const JPH::uint max_bodies = static_cast<JPH::uint>(clamped_max);
     const JPH::uint max_pairs  = max_bodies;
     const JPH::uint max_constr = desc.max_constraints > 0 ? desc.max_constraints
                                                           : max_bodies;

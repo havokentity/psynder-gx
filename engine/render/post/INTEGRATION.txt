@@ -1,0 +1,104 @@
+Lane 11 - render-post - cross-lane integration notes
+======================================================
+
+What lane 11 ships in this PR
+-----------------------------
+
+  * PostProcess.cpp          - real Karis bloom (6-mip pyramid) +
+                               Narkowicz 2015 ACES tonemap + UI composite
+                               chain wired through the lane-07 cmd encoder
+                               API (begin_render / bind_pipeline / dispatch /
+                               push_constants / draw / end_render).
+
+  * shaders/bloom.slang      - 4 entry points: cs_bloom_prefilter,
+                               cs_bloom_downsample, cs_bloom_upsample,
+                               cs_bloom_composite. Compute-only; one
+                               shader file services the whole pyramid via
+                               push-constant resize parameters.
+
+  * shaders/tonemap.slang    - ACES Narkowicz 2015 approximation with
+                               exposure applied BEFORE the curve. Writes
+                               linear; the BGRA8Unorm_sRGB / Rgba8Srgb
+                               swapchain target handles the OETF in HW.
+
+  * shaders/ui_composite.slang - straight (non-premultiplied) alpha-over,
+                               with two optional UI atlases. Both atlases
+                               can be null (Wave-A path: identity).
+
+  * upscale/metalfx.cpp      - is_supported() returns true on macOS 13+.
+                               evaluate() is a no-op stub; see M3 below.
+
+  * tests/unit/post_smoke.cpp - lifecycle + upscaler-runtime switch +
+                               ACES math regression (7 test cases /
+                               232 assertions).
+
+Cross-lane handshakes required for end-to-end colour
+----------------------------------------------------
+
+The frozen PublicRenderPost.h surface does NOT take a scene-color texture
+in its run_frame() signature. To plug the post chain into the game loop,
+the host must currently call the lane-internal setters defined in
+PostProcess.cpp:
+
+  void set_scene_color(gpu::Texture* tex);
+  void set_ui_textures(gpu::Texture* rml, gpu::Texture* imm);
+
+(Visible to other lanes because they live in psynder::render::post but
+deliberately NOT declared in the frozen public header.)
+
+Lane 09 (render-pipeline) should call set_scene_color() once it has a
+real HDR scene-color attachment to share (currently the M0/M1 path goes
+through cmd_submit's auto-clear).
+
+Lane 21 (ui) should call set_ui_textures() each frame with the RmlUi
+and immediate-mode overlay textures.
+
+Resize handling (M1 baseline)
+-----------------------------
+
+PublicRenderPost.h doesn't expose a resize_output_size() entry, so a
+window/render-scale change requires shutdown() + init(). The bloom
+pyramid and intermediate render targets are torn down and rebuilt. This
+is acceptable for M2 but should be revisited when the public-header
+freeze relaxes in Wave B (file an Issue against the orchestrator).
+
+Deferred to M3+
+---------------
+
+1. MetalFX .mm wire-up. Renaming upscale/metalfx.cpp to metalfx.mm
+   requires lane 25 (or the orchestrator) to add the Metal + MetalFX
+   frameworks to the engine/render/CMakeLists.txt link line on macOS;
+   that file is orchestrator-owned. Today is_supported() returns true on
+   macOS 13+ but evaluate() is a no-op (PostProcess.cpp falls through
+   to the tonemap pass at native resolution).
+
+2. DLSS / FSR3 / XeSS. is_supported() == false at M2; ship the real
+   vendor-SDK link with M9 work (per PLAN.md section 2 lane 11). They
+   stay opt-in stubs in the meantime.
+
+3. Motion-vector + depth inputs for DLSS-style temporal upscalers.
+   UpscaleInput already carries the slots; lane 09 needs to expose
+   motion-vector + depth textures (M3 work, blocked on a final
+   velocity-buffer layout decision).
+
+4. GPU-side tonemap golden test. Requires Backend::texture_readback_mip0
+   from PR #15 (lane/07-gpu-texture-upload) to merge. Until then the
+   ACES math regression in tests/unit/post_smoke.cpp pins the curve
+   coefficients on the CPU.
+
+5. resize_output_size() public-header entry. File an Issue against the
+   orchestrator before Wave B starts.
+
+Conformance notes
+-----------------
+
+  * DOTS + jobs: post stack is POD-only; no virtual / RTTI / exceptions
+    in the hot path. No std::shared_ptr -- gpu::Handle<T> manages all
+    refcounted GPU resources. No JobSystem hook (GPU dispatches do the
+    per-pixel parallelism inherently; CPU-side parallel_for would be
+    redundant work).
+
+  * Metric units: N/A for screen-space post.
+
+  * No mid-frame allocations: every GPU resource allocated in init();
+    run_frame() only reads, dispatches, and writes existing handles.
