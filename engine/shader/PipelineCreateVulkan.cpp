@@ -80,6 +80,10 @@ struct DeferredGfx {
     std::vector<std::uint8_t>  fs;
     std::string                vs_entry;
     std::string                fs_entry;
+    // Vertex input layout (lane 09 / sample01-003).  attr_count == 0
+    // signals "use DefaultVertexLayout".  Stored by value because
+    // VertexInputDesc is POD with fixed-size arrays (no heap).
+    VertexInputDesc            vi;
 };
 struct DeferredCs {
     std::uint32_t              id   = 0;
@@ -95,6 +99,28 @@ bool build_gfx_now(const DeferredGfx&);
 bool build_cs_now (const DeferredCs&);
 
 // ─── Helpers ───────────────────────────────────────────────────────────
+
+// Map a public VertexAttrFormat to the Vulkan attribute format enum.
+// Unknown values fall back to UNDEFINED so vkCreateGraphicsPipelines
+// surfaces a clean validation error instead of an undefined-behavior
+// cast.
+VkFormat to_vk_format(VertexAttrFormat f) {
+    switch (f) {
+        case VertexAttrFormat::Float32:     return VK_FORMAT_R32_SFLOAT;
+        case VertexAttrFormat::Float32x2:   return VK_FORMAT_R32G32_SFLOAT;
+        case VertexAttrFormat::Float32x3:   return VK_FORMAT_R32G32B32_SFLOAT;
+        case VertexAttrFormat::Float32x4:   return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case VertexAttrFormat::Uint8x4Norm: return VK_FORMAT_R8G8B8A8_UNORM;
+        case VertexAttrFormat::Uint16x2:    return VK_FORMAT_R16G16_UINT;
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+VkVertexInputRate to_vk_input_rate(VertexInputRate r) {
+    return (r == VertexInputRate::Instance)
+        ? VK_VERTEX_INPUT_RATE_INSTANCE
+        : VK_VERTEX_INPUT_RATE_VERTEX;
+}
 
 VkShaderModule make_module(const std::vector<std::uint8_t>& spirv) {
     if (spirv.empty()) return VK_NULL_HANDLE;
@@ -167,36 +193,80 @@ bool build_gfx_now(const DeferredGfx& d) {
     stages[1].module = fs_mod;
     stages[1].pName  = d.fs_entry.c_str();
 
-    // ─── Vertex input — default layout from DefaultVertexLayout ─────────
-    // binding 0, stride 32. attributes 0:pos(float3), 1:normal(float3),
-    // 2:uv(float2). lane09-004 follow-up will replace this with a
-    // descriptor passed through GraphicsPipelineDesc once PublicShader.h
-    // gains an opaque vertex-layout side-channel field.
-    VkVertexInputBindingDescription vbind{};
-    vbind.binding   = 0;
-    vbind.stride    = DefaultVertexLayout::kStrideBytes;
-    vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    // ─── Vertex input ───────────────────────────────────────────────────
+    // Two branches:
+    //   (a) d.vi.attr_count == 0 — caller did not supply a layout, use
+    //       DefaultVertexLayout (binding 0, stride 32, pos+normal+uv).
+    //       This preserves every pre-lane-09 callsite that left
+    //       GraphicsPipelineDesc::vertex_input default-constructed.
+    //   (b) d.vi.attr_count  > 0 — translate VertexInputDesc into
+    //       VkPipelineVertexInputStateCreateInfo. Attribute `location`
+    //       is the attr's index in d.vi.attrs[]; this matches the
+    //       `[[vk::location(N)]]` annotation lane 09's slang shaders use.
+    VkVertexInputBindingDescription   vk_bindings[VertexInputDesc::kMaxBindings]{};
+    VkVertexInputAttributeDescription vk_attrs   [VertexInputDesc::kMaxAttrs]{};
+    std::uint32_t                     n_bindings = 0;
+    std::uint32_t                     n_attrs    = 0;
 
-    VkVertexInputAttributeDescription vattrs[3]{};
-    vattrs[0].location = 0;
-    vattrs[0].binding  = 0;
-    vattrs[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
-    vattrs[0].offset   = DefaultVertexLayout::kAttribOffsets[0];
-    vattrs[1].location = 1;
-    vattrs[1].binding  = 0;
-    vattrs[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
-    vattrs[1].offset   = DefaultVertexLayout::kAttribOffsets[1];
-    vattrs[2].location = 2;
-    vattrs[2].binding  = 0;
-    vattrs[2].format   = VK_FORMAT_R32G32_SFLOAT;
-    vattrs[2].offset   = DefaultVertexLayout::kAttribOffsets[2];
+    if (d.vi.attr_count == 0) {
+        // Default layout: binding 0, stride 32, three interleaved attrs.
+        vk_bindings[0].binding   = 0;
+        vk_bindings[0].stride    = DefaultVertexLayout::kStrideBytes;
+        vk_bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        n_bindings = 1;
+
+        vk_attrs[0].location = 0;
+        vk_attrs[0].binding  = 0;
+        vk_attrs[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
+        vk_attrs[0].offset   = DefaultVertexLayout::kAttribOffsets[0];
+        vk_attrs[1].location = 1;
+        vk_attrs[1].binding  = 0;
+        vk_attrs[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
+        vk_attrs[1].offset   = DefaultVertexLayout::kAttribOffsets[1];
+        vk_attrs[2].location = 2;
+        vk_attrs[2].binding  = 0;
+        vk_attrs[2].format   = VK_FORMAT_R32G32_SFLOAT;
+        vk_attrs[2].offset   = DefaultVertexLayout::kAttribOffsets[2];
+        n_attrs = 3;
+    } else {
+        // Caller-supplied layout.  validate() rejects out-of-range
+        // buffer_slot before we touch Vulkan; this guards the fixed-size
+        // arrays + catches caller bugs early (assert in debug, log+leave
+        // n_attrs=0 in release so vkCreateGraphicsPipelines fails cleanly).
+        if (!validate(d.vi)) {
+            std::fprintf(stderr,
+                "[psy::shader::vk] VertexInputDesc failed validate() "
+                "(id=%u, attr_count=%u, binding_count=%u)\n",
+                d.id,
+                (unsigned)d.vi.attr_count,
+                (unsigned)d.vi.binding_count);
+            vkDestroyShaderModule(g_ctx.device, vs_mod, nullptr);
+            vkDestroyShaderModule(g_ctx.device, fs_mod, nullptr);
+            vkDestroyPipelineLayout(g_ctx.device, layout, nullptr);
+            return false;
+        }
+        for (std::uint8_t b = 0; b < d.vi.binding_count; ++b) {
+            vk_bindings[b].binding   = b;
+            vk_bindings[b].stride    = d.vi.bindings[b].stride;
+            vk_bindings[b].inputRate = to_vk_input_rate(d.vi.bindings[b].input_rate);
+        }
+        n_bindings = d.vi.binding_count;
+
+        for (std::uint8_t a = 0; a < d.vi.attr_count; ++a) {
+            vk_attrs[a].location = a;
+            vk_attrs[a].binding  = d.vi.attrs[a].buffer_slot;
+            vk_attrs[a].format   = to_vk_format(d.vi.attrs[a].format);
+            vk_attrs[a].offset   = d.vi.attrs[a].offset_in_buffer;
+        }
+        n_attrs = d.vi.attr_count;
+    }
 
     VkPipelineVertexInputStateCreateInfo vis{};
     vis.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vis.vertexBindingDescriptionCount   = 1;
-    vis.pVertexBindingDescriptions      = &vbind;
-    vis.vertexAttributeDescriptionCount = 3;
-    vis.pVertexAttributeDescriptions    = vattrs;
+    vis.vertexBindingDescriptionCount   = n_bindings;
+    vis.pVertexBindingDescriptions      = vk_bindings;
+    vis.vertexAttributeDescriptionCount = n_attrs;
+    vis.pVertexAttributeDescriptions    = vk_attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ias{};
     ias.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -359,7 +429,8 @@ bool create_and_register_graphics_pso(
     const std::vector<std::uint8_t>&  vs_blob,
     const std::vector<std::uint8_t>&  fs_blob,
     const char*                       vs_entry,
-    const char*                       fs_entry)
+    const char*                       fs_entry,
+    const VertexInputDesc&            vertex_input)
 {
     if (vs_blob.empty() || fs_blob.empty()) return false;
     std::lock_guard<std::mutex> lock(g_ctx_mu);
@@ -372,6 +443,7 @@ bool create_and_register_graphics_pso(
         d.fs       = fs_blob;
         d.vs_entry = vs_entry ? vs_entry : "vs_main";
         d.fs_entry = fs_entry ? fs_entry : "fs_main";
+        d.vi       = vertex_input;
         g_deferred_gfx.push_back(std::move(d));
         return true; // not failed — just pending
     }
@@ -382,6 +454,7 @@ bool create_and_register_graphics_pso(
     d.fs       = fs_blob;
     d.vs_entry = vs_entry ? vs_entry : "vs_main";
     d.fs_entry = fs_entry ? fs_entry : "fs_main";
+    d.vi       = vertex_input;
     return build_gfx_now(d);
 }
 
