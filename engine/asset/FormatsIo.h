@@ -348,6 +348,10 @@ inline bool parse_lma(const u8* data, usize bytes, LmaView& out) noexcept {
     // A zstd file that should inflate to >0 bytes must carry a frame; reject
     // truncated inputs at parse time rather than failing later in decode().
     if (is_zstd && decoded != 0 && stored_bytes == 0) return false;
+    // Empty audio carries no payload, regardless of the zstd flag, so a file
+    // that decodes to 0 bytes but ships a payload (which decode() would
+    // silently ignore) is rejected as malformed.
+    if (decoded == 0 && stored_bytes != 0) return false;
     if ((h.file.flags & kLmaFlagLoop) != 0) {
         if (h.loop_start >= h.loop_end || h.loop_end > h.frame_count) return false;
     }
@@ -520,8 +524,10 @@ struct LmaWriter {
         if (loop) flags |= kLmaFlagLoop;
         if (streamed) flags |= kLmaFlagStreamed;
 
+        // Empty PCM is stored verbatim (no zstd frame) so empty audio always
+        // has a zero-length payload and no zstd flag, matching parse_lma.
         std::vector<u8> payload;
-        if (compress) {
+        if (compress && !pcm.empty()) {
             if (!lmpak::zstd_compress(pcm.data(), pcm.size(), zstd_level, payload)) return false;
             flags |= kLmaFlagZstd;
         } else {

@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -42,10 +43,18 @@ bool span_equals(std::span<const u8> a, const std::vector<u8>& b) {
 }
 
 fs::path make_scratch_dir(const char* tag) {
+    // Each TEST_CASE runs as its own process under catch_discover_tests, and
+    // CI uses `ctest -j`, so a fixed name + per-process counter could race
+    // across processes. Mix in a per-process random token so every process
+    // owns a distinct scratch path (and remove_all only ever touches it).
+    static const std::string proc_token = [] {
+        std::random_device rd;
+        return std::to_string(rd()) + std::to_string(rd());
+    }();
     static int counter = 0;
     fs::path base = fs::temp_directory_path() / "psynder_asset_waveb";
     fs::create_directories(base);
-    fs::path d = base / (std::string(tag) + "_" + std::to_string(++counter));
+    fs::path d = base / (std::string(tag) + "_" + proc_token + "_" + std::to_string(++counter));
     fs::remove_all(d);
     fs::create_directories(d);
     return d;
@@ -260,20 +269,40 @@ TEST_CASE("asset/formats: .lma audio round-trips through zstd",
 
 TEST_CASE("asset/formats: .lma edge cases (empty audio, truncated zstd)",
           "[asset][formats][lma]") {
-    SECTION("empty audio decodes to nothing") {
+    SECTION("empty audio decodes to nothing (compression is a no-op)") {
         fio::LmaWriter w;
         w.sample_fmt = fio::LmaSampleFmt::PCM_S16;
         w.channels = 1;
-        w.pcm = {};  // zero frames
+        w.pcm = {};         // zero frames
+        w.compress = true;  // requested, but empty PCM must not emit a zstd frame
         std::vector<u8> bytes;
         REQUIRE(w.build(bytes));
+        REQUIRE(bytes.size() == sizeof(fio::LmaHeader));  // no payload
         fio::LmaView v;
         REQUIRE(fio::parse_lma(bytes.data(), bytes.size(), v));
         REQUIRE(v.header.frame_count == 0);
-        REQUIRE(v.decoded_bytes() == 0);
+        REQUIRE_FALSE(v.zstd);
+        REQUIRE((v.header.file.flags & fio::kLmaFlagZstd) == 0);
         std::vector<u8> pcm;
         REQUIRE(v.decode(pcm));  // must not dereference a null dst
         REQUIRE(pcm.empty());
+    }
+
+    SECTION("an empty-audio file that still ships a payload is rejected") {
+        fio::LmaHeader h{};
+        h.file.magic = fio::kLmaMagic;
+        h.file.version = fio::kLmaVersion;
+        h.file.flags = fio::kLmaFlagZstd;  // flagged but frame_count == 0
+        h.sample_rate = 48000;
+        h.frame_count = 0;
+        h.sample_fmt = fio::LmaSampleFmt::PCM_S16;
+        h.channels = 1;
+        const usize payload = 8;
+        h.file.payload_size = sizeof(fio::LmaHeader) - sizeof(fio::FileHeader) + payload;
+        std::vector<u8> bytes(sizeof(fio::LmaHeader) + payload, u8{0});
+        std::memcpy(bytes.data(), &h, sizeof(h));
+        fio::LmaView v;
+        REQUIRE_FALSE(fio::parse_lma(bytes.data(), bytes.size(), v));
     }
 
     SECTION("a zstd-flagged file with no payload is rejected at parse") {
