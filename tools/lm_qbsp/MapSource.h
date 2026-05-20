@@ -36,8 +36,9 @@
 //
 //  Units: ".map" coordinates are read verbatim as metres (1 unit = 1 m,
 //  per the engine-wide metric contract). If a source map authored in
-//  Quake units (where 1 unit ~= 1 inch) needs rescaling, the importing
-//  tool's --scale option handles it; the parser itself does not rescale.
+//  Quake units (where 1 unit ~= 1 inch) needs rescaling, each consuming
+//  tool's --scale option (lm_qbsp / lm_bake / lm_mapimport) handles it; the
+//  parser itself does not rescale.
 //
 //  Coordinate system: the parser keeps the source coordinates unchanged
 //  (right-handed, +Z up — the Quake convention). Any axis remap is left to
@@ -324,7 +325,11 @@ inline bool parse_float(std::string_view tok, float& out) noexcept {
         bool exp_digit = false;
         int exp_value = 0;
         for (; i < n && tok[i] >= '0' && tok[i] <= '9'; ++i) {
-            exp_value = exp_value * 10 + (tok[i] - '0');
+            // Cap accumulation so a pathological exponent ("1e100000000") can
+            // neither overflow `int` nor (below) spin the power-of-ten loop.
+            if (exp_value < 100000000) {
+                exp_value = exp_value * 10 + (tok[i] - '0');
+            }
             exp_digit = true;
         }
         if (!exp_digit) {
@@ -335,11 +340,22 @@ inline bool parse_float(std::string_view tok, float& out) noexcept {
     if (i != n) {
         return false;  // trailing garbage
     }
-    double scale = 1.0;
-    for (int k = 0; k < (exponent < 0 ? -exponent : exponent); ++k) {
-        scale *= 10.0;
+    double value = 0.0;
+    if (mantissa != 0.0) {
+        // Bound the loop: 10^308 already overflows `double` to +inf, so
+        // clamping the iteration count saturates large magnitudes correctly
+        // (mantissa * inf -> inf, mantissa / inf -> 0) without iterating an
+        // attacker-controlled number of times.
+        int abs_exp = (exponent < 0) ? -exponent : exponent;
+        if (abs_exp > 400) {
+            abs_exp = 400;
+        }
+        double scale = 1.0;
+        for (int k = 0; k < abs_exp; ++k) {
+            scale *= 10.0;
+        }
+        value = (exponent < 0) ? (mantissa / scale) : (mantissa * scale);
     }
-    double value = (exponent < 0) ? (mantissa / scale) : (mantissa * scale);
     if (negative) {
         value = -value;
     }

@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -205,6 +206,26 @@ TEST_CASE("lm_qbsp: parser reads entity key values and a brush", "[lmqbsp][parse
     REQUIRE(map.entities[0].get("message") == "hello room");
     REQUIRE(map.entities[0].brushes.size() == 1u);
     REQUIRE(map.entities[0].brushes[0].faces.size() == 6u);
+}
+
+TEST_CASE("lm_qbsp: parse_float is locale-independent and bounds huge exponents",
+          "[lmqbsp][parse]") {
+    using psy::lmtools::parse_float;
+    float v = 0.0f;
+    REQUIRE(parse_float("-128", v));
+    REQUIRE(v == -128.0f);
+    REQUIRE(parse_float("1.5", v));
+    REQUIRE(v == 1.5f);
+    REQUIRE(parse_float("1e3", v));
+    REQUIRE(v == 1000.0f);
+    REQUIRE(parse_float("2.5e-2", v));
+    REQUIRE(std::fabs(v - 0.025f) < 1e-6f);
+    REQUIRE_FALSE(parse_float("1.5x", v));  // trailing garbage
+    REQUIRE_FALSE(parse_float("", v));
+    REQUIRE_FALSE(parse_float("abc", v));
+    // A pathological exponent must saturate rather than spin the loop.
+    REQUIRE(parse_float("1e100000000", v));
+    REQUIRE(std::isinf(v));
 }
 
 TEST_CASE("lm_qbsp: parser accepts Valve-220 texture axes", "[lmqbsp][parse]") {

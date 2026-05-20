@@ -36,6 +36,8 @@ void print_usage(std::FILE* out) {
                  "OPTIONS:\n"
                  "    --in <PATH>            source .map\n"
                  "    --out <PATH>           output .lmt path\n"
+                 "    --scale <FLOAT>        uniform scale applied to .map geometry + lights "
+                 "(default 1.0)\n"
                  "    --texels-per-metre <F> lightmap density (default 4.0)\n"
                  "    --samples <N>          indirect hemisphere samples / texel (default 16)\n"
                  "    --bounces <N>          indirect bounce depth (default 1; 0 = direct only)\n"
@@ -108,6 +110,7 @@ int parse_floats(std::string_view s, float* out, int max_count) {
 int main(int argc, char** argv) {
     std::string in_path;
     psy::lm_bake::BakeOptions opts;
+    float map_scale = 1.0f;  // uniform scale applied to .map geometry + lights
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
@@ -156,6 +159,11 @@ int main(int argc, char** argv) {
             if (!p)
                 return 2;
             opts.output_path = p;
+        } else if (a == "--scale") {
+            if (!next_float("--scale", map_scale) || !(map_scale > 0.0f)) {
+                std::fprintf(stderr, "lm_bake: error: --scale must be a positive float\n");
+                return 2;
+            }
         } else if (a == "--texels-per-metre") {
             if (!next_float("--texels-per-metre", opts.texels_per_metre))
                 return 2;
@@ -231,7 +239,7 @@ int main(int argc, char** argv) {
                 surf.material = 0;
                 surf.vertices.reserve(fp.vertices.size());
                 for (psy::lmtools::Vec3 v : fp.vertices) {
-                    surf.vertices.push_back(to_bake(v));
+                    surf.vertices.push_back(to_bake(v) * map_scale);
                 }
                 scene.surfaces.push_back(std::move(surf));
             }
@@ -241,7 +249,7 @@ int main(int argc, char** argv) {
             parse_floats(ent.get("origin"), origin, 3);
             psy::lm_bake::BakeLight light;
             light.kind = psy::lm_bake::BakeLight::Kind::Point;
-            light.position = psy::lm_bake::Vec3{origin[0], origin[1], origin[2]};
+            light.position = psy::lm_bake::Vec3{origin[0], origin[1], origin[2]} * map_scale;
             float intensity = 300.0f;
             const std::string_view ls = ent.get("light");
             if (!ls.empty()) {
