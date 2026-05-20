@@ -25,7 +25,14 @@
 //  AERO          sedan Cd .30 A 2.2 | SUV .38/2.8 | sports .28/1.9 | tank .65/6.8
 //                rho_air 1.204 kg/m^3,  drag = 0.5*rho*v^2*Cd*A
 //  SUSPENSION    rest 0.35 | k 22000 N/m | c 2800 N*s/m | gravity -9.81 m/s^2
-//  -fno-fast-math is mandatory on this TU (see CMakeLists.txt) for determinism.
+//
+// DETERMINISM: -fno-fast-math (see CMakeLists.txt) plus the fixed operation
+// order here give bit-identical replay for a given platform/toolchain (the
+// determinism unit test pins this). It is NOT sufficient for cross-platform
+// lockstep on its own, because the tick calls libm transcendentals
+// (sin/cos/atan/atan2/sqrt/ceil) that differ bitwise across libm versions;
+// cross-host bit-identity needs a deterministic transcendental layer, a
+// follow-up shared with physics-core (cf. Jolt CROSS_PLATFORM_DETERMINISTIC).
 
 #include "physics/core/PublicPhysicsCore.h"
 #include "physics/vehicle/PublicVehicle.h"
@@ -346,6 +353,11 @@ Vehicle* create_vehicle(::psynder::physics::World* world, const VehicleDesc& des
     v->drag_cd = desc.drag_cd;
     v->frontal_area_m2 = desc.frontal_area_m2;
     v->lift_area_m2 = desc.frontal_area_m2 * kDownforceClaPerArea;
+    // NOTE: despite the "_z_m" name, this field is documented in PublicVehicle.h
+    // as the offset "below geometric center" — i.e. a vertical (Y, up-axis)
+    // offset in this Y-up engine, not a Z offset. We apply it on Y accordingly.
+    // The header is frozen, so the misleading name stays; this note guards
+    // against callers populating it as a longitudinal (Z) offset.
     v->com_offset_y = desc.center_of_mass_offset_z_m;
     v->drivetrain = desc.drivetrain;
     v->final_drive = desc.final_drive;

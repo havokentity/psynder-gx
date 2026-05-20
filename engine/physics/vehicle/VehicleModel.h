@@ -17,8 +17,16 @@
 //
 // The vector / quaternion helpers are kept local (rather than pulling in
 // psynder::math, whose quaternion ops are out-of-line in a TU that is not
-// compiled -fno-fast-math) so every operation that feeds the integrator is
-// bit-reproducible — a precondition for lockstep replay (AGENTS.md §rules).
+// compiled -fno-fast-math) so the integrator's arithmetic stays inside this
+// lane's -fno-fast-math TU and replays bit-identically for a given
+// platform/toolchain (what the determinism test pins).
+//
+// SCOPE: the tire model below calls libm transcendentals (sin/atan/atan2/
+// sqrt), which are NOT guaranteed bit-identical across different libm
+// implementations. So replay is reproducible within one platform/toolchain,
+// but full cross-platform lockstep determinism additionally needs a
+// deterministic transcendental layer — a follow-up shared with physics-core
+// (cf. Jolt's CROSS_PLATFORM_DETERMINISTIC). See the PR notes.
 
 #pragma once
 
