@@ -1,0 +1,90 @@
+lm_qbsp - integration notes (Lane 24 tools)
+===========================================
+
+What ships in this PR (M2/M3 baseline)
+--------------------------------------
+* CLI: lm_qbsp --in <map> --out <psybsp> [--scale F] [--force]
+       [--print-stats] [--quiet]
+* Shared front-end MapSource.h: Quake-style .map parser (standard AND
+  Valve-220 face dialects), `//` comments, key/value entities + brushes.
+  Brush face planes are oriented OUTWARD by an interior-point test, so
+  winding-order differences between .map exporters don't matter.
+* Brush -> convex face polygons via the classic plane-clipping build
+  (each face plane clipped by all the brush's other planes).
+* SolidBSP: recursive axis-aligned partition (kd-style) over the distinct
+  axis-aligned brush face planes; atomic cells classified solid/empty by a
+  point-in-brush test. EXACT for axis-aligned brush geometry (the indoor
+  "Quake-style room" the Wave-B sample-03 demo targets).
+* Exterior cull: flood-fill the void inward from world-boundary-touching
+  empty cells; cells reachable from the boundary are dropped (treated as
+  solid). Leak-aware: if no sealed interior remains, all empty cells are
+  kept and a warning is emitted (the map leaks or is open).
+* PVS: clusters == inside-empty leaves; a connectivity PVS unions cells
+  that share a portal (face-adjacent), so disjoint sealed rooms don't see
+  each other. Conservative (no occlusion). Row-packed, ceil(C/8) bytes/row.
+* Output is the engine .psybsp format (engine/world/bsp/BspFormat.h):
+  - BspFileHeader (96 bytes), magic 'PBSP', version kBspFileVersion.
+  - nodes (BspFileNode, 24 B) / leaves (BspFileLeaf, 36 B) /
+    faces (BspFileFace, 16 B) chunks.
+  - vertices: 48-byte stride (see "Vertex stride" below).
+  - indices: u32 fan triangulation, global vertex indices.
+  - pvs: cluster_count * pvs_row_bytes bytes.
+* Determinism: no RNG/time/pid; all passes iterate ordered vectors / sorted
+  keys. Identical .map -> byte-identical .psybsp (verified by the
+  tools_lm_qbsp test suite, which also replays the engine loader's
+  validation: magic/version, chunk bounds, PVS row math, child topology).
+
+Engine loader compatibility (verified shape)
+--------------------------------------------
+engine/world/bsp/Bsp.cpp `load()` validates the header, copies the
+nodes/leaves/faces/pvs chunks (bounds-checked), cross-checks the PVS row
+math (pvs.size() == cluster_count * pvs_row_bytes), and runs child-index
+topology validation. lm_qbsp output is built to pass all of these. NOTE:
+the shipped `load()` does NOT currently read the vertices/indices chunks
+(a future lane-09/12 geometry loader does); the chunks are written and
+referenced by faces' first_vertex/vertex_count so that loader has them.
+
+>>> SEAMS THE ORCHESTRATOR MUST RECONCILE AT INTEGRATION <<<
+1. Vertex stride. BspFormat.h declares kBspFileVertexBytes = 48, but the
+   in-memory BspVertex in BspDraw.h (math::Vec3 position + math::Vec3
+   normal + math::Vec2 uv + math::Vec2 lightmap_uv + u32 color) is only 44
+   bytes (no trailing pad). lm_qbsp writes the documented 48-byte stride:
+   44 bytes of fields + 4 zero pad bytes. The lane-09/12 geometry loader
+   must read at a 48-byte stride (or BspFormat.h / BspVertex must be
+   reconciled and the format version bumped). The fields, in order, are:
+   position f32[3], normal f32[3], uv f32[2], lightmap_uv f32[2],
+   color u32 (RGBA8, 0xFFFFFFFF), pad u32 (0).
+2. Per-face index addressing. BspDraw.h's Wave-A build_face_draws aliases
+   `geom.indices[face.first_vertex]` for (vertex_count-2)*3 indices, which
+   assumes the index run begins at the face's vertex offset. lm_qbsp writes
+   a natural global-index fan slab (each triangle references absolute vertex
+   indices). The geometry loader should index faces by a per-face first
+   index, or build_face_draws should be updated. Faces store first_vertex +
+   vertex_count; the index slab is parallel (face f's (vcount-2)*3 indices
+   follow in emission order).
+3. material id. BspFileFace.material is FNV-1a(texture_name); lane 09
+   resolves it against the live material table. lightmap is a per-face id
+   (the face's index) for lm_bake to map to an atlas region.
+
+Deferred to follow-up PRs
+-------------------------
+1. General-plane SolidBSP. The space partition splits only on axis-aligned
+   planes today (exact for axis-aligned rooms). Arbitrary-angle brushes are
+   emitted as render geometry but their solid volume is approximated by the
+   axis-aligned cell classification. A full plane-choice SolidBSP (track the
+   convex region as a polytope, score splits by balance + split count) is
+   the next step.
+2. Occlusion-aware portal VIS. Today's PVS is connectivity-based (a cell
+   sees every cell in its connected open region). The classic Quake VIS
+   (generate portals, flood through portal chains with separating-plane
+   clipping) gives tighter visibility and is the planned follow-up. The
+   on-disk PVS layout already matches what the engine expects, so this is a
+   compile-side-only change.
+3. Portals chunk. BspFileHeader v1 has no portals chunk (Bsp.cpp
+   build_portal_set returns empty for now). Emitting portals needs a format
+   addition (a reserved field / version bump) coordinated with lane 10.
+4. t-junction removal + face merging + detail/liquid/trigger brush classes
+   (func_* entity brushes are currently treated as solid worldspawn).
+5. Lightmap UVs. lm_qbsp writes a per-face planar [0,1] lightmap_uv
+   parameterisation; lm_bake owns the final atlas packing (see the lm_bake
+   SEAM note).

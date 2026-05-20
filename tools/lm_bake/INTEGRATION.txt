@@ -1,0 +1,71 @@
+lm_bake - integration notes (Lane 24 tools)
+============================================
+
+What ships in this PR (M2/M3 baseline)
+--------------------------------------
+* CLI: lm_bake --in <map> --out <lmt> [--texels-per-metre F] [--samples N]
+       [--bounces N] [--exposure F] [--ambient F] [--max-atlas N] [--force]
+       [--print-stats] [--quiet]
+* Core path tracer (LmBake.h), map-agnostic, operating on an in-memory
+  Scene (surfaces + materials + lights):
+  - Median-split BVH over a fan-triangulated occluder pool;
+    Moller-Trumbore ray-triangle; closest-hit (bounces) + any-hit (shadows).
+  - Direct lighting: point lights (inverse-square falloff, metres) and
+    directional lights, each shadow-tested.
+  - Indirect lighting: cosine-weighted hemisphere sampling with a fixed
+    per-texel deterministic PCG32 stream; multi-bounce up to --bounces;
+    ray misses contribute the ambient sky term.
+  - Stored value is incident irradiance, Reinhard-tonemapped and sRGB-
+    encoded to 8-bit (the runtime shader multiplies by the base texture).
+* Atlas: one rectangular patch per surface, sized by --texels-per-metre,
+  shelf-packed (1px gutter) into a --max-atlas-wide atlas.
+* Output: engine cooked-texture format ".lmt" (engine/asset/Formats.h):
+  LmtHeader (RGBA8, single mip, kLmtFlagSRGB) + LmtMip[1] + pixels.
+* The CLI front-end builds the Scene from a .map (brush faces -> surfaces;
+  `light` entities -> point lights with optional "light"/"_color" keys),
+  reusing tools/lm_qbsp/MapSource.h.
+* Determinism: the only randomness is the PCG32 stream seeded purely from
+  (seed, surface index, texel x, texel y). Identical input -> byte-identical
+  .lmt (verified by the tools_lm_bake suite).
+
+>>> SEAM THE ORCHESTRATOR MUST RECONCILE AT INTEGRATION <<<
+A baked lightmap is a texture, so lm_bake emits the engine .lmt cooked-
+texture container (engine/asset/Formats.h, owned by the parallel lane-05
+"asset" agent). lm_bake writes:
+  - LmtHeader.file.payload_size = total_file_bytes - sizeof(FileHeader)
+    (i.e. everything after the 16-byte FileHeader preamble).
+  - mip_count = 1, pixel_fmt = RGBA8, flags = kLmtFlagSRGB.
+  - pixels_offset = sizeof(LmtHeader) + sizeof(LmtMip) (== 48); LmtMip[0]
+    .offset is file-relative and equals pixels_offset.
+The asset agent's .lmt LOADER must agree on:
+  1. payload_size semantics (after-FileHeader vs after-LmtHeader),
+  2. the LmtMip table living immediately after LmtHeader,
+  3. sRGB vs linear storage for lightmaps (we chose sRGB-encoded 8-bit).
+Please reconcile lm_bake's writer with engine/asset's loader at integration;
+if the loader differs, the writer change is localised to bake()'s assembly
+block.
+
+ALSO NOTE: a parallel `asset` lane implements the .lmm/.lmt/.lma formats in
+engine/asset/. The task brief calls these "the .lmm/.lmt/.lma lightmap
+formats", but in the repo .lmm = cooked mesh, .lmt = cooked texture, .lma =
+cooked audio. A lightmap maps onto .lmt (texture), which is what lm_bake
+uses; .lmm/.lma are not lightmap outputs.
+
+Deferred to follow-up PRs
+-------------------------
+1. Bake from .psybsp visible faces. The CLI currently bakes every brush
+   face polygon from the .map (interior + exterior). Consuming lm_qbsp's
+   .psybsp face list (only visible surfaces, with their per-face lightmap
+   ids) is the production path and removes wasted exterior texels.
+2. HDR lightmaps. .lmt's pixel formats are LDR (P8/RGB565/RGBA8/RG88); we
+   tonemap to RGBA8. A float/RGB9E5/BC6H lightmap path needs a new
+   LmtPixelFmt (coordinate with the asset lane) for high-dynamic-range
+   indoor/outdoor mixing.
+3. Mip chain. We emit a single mip; downsampled mips (the LmtMip table
+   already supports them) are a follow-up.
+4. Per-face atlas UVs back into the .psybsp. Today lm_qbsp writes a per-face
+   planar [0,1] lightmap_uv; the real pipeline has lm_bake assign atlas-
+   relative UVs and patch them into the BSP vertex stream (or a side table).
+5. Area / spot / sky lights, directional sun from worldspawn keys, light
+   styles / switchable lights, and importance sampling of bright lights.
+6. GPU acceleration (lm_bake_gx, slated for M5 per tools/CMakeLists.txt).
