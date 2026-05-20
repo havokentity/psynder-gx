@@ -18,6 +18,10 @@ void emit(Level level, fmt::string_view fmt_str, fmt::format_args args);
 // server (and any future telemetry sink) to forward log events to subscribers.
 using Sink = void (*)(Level, const std::string&);
 void add_sink(Sink sink);
+// Remove a single previously-added sink (matched by function pointer),
+// leaving every other registered sink intact. No-op if the sink isn't
+// present. Use this instead of remove_all_sinks() when you only own one sink.
+void remove_sink(Sink sink);
 void remove_all_sinks();
 
 template <class... Args>
