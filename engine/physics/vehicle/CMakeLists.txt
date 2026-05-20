@@ -8,8 +8,15 @@ psynder_add_lane(physics_vehicle
         psynder_core psynder_math psynder_simd psynder_jobs
         psynder_scene psynder_physics_core
 )
+# Determinism: physics TUs are built without fast-math + FP contraction so
+# replay is bit-stable within a toolchain. clang-cl reports MSVC=ON, so forward
+# the same flags to its clang frontend instead of silently skipping them on the
+# Windows build (which is clang-cl, not cl.exe).
 if(NOT MSVC)
     target_compile_options(psynder_physics_vehicle PRIVATE -fno-fast-math -ffp-contract=off)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(psynder_physics_vehicle PRIVATE
+        /clang:-fno-fast-math /clang:-ffp-contract=off)
 endif()
 
 # ─── Hook this lane onto the shared unit-test binary ────────────────────

@@ -238,7 +238,11 @@ void substep(Vehicle& v, const VehicleInput& in, float steer_rad, float dt) {
         if (raw_rpm >= v.redline_rpm) t_engine = 0.0f;
         if (throttle < 0.01f) t_engine -= kEngineBrakeNm * (rpm / v.redline_rpm);
         wheel_drive_torque = t_engine * trans / static_cast<float>(driven);
-        reflected_inertia = kEngineInertiaKgM2 * trans * trans;
+        // Reflected engine inertia is shared across the driven wheels (open
+        // diff couples the engine to their average speed): dividing by `driven`
+        // keeps the total reflected term = Iengine*trans^2 instead of
+        // multiplying it by the wheel count (which would damp wheelspin).
+        reflected_inertia = kEngineInertiaKgM2 * trans * trans / static_cast<float>(driven);
     } else {
         // Neutral (or no driven wheels): free-rev the engine on its own inertia.
         float t_engine = engine_torque_at(v.curve, v.curve_count, v.engine_rpm) * throttle;
