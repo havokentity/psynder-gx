@@ -257,6 +257,41 @@ TEST_CASE("asset/formats: .lma audio round-trips through zstd",
     REQUIRE(pcm == w.pcm);
 }
 
+TEST_CASE("asset/formats: .lma edge cases (empty audio, truncated zstd)",
+          "[asset][formats][lma]") {
+    SECTION("empty audio decodes to nothing") {
+        fio::LmaWriter w;
+        w.sample_fmt = fio::LmaSampleFmt::PCM_S16;
+        w.channels = 1;
+        w.pcm = {};  // zero frames
+        std::vector<u8> bytes;
+        REQUIRE(w.build(bytes));
+        fio::LmaView v;
+        REQUIRE(fio::parse_lma(bytes.data(), bytes.size(), v));
+        REQUIRE(v.header.frame_count == 0);
+        REQUIRE(v.decoded_bytes() == 0);
+        std::vector<u8> pcm;
+        REQUIRE(v.decode(pcm));  // must not dereference a null dst
+        REQUIRE(pcm.empty());
+    }
+
+    SECTION("a zstd-flagged file with no payload is rejected at parse") {
+        fio::LmaHeader h{};
+        h.file.magic = fio::kLmaMagic;
+        h.file.version = fio::kLmaVersion;
+        h.file.flags = fio::kLmaFlagZstd;
+        h.file.payload_size = sizeof(fio::LmaHeader) - sizeof(fio::FileHeader);
+        h.sample_rate = 48000;
+        h.frame_count = 8;  // claims 8 frames but carries no zstd frame
+        h.sample_fmt = fio::LmaSampleFmt::PCM_S16;
+        h.channels = 1;
+        std::vector<u8> bytes(sizeof(fio::LmaHeader), u8{0});
+        std::memcpy(bytes.data(), &h, sizeof(h));
+        fio::LmaView v;
+        REQUIRE_FALSE(fio::parse_lma(bytes.data(), bytes.size(), v));
+    }
+}
+
 TEST_CASE("asset/formats: parsers reject malformed input", "[asset][formats]") {
     // Build one good .lmt to mutate.
     fio::LmtWriter w;

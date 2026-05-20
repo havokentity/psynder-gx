@@ -223,6 +223,9 @@ inline bool parse_lmt(const u8* data, usize bytes, LmtView& out) noexcept {
     const u32 mip_count = h.mip_count;
     for (u32 i = 0; i < mip_count; ++i) {
         const LmtMip& m = mips[i];
+        // Cap dims to the header's u16 range before multiplying so a hostile
+        // mip cannot overflow u64 and slip past the byte_size check.
+        if (m.width > 0xFFFFu || m.height > 0xFFFFu) return false;
         const u64 expect = u64(m.width) * u64(m.height) * u64(bpt);
         if (m.byte_size != expect) return false;
         if (u64(m.offset) > u64(bytes)) return false;
@@ -261,6 +264,7 @@ struct LmaView {
         if (!valid) return false;
         const u64 need = decoded_bytes();
         pcm.resize(static_cast<usize>(need));
+        if (need == 0) return true;  // empty audio: nothing to copy/inflate (avoid null dst)
         if (!zstd) {
             if (stored.size() != need) return false;
             if (need) std::memcpy(pcm.data(), stored.data(), static_cast<usize>(need));
@@ -289,6 +293,9 @@ inline bool parse_lma(const u8* data, usize bytes, LmaView& out) noexcept {
     const u64 decoded =
         u64(h.frame_count) * u64(h.channels) * u64(lma_bytes_per_sample(h.sample_fmt));
     if (!is_zstd && stored_bytes != decoded) return false;
+    // A zstd file that should inflate to >0 bytes must carry a frame; reject
+    // truncated inputs at parse time rather than failing later in decode().
+    if (is_zstd && decoded != 0 && stored_bytes == 0) return false;
     if ((h.file.flags & kLmaFlagLoop) != 0) {
         if (h.loop_start >= h.loop_end || h.loop_end > h.frame_count) return false;
     }
