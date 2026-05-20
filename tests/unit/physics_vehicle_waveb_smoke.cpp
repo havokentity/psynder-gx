@@ -327,6 +327,37 @@ TEST_CASE("vehicle: low grip breaks traction under throttle",
     REQUIRE(ice < dry - 3.0f);  // ice spins the tires -> much less go
 }
 
+TEST_CASE("vehicle: reverse is reachable regardless of gear array order",
+          "[vehicle][drivetrain]") {
+    // Lay the gearbox out the way PublicVehicle.h's prose describes ("forward
+    // gears first, then reverse") rather than the example's R/N/1.. order. A
+    // downshift from neutral must still select reverse.
+    CarRig rig;
+    rig.gears[0] = 0.0f;    // neutral
+    rig.gears[1] = 3.20f;   // 1st
+    rig.gears[2] = 2.10f;
+    rig.gears[3] = 1.50f;
+    rig.gears[4] = 1.10f;
+    rig.gears[5] = 0.85f;   // 5th
+    rig.gears[6] = -3.20f;  // reverse last
+    Vehicle* v = create_vehicle(nullptr, rig.desc);
+    settle(v);
+
+    float p0[3], q[4];
+    vehicle_get_transform(v, p0, q);
+    VehicleInput rev{};
+    rev.throttle = 0.8f;
+    rev.gear_request = -1;  // neutral -> reverse, despite the array layout
+    vehicle_tick(v, rev, kDt);
+    rev.gear_request = 0;
+    for (int i = 0; i < 300; ++i) vehicle_tick(v, rev, kDt);
+
+    float p1[3];
+    vehicle_get_transform(v, p1, q);
+    REQUIRE(p1[2] < p0[2] - 1.0f);  // drove backward -> reverse was selected
+    destroy_vehicle(v);
+}
+
 TEST_CASE("vehicle: identical inputs produce bit-identical motion "
           "(determinism precondition)",
           "[vehicle][determinism]") {

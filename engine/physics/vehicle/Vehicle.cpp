@@ -88,16 +88,52 @@ inline float brake_spin(float omega, float brake_t, float inertia, float dt) {
     return 0.0f;
 }
 
+inline int gear_rank(float ratio) { return ratio < 0.0f ? 0 : (ratio > 0.0f ? 2 : 1); }
+
+// Reorder gears into a canonical sequential layout so a relative gear_request
+// works regardless of how the caller laid out VehicleDesc::gear_ratios — the
+// public header's example ({R, N, 1st..}) and its prose ("forward gears first,
+// then reverse") disagree on reverse placement. Canonical sequence: reverse
+// gears (ascending), neutral(s), then forward gears descending by ratio (so the
+// first forward gear has the highest ratio). Stable insertion sort, n <= 16.
+inline void canonicalize_gears(const float* src, std::uint32_t n, float* dst) {
+    for (std::uint32_t i = 0; i < n; ++i) dst[i] = src[i];
+    for (std::uint32_t i = 1; i < n; ++i) {
+        const float key = dst[i];
+        std::uint32_t j = i;
+        while (j > 0) {
+            const float prev = dst[j - 1];
+            const int rp = gear_rank(prev);
+            const int rk = gear_rank(key);
+            bool move;
+            if (rp != rk) {
+                move = rp > rk;       // lower rank first (reverse < neutral < forward)
+            } else if (rk == 2) {
+                move = prev < key;    // forward gears: descending ratio
+            } else {
+                move = prev > key;    // reverse: ascending; neutral: stable (no move)
+            }
+            if (!move) break;
+            dst[j] = prev;
+            --j;
+        }
+        dst[j] = key;
+    }
+}
+
 // Analytic ground query: ray from `origin` along `axis_down` (unit, pointing
 // roughly toward -Y) against a flat plane at y = kGroundHeight. Returns the hit
 // distance along the axis. This is the single seam that a future physics-core
 // broadphase ray cast would replace.
 inline bool raycast_ground(Vec3 origin, Vec3 axis_down, float max_len, float& out_dist) {
     const float denom = axis_down.y;
-    if (denom >= -1e-4f) return false;  // axis not pointing downward
+    if (denom >= -1e-4f) return false;  // axis not pointing roughly downward
     const float t = (kGroundHeight - origin.y) / denom;
-    if (t < 0.0f || t > max_len) return false;
-    out_dist = t;
+    if (t > max_len) return false;
+    // t < 0 means the attach point is at/below the plane (penetration); treat it
+    // as an immediate hit at distance 0 so the suspension drives the chassis
+    // back out instead of mistaking it for an airborne wheel.
+    out_dist = t > 0.0f ? t : 0.0f;
     return true;
 }
 
@@ -333,7 +369,9 @@ Vehicle* create_vehicle(::psynder::physics::World* world, const VehicleDesc& des
     v->gear_count = desc.gear_ratios == nullptr
                         ? 0u
                         : (desc.gear_count < kMaxGears ? desc.gear_count : kMaxGears);
-    for (std::uint32_t i = 0; i < v->gear_count; ++i) v->gear_ratios[i] = desc.gear_ratios[i];
+    // Reorder into a canonical R / N / forward sequence so sequential shifting
+    // is robust to the caller's array layout, then start in neutral.
+    canonicalize_gears(desc.gear_ratios, v->gear_count, v->gear_ratios);
     v->gear_index = 0;
     for (std::uint32_t i = 0; i < v->gear_count; ++i) {
         if (v->gear_ratios[i] == 0.0f) {
