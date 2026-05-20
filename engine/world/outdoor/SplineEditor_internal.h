@@ -152,9 +152,11 @@ struct ArcTable {
 };
 
 // Build the cumulative arc-length table by sampling each segment at
-// `samples_per_seg` sub-steps and summing chord lengths. The join sample
-// between consecutive segments is emitted once (it is the same world point on
-// both, contributing zero length).
+// `samples_per_seg` sub-steps and summing chord lengths. Each segment emits
+// its own t==0 sample, so the join between consecutive segments appears twice
+// (as the previous segment's t==1 and the next segment's t==0); both share the
+// same world point, so the duplicate adds zero length. Keeping a sample at
+// every segment start lets sample_at_arc_length bracket inside one segment.
 inline ArcTable build_arc_table(const SplineTrack& t, u32 samples_per_seg = 32) {
     ArcTable tab;
     tab.segments = to_segments(t);

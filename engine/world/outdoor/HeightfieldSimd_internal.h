@@ -91,7 +91,8 @@ PSY_FORCEINLINE simd::f32x8 sample_bilinear_x8(const HeightmapDesc& h, simd::f32
     const simd::f32x8 v01 = simd::load_unaligned8(h01);
     const simd::f32x8 v11 = simd::load_unaligned8(h11);
 
-    // hx0 = h00 + (h10 - h00) * tx ; mul+add (NOT fma) to match scalar bits.
+    // hx0 = h00 + (h10 - h00) * tx ; explicit mul+add (not fused) mirrors the
+    // scalar op order — parity is tolerance-based, see the header note.
     const simd::f32x8 hx0 = simd::add8(v00, simd::mul8(simd::sub8(v10, v00), vtx));
     const simd::f32x8 hx1 = simd::add8(v01, simd::mul8(simd::sub8(v11, v01), vtx));
     return simd::add8(hx0, simd::mul8(simd::sub8(hx1, hx0), vtz));
