@@ -8,6 +8,8 @@
 //   5. The DOTS contract negatively — no entity userdata is exposed.
 
 #include "script/Script.h"
+#include "scene/GxComponents.h"
+#include "scene/World.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -199,6 +201,99 @@ TEST_CASE("script: DOTS - no per-entity OOP escape hatch exists",
     REQUIRE_FALSE(fix.vm().execute_repl(
         "local e = world:create_entity({A={v=2}}) e:tick()", out));
     REQUIRE_FALSE(out.empty());
+}
+
+TEST_CASE("script: DOTS entity creation mirrors GX POD components into World",
+          "[script][dots][ecs]") {
+    VmFixture fix;
+
+    REQUIRE(fix.vm().execute_string(
+        "script_entity, engine_entity = world:create_entity({\n"
+        "  TransformWS = { x = 1.5, y = 2.0, z = -3.25 },\n"
+        "  VisibleBit = { partition = 'dynamic' },\n"
+        "})",
+        "gx-ecs-bridge"));
+
+    std::string out;
+    REQUIRE(fix.vm().execute_repl("engine_entity", out));
+    REQUIRE_FALSE(out.empty());
+    REQUIRE(out != "nil");
+
+    const psynder::Entity e{static_cast<psynder::u64>(std::stoull(out))};
+    auto& world = psynder::scene::World::Get();
+    REQUIRE(world.alive(e));
+
+    const auto* tr = world.get<psynder::scene::TransformWS>(e);
+    REQUIRE(tr != nullptr);
+    CHECK(tr->mtw.m[12] == 1.5f);
+    CHECK(tr->mtw.m[13] == 2.0f);
+    CHECK(tr->mtw.m[14] == -3.25f);
+
+    const auto* visible = world.get<psynder::scene::VisibleBit>(e);
+    REQUIRE(visible != nullptr);
+    CHECK(visible->partition ==
+          psynder::scene::VisibleBit::Partition::WorldDynamic);
+
+    world.destroy(e);
+}
+
+TEST_CASE("script: GX render PODs mirror lights and asset refs into World",
+          "[script][dots][ecs]") {
+    VmFixture fix;
+
+    std::string out;
+    REQUIRE(fix.vm().execute_repl(
+        "select(2, world:create_entity({"
+        "  TransformWS = { position = {0, 1, 2} },"
+        "  MeshRef = { mesh = 17, lod_bias = 2 },"
+        "  MaterialRef = { material = 23 },"
+        "  LightPoint = {"
+        "    position = { x = 3, y = 4, z = 5 },"
+        "    color = { 0.25, 0.5, 1.0 },"
+        "    radius = 8,"
+        "    intensity = 1200"
+        "  },"
+        "  LightDirectional = {"
+        "    direction = {0, -1, 0},"
+        "    color = {1, 0.95, 0.8},"
+        "    intensity = 75000,"
+        "    cast_rt_shadow = false"
+        "  }"
+        "}))",
+        out));
+    REQUIRE_FALSE(out.empty());
+    REQUIRE(out != "nil");
+
+    const psynder::Entity e{static_cast<psynder::u64>(std::stoull(out))};
+    auto& world = psynder::scene::World::Get();
+    REQUIRE(world.alive(e));
+
+    const auto* mesh = world.get<psynder::scene::MeshRef>(e);
+    REQUIRE(mesh != nullptr);
+    CHECK(mesh->mesh.raw == 17u);
+    CHECK(mesh->lod_bias == 2u);
+
+    const auto* material = world.get<psynder::scene::MaterialRef>(e);
+    REQUIRE(material != nullptr);
+    CHECK(material->material.raw == 23u);
+
+    const auto* point = world.get<psynder::scene::LightPoint>(e);
+    REQUIRE(point != nullptr);
+    CHECK(point->position.x == 3.0f);
+    CHECK(point->position.y == 4.0f);
+    CHECK(point->position.z == 5.0f);
+    CHECK(point->color.x == 0.25f);
+    CHECK(point->radius == 8.0f);
+    CHECK(point->intensity == 1200.0f);
+
+    const auto* sun = world.get<psynder::scene::LightDirectional>(e);
+    REQUIRE(sun != nullptr);
+    CHECK(sun->direction.y == -1.0f);
+    CHECK(sun->color.z == 0.8f);
+    CHECK(sun->intensity == 75000.0f);
+    CHECK(sun->cast_rt_shadow == 0u);
+
+    world.destroy(e);
 }
 
 TEST_CASE("script: register_system validates input shapes",

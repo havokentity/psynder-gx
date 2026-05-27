@@ -93,7 +93,7 @@ void require_same_as_brute(const std::vector<Entity>& got, const std::vector<u32
     std::vector<u32> a;
     a.reserve(got.size());
     for (const Entity e : got)
-        a.push_back(e.raw - 1u);
+        a.push_back(e.index() - 1u);
     std::vector<u32> b = brute_idx;
     std::sort(a.begin(), a.end());
     std::sort(b.begin(), b.end());
