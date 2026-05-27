@@ -1,0 +1,614 @@
+{
+  "format": "psynder-gx-loose-scene-v1",
+  "name": "Arena",
+  "path": "projects/PsyArcadeGX/scenes/startup.scene.bin",
+  "active_camera": "Camera",
+  "environmentSettings": {
+    "clear_color": [
+      0.46,
+      0.6,
+      0.82,
+      1.0
+    ],
+    "sky_mode": "sdf-boot-field",
+    "sun": {
+      "time_of_day_hours": 13.0,
+      "intensity_lux": 115000.0,
+      "color": [
+        1.0,
+        0.96,
+        0.88
+      ]
+    },
+    "lighting": {
+      "ambient_color": [
+        0.52,
+        0.58,
+        0.68
+      ],
+      "ambient_intensity": 0.65,
+      "exposure": 1.35
+    },
+    "clouds": {
+      "coverage": 0.22,
+      "density": 0.38
+    }
+  },
+  "entities": [
+    {
+      "name": "Camera",
+      "components": [
+        "Transform",
+        "Camera"
+      ],
+      "position": [
+        0.0,
+        1.6,
+        6.0
+      ],
+      "rotation_euler_deg": [
+        -6.0,
+        180.0,
+        0.0
+      ],
+      "fov_y_deg": 70.0
+    },
+    {
+      "name": "Floor",
+      "primitive": "plane",
+      "position": [
+        0.0,
+        0.0,
+        -11.0
+      ],
+      "scale": [
+        46.0,
+        1.0,
+        46.0
+      ],
+      "material": {
+        "albedo": [
+          0.34,
+          0.37,
+          0.4
+        ],
+        "roughness": 0.9
+      }
+    },
+    {
+      "name": "WallBack",
+      "primitive": "cube",
+      "position": [
+        0.0,
+        2.0,
+        -33.0
+      ],
+      "scale": [
+        46.0,
+        4.0,
+        1.0
+      ],
+      "material": {
+        "albedo": [
+          0.3,
+          0.33,
+          0.4
+        ],
+        "roughness": 0.8
+      }
+    },
+    {
+      "name": "WallFront",
+      "primitive": "cube",
+      "position": [
+        0.0,
+        2.0,
+        11.0
+      ],
+      "scale": [
+        46.0,
+        4.0,
+        1.0
+      ],
+      "material": {
+        "albedo": [
+          0.3,
+          0.33,
+          0.4
+        ],
+        "roughness": 0.8
+      }
+    },
+    {
+      "name": "WallLeft",
+      "primitive": "cube",
+      "position": [
+        -22.5,
+        2.0,
+        -11.0
+      ],
+      "scale": [
+        1.0,
+        4.0,
+        46.0
+      ],
+      "material": {
+        "albedo": [
+          0.3,
+          0.33,
+          0.4
+        ],
+        "roughness": 0.8
+      }
+    },
+    {
+      "name": "WallRight",
+      "primitive": "cube",
+      "position": [
+        22.5,
+        2.0,
+        -11.0
+      ],
+      "scale": [
+        1.0,
+        4.0,
+        46.0
+      ],
+      "material": {
+        "albedo": [
+          0.3,
+          0.33,
+          0.4
+        ],
+        "roughness": 0.8
+      }
+    },
+    {
+      "name": "Crate01",
+      "primitive": "cube",
+      "position": [
+        -3.0,
+        0.5,
+        -4.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "Crate02",
+      "primitive": "cube",
+      "position": [
+        -1.0,
+        0.5,
+        -6.5
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "Crate03",
+      "primitive": "cube",
+      "position": [
+        2.0,
+        0.5,
+        -5.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "Crate04",
+      "primitive": "cube",
+      "position": [
+        4.0,
+        0.5,
+        -8.5
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "Crate05",
+      "primitive": "cube",
+      "position": [
+        -5.5,
+        0.5,
+        -10.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "Crate06",
+      "primitive": "cube",
+      "position": [
+        0.5,
+        0.5,
+        -12.5
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "Crate07",
+      "primitive": "cube",
+      "position": [
+        6.0,
+        0.5,
+        -12.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "BigCrate1",
+      "primitive": "cube",
+      "position": [
+        -2.5,
+        1.0,
+        -16.0
+      ],
+      "scale": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "material": {
+        "albedo": [
+          0.78,
+          0.62,
+          0.36
+        ],
+        "roughness": 0.6
+      }
+    },
+    {
+      "name": "BigCrate2",
+      "primitive": "cube",
+      "position": [
+        3.5,
+        1.0,
+        -19.0
+      ],
+      "scale": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "material": {
+        "albedo": [
+          0.78,
+          0.62,
+          0.36
+        ],
+        "roughness": 0.6
+      }
+    },
+    {
+      "name": "StackBase",
+      "primitive": "cube",
+      "position": [
+        -9.0,
+        0.5,
+        -7.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "StackTop",
+      "primitive": "cube",
+      "position": [
+        -9.0,
+        1.5,
+        -7.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "PyramidBase",
+      "primitive": "cube",
+      "position": [
+        10.0,
+        1.0,
+        -20.0
+      ],
+      "scale": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "material": {
+        "albedo": [
+          0.78,
+          0.62,
+          0.36
+        ],
+        "roughness": 0.6
+      }
+    },
+    {
+      "name": "PyramidTop",
+      "primitive": "cube",
+      "position": [
+        10.0,
+        2.5,
+        -20.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "Ramp1",
+      "primitive": "cube",
+      "position": [
+        -12.0,
+        0.7,
+        -12.0
+      ],
+      "rotation_euler_deg": [
+        -22.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        4.0,
+        0.4,
+        3.0
+      ],
+      "material": {
+        "albedo": [
+          0.8,
+          0.44,
+          0.22
+        ],
+        "roughness": 0.7
+      }
+    },
+    {
+      "name": "Ramp2",
+      "primitive": "cube",
+      "position": [
+        12.0,
+        0.7,
+        -6.0
+      ],
+      "rotation_euler_deg": [
+        -22.0,
+        40.0,
+        0.0
+      ],
+      "scale": [
+        4.0,
+        0.4,
+        3.0
+      ],
+      "material": {
+        "albedo": [
+          0.8,
+          0.44,
+          0.22
+        ],
+        "roughness": 0.7
+      }
+    },
+    {
+      "name": "Pillar1",
+      "primitive": "cube",
+      "position": [
+        -15.0,
+        3.0,
+        -15.0
+      ],
+      "scale": [
+        1.0,
+        6.0,
+        1.0
+      ],
+      "material": {
+        "albedo": [
+          0.22,
+          0.24,
+          0.28
+        ],
+        "roughness": 0.5
+      }
+    },
+    {
+      "name": "Pillar2",
+      "primitive": "cube",
+      "position": [
+        15.0,
+        3.0,
+        -15.0
+      ],
+      "scale": [
+        1.0,
+        6.0,
+        1.0
+      ],
+      "material": {
+        "albedo": [
+          0.22,
+          0.24,
+          0.28
+        ],
+        "roughness": 0.5
+      }
+    },
+    {
+      "name": "Pillar3",
+      "primitive": "cube",
+      "position": [
+        -15.0,
+        3.0,
+        -26.0
+      ],
+      "scale": [
+        1.0,
+        6.0,
+        1.0
+      ],
+      "material": {
+        "albedo": [
+          0.22,
+          0.24,
+          0.28
+        ],
+        "roughness": 0.5
+      }
+    },
+    {
+      "name": "Pillar4",
+      "primitive": "cube",
+      "position": [
+        15.0,
+        3.0,
+        -26.0
+      ],
+      "scale": [
+        1.0,
+        6.0,
+        1.0
+      ],
+      "material": {
+        "albedo": [
+          0.22,
+          0.24,
+          0.28
+        ],
+        "roughness": 0.5
+      }
+    },
+    {
+      "name": "Cover1",
+      "primitive": "cube",
+      "position": [
+        -4.0,
+        0.6,
+        -9.0
+      ],
+      "rotation_euler_deg": [
+        0.0,
+        30.0,
+        0.0
+      ],
+      "scale": [
+        3.0,
+        1.2,
+        0.6
+      ],
+      "material": {
+        "albedo": [
+          0.55,
+          0.58,
+          0.6
+        ],
+        "roughness": 0.7
+      }
+    },
+    {
+      "name": "Cover2",
+      "primitive": "cube",
+      "position": [
+        5.5,
+        0.6,
+        -15.0
+      ],
+      "rotation_euler_deg": [
+        0.0,
+        -25.0,
+        0.0
+      ],
+      "scale": [
+        3.0,
+        1.2,
+        0.6
+      ],
+      "material": {
+        "albedo": [
+          0.55,
+          0.58,
+          0.6
+        ],
+        "roughness": 0.7
+      }
+    },
+    {
+      "name": "Ball1",
+      "primitive": "sphere",
+      "position": [
+        0.0,
+        0.75,
+        -22.0
+      ],
+      "scale": [
+        1.5,
+        1.5,
+        1.5
+      ],
+      "material": {
+        "albedo": [
+          0.4,
+          0.66,
+          1.0
+        ],
+        "roughness": 0.35,
+        "metallic": 0.1
+      }
+    },
+    {
+      "name": "Ball2",
+      "primitive": "sphere",
+      "position": [
+        -6.0,
+        0.75,
+        -20.0
+      ],
+      "scale": [
+        1.5,
+        1.5,
+        1.5
+      ],
+      "material": {
+        "albedo": [
+          0.95,
+          0.45,
+          0.4
+        ],
+        "roughness": 0.4
+      }
+    }
+  ]
+}

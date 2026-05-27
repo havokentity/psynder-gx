@@ -4,8 +4,8 @@
 # milestones land.
 add_subdirectory(00_clear)
 add_subdirectory(01_triangle)          # M1 — rotating textured triangle
+add_subdirectory(02_crate)             # M2 spine — one maintainable crate scene
 # Stretch — these directories will be added as M2+ land:
-# add_subdirectory(02_pbr_sphere)      # M2 — PBR sphere with point lights
 # add_subdirectory(03_quake_room_gx)   # M3
 # add_subdirectory(04_cs_arena)        # M4–M6 — first competitive playable
 # add_subdirectory(05_dest_sandbox)    # M7 — destruction sandbox

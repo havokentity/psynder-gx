@@ -88,7 +88,20 @@ What's deferred to follow-up PRs
 
 Engine-side loader contract (for lane 09 / lane 10 follow-up)
 -------------------------------------------------------------
-The runtime loader is expected to:
+Lane 05 now provides a narrow runtime bridge in
+engine/asset/PsyMeshBridge.h. It validates .psymesh v1 and can repack a
+static mesh into the existing .lmm container:
+* .obj -> psymesh_cook -> .psymesh
+* asset::psymesh::parse_psymesh() validates the SoA payload, index bounds,
+  submesh ranges, and known attr_mask bits.
+* asset::psymesh::build_lmm_from_psymesh() interleaves pos/normal/uv0 and
+  optional tangent into .lmm v1. It converts .psymesh u32 indices to .lmm
+  u16 indices when the vertex count fits.
+* Pass asset::formats::material_name_hash("crate") (or another material
+  name) as the bridge material hash so the .lmm submesh binds to the matching
+  .lmt material/texture record.
+
+The fuller runtime loader is still expected to:
 * Open the .psymesh file via VFS, mmap the whole thing.
 * Validate header.magic == kPsyMeshMagic AND header.version == kPsyMeshVersion.
 * Compute per-stream byte offsets by walking attr_mask bits in the

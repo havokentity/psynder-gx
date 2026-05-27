@@ -2,10 +2,10 @@
 // Psynder-GX — Lane 05 mesh cooker .psymesh wire format (v1).
 //
 // This header is the frozen contract between the offline cooker
-// (tools/psymesh_cook, this lane) and the runtime loader (lane 09 /
-// lane 10, not yet shipped). The loader is expected to live under
-// engine/asset/PsyMeshFormat.h and engine/asset/PsyMeshLoad.{h,cpp};
-// until that lane lands, this header is the single source of truth.
+// (tools/psymesh_cook, this lane) and the runtime/static-mesh bridge in
+// engine/asset/PsyMeshBridge.h. A fuller lane 09 / lane 10 GPU upload path
+// can build on that bridge when it lands; until then this header remains the
+// offline source of truth and the asset bridge mirrors the v1 structs.
 //
 // ──────────────────────────────────────────────────────────────────────────
 //  Byte layout (little-endian, all multi-byte fields LE on disk)

@@ -4,6 +4,8 @@
 # Acceptance: runs on Win/Linux Vulkan + macOS native Metal from one binary.
 
 add_executable(sample_00_clear main.cpp)
+target_compile_definitions(sample_00_clear PRIVATE
+    "PSYNDER_GX_UI_IMM_SHADER_PATH=\"${CMAKE_SOURCE_DIR}/engine/ui/imm/shaders/imm_overlay.slang\"")
 target_link_libraries(sample_00_clear PRIVATE
     psynder_common
     psynder_core
@@ -25,4 +27,7 @@ endif()
 # consumer must resolve that symbol even with no shaders of its own.
 if(TARGET psynder_shader)
     target_link_libraries(sample_00_clear PRIVATE psynder_shader)
+endif()
+if(TARGET psynder_ui_imm)
+    target_link_libraries(sample_00_clear PRIVATE psynder_ui_imm)
 endif()
