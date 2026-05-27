@@ -39,6 +39,14 @@ struct SnapshotFrame {
 inline constexpr usize kSnapshotHeaderBytes = 8;   // tick (4) + count (4)
 inline constexpr usize kSnapshotEntityBytes = 20;  // id (4) + xyz (12) + state (4)
 
+inline constexpr usize encoded_snapshot_size(usize entity_count) noexcept {
+    return kSnapshotHeaderBytes + entity_count * kSnapshotEntityBytes;
+}
+
+inline usize encoded_snapshot_size(const SnapshotFrame& f) noexcept {
+    return encoded_snapshot_size(f.entities.size());
+}
+
 usize encode_snapshot(const SnapshotFrame& f, std::span<u8> out) noexcept;
 bool  decode_snapshot(std::span<const u8> in, SnapshotFrame& out) noexcept;
 

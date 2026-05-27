@@ -96,6 +96,21 @@ void request_close(Window*);
 // new keyboard transitions into the keyboard state (see key_down/key_pressed).
 void pump_events();
 
+// UTF-8 text typed during the most recent pump_events() call. This is for
+// console/text-entry surfaces; gameplay should use platform::Input key states.
+// Copies at most capacity-1 bytes and nul-terminates when capacity > 0.
+std::size_t text_input_utf8(char* dst, std::size_t capacity);
+
+struct ConsoleShortcuts {
+    bool copy = false;
+    bool cut = false;
+    bool paste = false;
+    bool select_all = false;
+    const char* paste_text = "";
+};
+ConsoleShortcuts consume_console_shortcuts();
+void set_clipboard_text(const char* text);
+
 // Register a window to receive Esc-key close signals. When Escape is pressed
 // during pump_events, request_close(w) is called on the registered window.
 // run_loop() sets this automatically; call it directly when driving the event
@@ -118,6 +133,8 @@ struct MouseDelta {
     double dx          = 0.0;
     double dy          = 0.0;
     double wheel       = 0.0;
+    double x           = 0.0;
+    double y           = 0.0;
     bool   left_down   = false;
     bool   right_down  = false;
     bool   middle_down = false;

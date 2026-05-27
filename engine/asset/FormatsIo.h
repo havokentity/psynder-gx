@@ -62,6 +62,7 @@
 
 #include <cstring>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace psynder::asset::formats {
@@ -77,6 +78,22 @@ static_assert(sizeof(LmtMip) == 16, "LmtMip v1 wire size");
 static_assert(sizeof(LmaHeader) == 40, "LmaHeader v1 wire size");
 
 // ─── Format helpers ──────────────────────────────────────────────────────
+
+// FNV-1a 32-bit hash used by .lmm submeshes to bind a material name to a
+// cooked .lmt. Kept here so runtime loaders and cook-time tests do not have
+// to reach into an offline tool just to compute the same stable key.
+inline constexpr u32 fnv1a32(std::string_view bytes) noexcept {
+    u32 h = 0x811C9DC5u;
+    for (char c : bytes) {
+        h ^= static_cast<u32>(static_cast<u8>(c));
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+inline constexpr u32 material_name_hash(std::string_view name) noexcept {
+    return fnv1a32(name);
+}
 
 // Index element size in bytes: 16-bit while the mesh fits in 65535 verts,
 // else 32-bit. A vertex_count of 0 still implies 16-bit (degenerate mesh).

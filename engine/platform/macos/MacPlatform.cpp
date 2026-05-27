@@ -86,13 +86,14 @@ public:
     }
     const MouseState& mouse() const override {
         // Fold IOKit raw mouse into the legacy MouseState. Each call to
-        // mouse_delta_raw() snapshots-and-resets, so we accumulate into
-        // ms_ to keep deltas stable for callers that poll once per frame
-        // through this legacy interface.
+        // mouse_delta_raw() snapshots-and-resets; expose this frame's
+        // packet directly so wheel/delta do not leak into future frames.
         auto d = macos::mouse_delta_raw();
-        ms_.dx += static_cast<f32>(d.dx);
-        ms_.dy += static_cast<f32>(d.dy);
-        ms_.wheel += static_cast<f32>(d.wheel);
+        ms_.dx = static_cast<f32>(d.dx);
+        ms_.dy = static_cast<f32>(d.dy);
+        ms_.wheel = static_cast<f32>(d.wheel);
+        ms_.x = static_cast<f32>(d.x);
+        ms_.y = static_cast<f32>(d.y);
         ms_.left   = d.left_down;
         ms_.right  = d.right_down;
         ms_.middle = d.middle_down;

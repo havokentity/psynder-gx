@@ -163,10 +163,14 @@ DemoReaderResult DemoReader::open(const char* path) noexcept {
         return DemoReaderResult::CorruptFile;
     }
 
-    // Pick tick config from header.
-    tick_cfg_ = (header_.tick_hz == 128)
-                ? tick_config_128()
-                : tick_config_64();
+    if (header_.tick_hz == 64u) {
+        tick_cfg_ = tick_config_64();
+    } else if (header_.tick_hz == 128u) {
+        tick_cfg_ = tick_config_128();
+    } else {
+        std::fclose(f);
+        return DemoReaderResult::CorruptFile;
+    }
 
     file_         = f;
     open_         = true;
