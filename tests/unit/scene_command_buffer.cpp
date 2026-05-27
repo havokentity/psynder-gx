@@ -9,6 +9,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
+
 using psynder::Entity;
 using psynder::scene::CommandBuffer;
 using psynder::scene::LightPoint;
@@ -16,6 +18,14 @@ using psynder::scene::VisibleBit;
 using psynder::scene::World;
 
 namespace {
+
+// An over-aligned component: exercises the command-buffer payload path against
+// alignment larger than the byte arena's default allocation alignment.
+PSYNDER_COMPONENT(OverAligned) {
+    alignas(64) float data[4];
+    int tag;
+};
+
 
 LightPoint make_light(float intensity) {
     LightPoint lp{};
@@ -130,4 +140,26 @@ TEST_CASE("scene/command-buffer: steady-state replay does not reallocate",
         REQUIRE(cb.command_capacity() == cc);  // pooled — no realloc
         REQUIRE(cb.payload_capacity() == pc);
     }
+}
+
+TEST_CASE("scene/command-buffer: over-aligned component payload survives playback",
+          "[scene][ecs][commandbuffer][align]") {
+    World w;
+    CommandBuffer cb;
+
+    const Entity t = cb.create();
+    OverAligned v{};
+    v.data[0] = 1.5f;
+    v.tag = 42;
+    cb.add(t, v);
+    cb.playback(w);
+
+    std::size_t seen = 0;
+    w.for_each_chunk<OverAligned>([&](std::size_t n, OverAligned* o) {
+        seen += n;
+        REQUIRE(reinterpret_cast<std::uintptr_t>(o) % alignof(OverAligned) == 0u);
+        REQUIRE(o[0].data[0] == 1.5f);
+        REQUIRE(o[0].tag == 42);
+    });
+    REQUIRE(seen == 1);
 }

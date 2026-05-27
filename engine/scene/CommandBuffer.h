@@ -33,6 +33,7 @@
 #include "scene/World.h"
 
 #include <cstddef>
+#include <cstring>
 #include <type_traits>
 #include <vector>
 
@@ -109,7 +110,13 @@ void CommandBuffer::add(Entity e, const T& component) {
     commands_.push_back(Command{
         Op::Add, e, offset, static_cast<u32>(sizeof(T)),
         [](World& world, Entity ent, const void* payload) {
-            world.add<T>(ent, *static_cast<const T*>(payload));
+            // Copy out of the byte arena into a properly-aligned T before use.
+            // The arena's base pointer is not guaranteed aligned for over-aligned
+            // components (e.g. alignas(64)), so dereferencing payload as T* would
+            // be UB; memcpy has no alignment requirement.
+            T value;
+            std::memcpy(&value, payload, sizeof(T));
+            world.add<T>(ent, value);
         }});
 }
 

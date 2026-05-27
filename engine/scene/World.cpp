@@ -4,10 +4,12 @@
 #include "World.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <unordered_map>
 #include <vector>
 
 namespace psynder::scene {
@@ -19,8 +21,8 @@ constexpr usize kTargetChunkBytes = 16 * 1024;
 constexpr u32   kMaxChunkEntities = 1024;
 
 struct ComponentRegistry {
-    std::mutex                     mutex;
-    std::vector<ComponentTypeInfo> types;
+    std::mutex                                         mutex;
+    std::unordered_map<ComponentId, ComponentTypeInfo> types;  // keyed by stable id
 };
 
 ComponentRegistry& registry() {
@@ -42,25 +44,17 @@ u32 next_generation(u32 gen) noexcept {
 ComponentTypeInfo registered_type(ComponentId id) {
     auto& r = registry();
     std::lock_guard lock{r.mutex};
-    if (id < r.types.size() && r.types[id].id == id) {
-        return r.types[id];
+    if (const auto it = r.types.find(id); it != r.types.end()) {
+        return it->second;
     }
     return ComponentTypeInfo{ id, 0, 0, "" };
 }
 
 void ensure_registered_type(const ComponentTypeInfo& info) {
     if (info.id == 0u || info.size == 0u || info.align == 0u) return;
-
     auto& r = registry();
     std::lock_guard lock{r.mutex};
-    if (r.types.size() <= info.id) {
-        r.types.resize(static_cast<usize>(info.id) + 1u);
-    }
-
-    ComponentTypeInfo& dst = r.types[info.id];
-    if (dst.id == 0u) {
-        dst = info;
-    }
+    r.types.emplace(info.id, info);  // no-op if already registered
 }
 
 struct ComponentColumn {
@@ -150,6 +144,10 @@ struct WorldState {
     std::vector<u32>                        free_entities;
     std::vector<std::unique_ptr<Archetype>> archetypes;
     Archetype*                              empty_archetype = nullptr;
+    // >0 while a for_each_chunk is in flight. Structural changes (create/
+    // destroy/add/remove) hand out / invalidate raw chunk pointers, so they
+    // must be deferred to a CommandBuffer during iteration. Debug-asserted.
+    int                                     iteration_depth = 0;
 };
 
 namespace {
@@ -369,21 +367,19 @@ bool migrate(WorldState& s, Entity e, EntityRecord& record, Archetype& dst,
 }  // namespace
 
 ComponentId register_component(const ComponentTypeInfo& info) {
+    // `info.id` is the stable name-hash computed by component_id<T>(); it is the
+    // sole registrar. Idempotent per type; a clash between two *distinct* names
+    // hashing to the same id is a (vanishingly unlikely) FNV collision and is a
+    // hard error in debug so it is caught at bring-up rather than corrupting
+    // archetype layout.
     auto& r = registry();
     std::lock_guard lock{r.mutex};
-    if (r.types.empty()) {
-        r.types.resize(1);
+    const auto [it, inserted] = r.types.emplace(info.id, info);
+    if (!inserted && it->second.name != nullptr && info.name != nullptr) {
+        assert(std::strcmp(it->second.name, info.name) == 0 &&
+               "component id hash collision between two distinct component names");
     }
-
-    const ComponentId id = info.id != 0u ? info.id : static_cast<ComponentId>(r.types.size());
-    if (r.types.size() <= id) {
-        r.types.resize(static_cast<usize>(id) + 1u);
-    }
-
-    ComponentTypeInfo stored = info;
-    stored.id = id;
-    r.types[id] = stored;
-    return id;
+    return info.id;
 }
 
 World::World() : state_(std::make_unique<WorldState>()) {}
@@ -394,8 +390,16 @@ World& World::Get() {
     return w;
 }
 
+// Asserts no for_each_chunk is in flight: a structural change reallocates/
+// migrates chunk storage and would dangle the raw pointers a query handed out.
+// Defer such changes to a CommandBuffer and play them back at a sync point.
+#define PSY_WORLD_NO_ITERATION(s) \
+    assert((s).iteration_depth == 0 && \
+           "structural change during for_each_chunk; defer via CommandBuffer")
+
 Entity World::create() {
     WorldState& s = *state_;
+    PSY_WORLD_NO_ITERATION(s);
     Archetype* archetype = empty_archetype(s);
     if (!archetype) return {};
 
@@ -429,6 +433,7 @@ Entity World::create() {
 
 void World::destroy(Entity e) {
     WorldState& s = *state_;
+    PSY_WORLD_NO_ITERATION(s);
     EntityRecord* record = nullptr;
     if (!valid_entity(s, e, record)) return;
 
@@ -455,6 +460,7 @@ void World::add_component(Entity e, const ComponentTypeInfo& info, const void* c
     ensure_registered_type(info);
 
     WorldState& s = *state_;
+    PSY_WORLD_NO_ITERATION(s);
     EntityRecord* record = nullptr;
     if (!valid_entity(s, e, record) || !record->archetype) return;
 
@@ -486,6 +492,7 @@ void* World::get_component(Entity e, ComponentId id) noexcept {
 
 void World::remove_component(Entity e, ComponentId id) {
     WorldState& s = *state_;
+    PSY_WORLD_NO_ITERATION(s);
     EntityRecord* record = nullptr;
     if (!valid_entity(s, e, record) || !record->archetype) return;
 
@@ -505,6 +512,7 @@ void World::query_chunks(const ComponentId* ids, usize id_count,
     if (id_count > kMaxQueryComponents) return;
 
     WorldState& s = *state_;
+    ++s.iteration_depth;  // forbids structural changes until this query returns
     for (const std::unique_ptr<Archetype>& archetype_ptr : s.archetypes) {
         Archetype& archetype = *archetype_ptr;
 
@@ -538,6 +546,7 @@ void World::query_chunks(const ComponentId* ids, usize id_count,
             fn(ctx, view);
         }
     }
+    --s.iteration_depth;
 }
 
 }  // namespace psynder::scene

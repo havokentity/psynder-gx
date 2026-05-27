@@ -34,12 +34,42 @@ struct ComponentTypeInfo {
 
 ComponentId register_component(const ComponentTypeInfo& info);
 
+// FNV-1a-32 of a string, folded to a non-zero id (0 means "unregistered").
+constexpr ComponentId fnv1a32(const char* s) noexcept {
+    u32 hash = 2166136261u;
+    for (; *s != '\0'; ++s) {
+        hash ^= static_cast<u32>(static_cast<unsigned char>(*s));
+        hash *= 16777619u;
+    }
+    return hash == 0u ? 1u : hash;
+}
+
+// Per-type signature from the compiler (contains T's fully-qualified name).
+// Used to derive a component id that does NOT depend on registration /
+// static-init / link order — so archetype column layout is stable across builds
+// with the same toolchain (the bug fixed here: ids were previously assigned by
+// call order). It is compiler-specific (clang/gcc __PRETTY_FUNCTION__ vs MSVC
+// __FUNCSIG__), so it is identical across builds of the *same* compiler but NOT
+// across different compilers. That is sufficient for in-memory layout and for a
+// same-toolchain client/server. Cross-*compiler* wire identity (e.g. an MSVC
+// client exchanging component-keyed data with a clang server) needs explicit
+// names / GUIDs — future work, to land when networking serializes generic
+// components (see docs/adr/ADR-018 + the ECS determinism notes).
+template <class T>
+const char* component_signature() noexcept {
+#if defined(_MSC_VER)
+    return __FUNCSIG__;
+#else
+    return __PRETTY_FUNCTION__;
+#endif
+}
+
 template <class T>
 ComponentId component_id() {
     static_assert(std::is_trivially_copyable_v<T>,
                   "Psynder components must be trivially copyable POD");
-    static const ComponentId id = register_component(
-        ComponentTypeInfo{ 0, sizeof(T), alignof(T), "" });
+    static const ComponentId id = register_component(ComponentTypeInfo{
+        fnv1a32(component_signature<T>()), sizeof(T), alignof(T), component_signature<T>() });
     return id;
 }
 
