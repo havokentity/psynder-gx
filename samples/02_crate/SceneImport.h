@@ -16,7 +16,6 @@
 #include "scene/World.h"
 
 #include "math/Math.h"
-#include "math/MathExt.h"
 
 #include <algorithm>
 #include <cmath>

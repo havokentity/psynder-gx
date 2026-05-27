@@ -9,6 +9,7 @@
 
 #include "camera/Camera.h"
 #include "SceneDocument.h"
+#include "SceneImport.h"
 #include "core/console/Console.h"
 #include "core/console/RuntimeConsole.h"
 #include "core/Types.h"
@@ -19,8 +20,9 @@
 #include "jobs/JobSystem.h"
 #include "math/Math.h"
 #include "platform/Platform.h"
-#include "physics/core/CharacterSpine.h"
+#include "physics/core/CharacterController.h"
 #include "scene/GxComponents.h"
+#include "scene/SceneComponents.h"
 #include "scene/World.h"
 #include "script/Script.h"
 #include "shader/PublicShader.h"
@@ -37,6 +39,7 @@
 #include <filesystem>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -107,7 +110,7 @@ using SceneCamera = psynder::sample02::SceneCamera;
 using SceneEnvironment = psynder::sample02::SceneEnvironment;
 using ScenePlayerStart = psynder::sample02::ScenePlayerStart;
 using ScenePlayerController = psynder::sample02::ScenePlayerController;
-namespace character_spine = psynder::physics::character_spine;
+namespace phys = psynder::physics;
 
 struct EditorPickRay {
     psynder::math::Vec3 origin{};
@@ -195,8 +198,11 @@ struct PlayModeState {
     bool active = false;
     bool collision_debug = false;
     bool input_captured = false;
-    character_spine::World* world = nullptr;
-    character_spine::Character* pawn = nullptr;
+    // The play simulation runs on scene::World (the single source of truth for
+    // colliders, the player capsule, and the rendered scene) — no parallel
+    // character_spine world. Reset on each start/stop via the unique_ptr.
+    std::unique_ptr<psynder::scene::World> sim_world;
+    psynder::Entity pawn{};  // player capsule entity in sim_world
     float fixed_accum_seconds = 0.0f;
     float yaw_deg = 180.0f;
     float pitch_deg = 0.0f;
@@ -1024,50 +1030,6 @@ psynder::math::Vec3 play_spawn_position(const PlayerBootState& boot,
 
 psynder::math::Quat primitive_rotation_quat(const ScenePrimitive& primitive) noexcept;
 
-void add_play_collider_for_primitive(character_spine::World* world,
-                                     const ScenePrimitive& primitive) {
-    if (!world || !primitive.visible) {
-        return;
-    }
-    const psynder::math::Quat rotation = primitive_rotation_quat(primitive);
-    if (primitive.kind == ScenePrimitiveKind::Sphere) {
-        character_spine::SphereDesc sphere{};
-        sphere.center_m[0] = primitive.position.x;
-        sphere.center_m[1] = primitive.position.y;
-        sphere.center_m[2] = primitive.position.z;
-        sphere.rotation_quat[0] = rotation.x;
-        sphere.rotation_quat[1] = rotation.y;
-        sphere.rotation_quat[2] = rotation.z;
-        sphere.rotation_quat[3] = rotation.w;
-        sphere.radius_m = std::max(0.05f,
-            std::max(std::fabs(primitive.scale.x),
-                     std::max(std::fabs(primitive.scale.y), std::fabs(primitive.scale.z))) *
-            0.5f);
-        (void)character_spine::add_static_sphere(world, sphere);
-        return;
-    }
-
-    character_spine::BoxDesc box{};
-    box.center_m[0] = primitive.position.x;
-    box.center_m[1] = primitive.position.y;
-    box.center_m[2] = primitive.position.z;
-    box.rotation_quat[0] = rotation.x;
-    box.rotation_quat[1] = rotation.y;
-    box.rotation_quat[2] = rotation.z;
-    box.rotation_quat[3] = rotation.w;
-    if (primitive.kind == ScenePrimitiveKind::Plane) {
-        box.half_extents_m[0] = std::max(0.05f, std::fabs(primitive.scale.x) * 0.5f);
-        box.half_extents_m[1] = 0.05f;
-        box.half_extents_m[2] = std::max(0.05f, std::fabs(primitive.scale.z) * 0.5f);
-        box.center_m[1] -= box.half_extents_m[1];
-    } else {
-        box.half_extents_m[0] = std::max(0.05f, std::fabs(primitive.scale.x) * 0.5f);
-        box.half_extents_m[1] = std::max(0.05f, std::fabs(primitive.scale.y) * 0.5f);
-        box.half_extents_m[2] = std::max(0.05f, std::fabs(primitive.scale.z) * 0.5f);
-    }
-    (void)character_spine::add_static_box(world, box);
-}
-
 struct PlayModeTuning {
     float walk_speed_mps = 4.6f;
     float run_speed_mps = 7.0f;
@@ -1148,10 +1110,7 @@ bool console_cvar_bool(std::string_view name, bool fallback) {
 
 void stop_play_mode(PlayModeState& play) {
     const bool keep_collision_debug = play.collision_debug;
-    if (play.world) {
-        character_spine::destroy_world(play.world);
-    }
-    play = {};
+    play = {};  // resets sim_world (destroys the ECS sim world) + all fields
     play.collision_debug = keep_collision_debug;
 }
 
@@ -1184,26 +1143,31 @@ bool start_play_mode(PlayModeState& play,
         return false;
     }
 
-    character_spine::WorldDesc world_desc{};
-    world_desc.max_bodies =
-        static_cast<std::uint32_t>(std::max<std::size_t>(256, boot.primitives.size() + 8));
-    character_spine::World* world = character_spine::create_world(world_desc);
-    if (!world) {
-        if (out) out->PrintLine("play: failed to create character world");
-        return false;
-    }
+    auto world = std::make_unique<psynder::scene::World>();
 
+    // Import the authored scene primitives into the ECS as canonical prop
+    // entities (TransformWS + Collider + RenderMaterial) — these are the same
+    // entities the play renderer draws and the character controller collides
+    // against. No parallel character_spine collider set.
     bool has_static_ground = false;
     std::uint32_t static_collider_count = 0;
     for (const ScenePrimitive& primitive : boot.primitives) {
+        if (!primitive.visible) continue;
         if (primitive.kind == ScenePrimitiveKind::Plane) {
             has_static_ground = true;
         }
-        add_play_collider_for_primitive(world, primitive);
+        psynder::scene::spawn_prop(*world,
+                                   psynder::sample02::prop_from_primitive(primitive));
         ++static_collider_count;
     }
     if (!has_static_ground) {
-        (void)character_spine::add_static_ground(world, 128.0f, 128.0f, 0.0f);
+        // Fallback ground slab: top face at y == 0.
+        psynder::scene::PropDesc ground;
+        ground.position = {0.0f, -0.5f, 0.0f};
+        ground.shape = psynder::scene::ShapeKind::Box;
+        ground.half_extents = {128.0f, 0.5f, 128.0f};
+        ground.material.albedo = {0.32f, 0.34f, 0.38f};
+        psynder::scene::spawn_prop(*world, ground);
         ++static_collider_count;
     }
 
@@ -1213,24 +1177,15 @@ bool start_play_mode(PlayModeState& play,
     std::string spawn_label;
     const psynder::math::Vec3 spawn =
         play_spawn_position(boot, editor_camera, spawn_label, yaw, pitch);
-    character_spine::CapsuleDesc pawn_desc{};
-    pawn_desc.foot_position_m[0] = spawn.x;
-    pawn_desc.foot_position_m[1] = spawn.y;
-    pawn_desc.foot_position_m[2] = spawn.z;
+    phys::CharacterDesc pawn_desc{};
+    pawn_desc.foot_position = spawn;
     pawn_desc.radius_m = tuning.capsule_radius_m;
     pawn_desc.height_m = tuning.capsule_height_m;
-    pawn_desc.max_horizontal_speed_mps = tuning.run_speed_mps;
-    character_spine::Character* pawn =
-        character_spine::create_capsule_character(world, pawn_desc);
-    if (!pawn) {
-        character_spine::destroy_world(world);
-        if (out) out->PrintLine("play: failed to create pawn capsule");
-        return false;
-    }
+    const psynder::Entity pawn = phys::spawn_character(*world, pawn_desc);
 
     play.active = true;
     play.input_captured = console_cvar_bool("play_capture_input", true);
-    play.world = world;
+    play.sim_world = std::move(world);
     play.pawn = pawn;
     play.fixed_accum_seconds = 0.0f;
     play.yaw_deg = yaw;
@@ -1256,7 +1211,7 @@ bool update_play_mode(PlayModeState& play,
                       float dt_seconds) {
     namespace m = psynder::math;
     namespace p = psynder::platform;
-    if (!play.active || !play.world || !play.pawn || !input ||
+    if (!play.active || !play.sim_world || !input ||
         boot.render_state != PlayerBootRenderState::SceneRendering) {
         return false;
     }
@@ -1284,32 +1239,31 @@ bool update_play_mode(PlayModeState& play,
         move = m::normalize(move);
     }
 
-    character_spine::CharacterInput character_input{};
     const float speed = shift_down ? tuning.run_speed_mps : tuning.walk_speed_mps;
-    character_input.velocity_mps[0] = move.x * speed;
-    character_input.velocity_mps[1] = move.z * speed;
-    character_input.jump = input->key_pressed(p::KeyCode::Space);
-    character_input.crouch =
-        input->key_down(p::KeyCode::LeftCtrl) || input->key_down(p::KeyCode::RightCtrl);
-    character_input.lean_left = input->key_down(p::KeyCode::Q);
-    character_input.lean_right = input->key_down(p::KeyCode::E);
-    character_spine::set_character_input(play.pawn, character_input);
+    if (auto* in = play.sim_world->get<phys::CharacterInput>(play.pawn)) {
+        in->move_dir_x = move.x;
+        in->move_dir_z = move.z;
+        in->speed_mps = speed;
+        in->jump = input->key_pressed(p::KeyCode::Space) ? 1u : 0u;
+    }
 
     constexpr float kFixedDt = 1.0f / 120.0f;
+    const m::Vec3 gravity{0.0f, -9.81f, 0.0f};
     play.fixed_accum_seconds =
         std::min(play.fixed_accum_seconds + dt_seconds, 0.25f);
     while (play.fixed_accum_seconds >= kFixedDt) {
-        character_spine::step_fixed(play.world);
+        phys::character_input_system(*play.sim_world);
+        phys::character_physics_step(*play.sim_world, kFixedDt, gravity);
         play.fixed_accum_seconds -= kFixedDt;
     }
 
-    const character_spine::Transform transform =
-        character_spine::character_transform(play.pawn);
-    play.eye_position = {
-        transform.foot_position_m[0],
-        transform.foot_position_m[1] + play.eye_height_m,
-        transform.foot_position_m[2],
-    };
+    if (const auto* xf = play.sim_world->get<psynder::scene::TransformWS>(play.pawn)) {
+        play.eye_position = {
+            xf->mtw.m[12],
+            xf->mtw.m[13] + play.eye_height_m,
+            xf->mtw.m[14],
+        };
+    }
     return true;
 }
 
@@ -3409,6 +3363,16 @@ const PrimitiveMeshGpu& mesh_for_primitive(const PrimitiveRenderResources& resou
     return resources.cube;
 }
 
+const PrimitiveMeshGpu& mesh_for_collider(const PrimitiveRenderResources& resources,
+                                          psynder::scene::ShapeKind kind) noexcept {
+    switch (kind) {
+        case psynder::scene::ShapeKind::Sphere: return resources.sphere;
+        case psynder::scene::ShapeKind::Plane:  return resources.plane;
+        case psynder::scene::ShapeKind::Box:    return resources.cube;
+    }
+    return resources.cube;
+}
+
 bool ensure_scene_depth_target(psynder::gpu::Device* dev,
                                PrimitiveRenderResources& resources,
                                std::uint32_t width,
@@ -3554,6 +3518,86 @@ ScenePushConstants compose_scene_push(const ScenePrimitive& primitive,
         rotate_vec_by_quat(
             quat_conjugate_local(rotation),
             world_light));
+    pc.light[0] = local_light.x;
+    pc.light[1] = local_light.y;
+    pc.light[2] = local_light.z;
+    pc.light[3] = debug_mode == RenderDebugMode::Depth ? 0.0f : scene_sun_strength(environment);
+    pc.ambient_exposure[0] = environment.ambient_color.x * environment.ambient_intensity;
+    pc.ambient_exposure[1] = environment.ambient_color.y * environment.ambient_intensity;
+    pc.ambient_exposure[2] = environment.ambient_color.z * environment.ambient_intensity;
+    pc.ambient_exposure[3] = environment.exposure;
+    return pc;
+}
+
+// Build scene push constants for an ECS prop entity: the model matrix comes
+// straight off TransformWS (it already bakes T*R*S), and the surface comes off
+// the canonical RenderMaterial. The light is taken into the model's local
+// space (the shader dots local-space normals against it) by projecting the
+// world light onto the model's normalised basis columns.
+ScenePushConstants compose_scene_push_ecs(const psynder::math::Mat4& model,
+                                          const psynder::scene::RenderMaterial& material,
+                                          const SceneCamera& camera,
+                                          const SceneEnvironment& environment,
+                                          RenderDebugMode debug_mode,
+                                          float aspect) noexcept {
+    namespace m = psynder::math;
+    const m::Vec3 pitch_yaw{
+        camera.rotation_euler_deg.x * m::kDegToRad,
+        camera.rotation_euler_deg.y * m::kDegToRad,
+        camera.rotation_euler_deg.z * m::kDegToRad,
+    };
+    const m::Vec3 forward{
+        std::cos(pitch_yaw.x) * std::sin(pitch_yaw.y),
+        -std::sin(pitch_yaw.x),
+        std::cos(pitch_yaw.x) * std::cos(pitch_yaw.y),
+    };
+    const m::Vec3 target{
+        camera.position.x + forward.x,
+        camera.position.y + forward.y,
+        camera.position.z + forward.z,
+    };
+    const m::Mat4 view = m::look_at_rh(camera.position, target, {0.0f, 1.0f, 0.0f});
+    const m::Mat4 proj = m::perspective_rh(
+        camera.fov_y_deg * m::kDegToRad,
+        aspect > 0.0f ? aspect : 16.0f / 9.0f,
+        0.05f,
+        200.0f);
+
+    ScenePushConstants pc{};
+    const m::Mat4 mvp = m::mul(proj, m::mul(view, model));
+    std::memcpy(pc.mvp, mvp.m, sizeof(pc.mvp));
+
+    const m::Vec3 world_pos{model.m[12], model.m[13], model.m[14]};
+    if (debug_mode == RenderDebugMode::Depth) {
+        const float distance = m::length(m::sub(world_pos, camera.position));
+        const float z = std::clamp(distance / 32.0f, 0.0f, 1.0f);
+        pc.material[0] = 1.0f - z;
+        pc.material[1] = 0.25f + z * 0.55f;
+        pc.material[2] = 0.55f + z * 0.65f;
+    } else {
+        pc.material[0] = material.albedo.x;
+        pc.material[1] = material.albedo.y;
+        pc.material[2] = material.albedo.z;
+    }
+    pc.material[0] += material.emissive.x * material.emissive_intensity;
+    pc.material[1] += material.emissive.y * material.emissive_intensity;
+    pc.material[2] += material.emissive.z * material.emissive_intensity;
+    pc.material[3] = 1.0f;
+    pc.params[0] = material.roughness;
+    pc.params[1] = material.metallic;
+    pc.params[2] = 0.0f;
+    pc.params[3] = 2.0f;
+
+    // Normalised model basis columns -> transpose maps world light into local.
+    m::Vec3 c0{model.m[0], model.m[1], model.m[2]};
+    m::Vec3 c1{model.m[4], model.m[5], model.m[6]};
+    m::Vec3 c2{model.m[8], model.m[9], model.m[10]};
+    c0 = m::normalize(c0);
+    c1 = m::normalize(c1);
+    c2 = m::normalize(c2);
+    const m::Vec3 world_light = scene_sun_to_light_dir(environment);
+    const m::Vec3 local_light = m::normalize(m::Vec3{
+        m::dot(c0, world_light), m::dot(c1, world_light), m::dot(c2, world_light)});
     pc.light[0] = local_light.x;
     pc.light[1] = local_light.y;
     pc.light[2] = local_light.z;
@@ -3809,7 +3853,7 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
                               psynder::ui::imm::RuntimeConsoleGpu& overlay,
                               PrimitiveRenderResources& primitive_resources,
                               const PlayerBootState& boot,
-                              const PlayModeState& play,
+                              PlayModeState& play,
                               const SceneCamera& render_camera,
                               GizmoAxis active_gizmo_axis,
                               GizmoAxis hover_gizmo_axis,
@@ -3900,25 +3944,60 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
         g::begin_render(cmd, scene_pass);
         apply_view();
         g::bind_pipeline(cmd, primitive_resources.scene_pipeline);
-        for (const ScenePrimitive& primitive : boot.primitives) {
-            const PrimitiveMeshGpu& mesh = mesh_for_primitive(primitive_resources, primitive.kind);
-            if (!mesh.vertex_buffer || !mesh.index_buffer || mesh.index_count == 0) {
-                continue;
+        if (play.active && play.sim_world) {
+            // Play mode: draw the scene from the ECS prop entities — the same
+            // scene::World the character controller collides against. The
+            // canonical TransformWS + Collider + RenderMaterial drive geometry,
+            // model matrix, and surface. DOTS chunk walk, no per-entity virtual.
+            namespace s = psynder::scene;
+            play.sim_world->for_each_chunk<s::TransformWS, s::Collider, s::RenderMaterial>(
+                [&](std::size_t n, s::TransformWS* xf, s::Collider* col,
+                    s::RenderMaterial* mat) {
+                    for (std::size_t i = 0; i < n; ++i) {
+                        const PrimitiveMeshGpu& mesh =
+                            mesh_for_collider(primitive_resources, col[i].kind);
+                        if (!mesh.vertex_buffer || !mesh.index_buffer ||
+                            mesh.index_count == 0) {
+                            continue;
+                        }
+                        const ScenePushConstants pc =
+                            compose_scene_push_ecs(xf[i].mtw,
+                                                   mat[i],
+                                                   render_camera,
+                                                   boot.environment,
+                                                   boot.render_debug_mode,
+                                                   aspect);
+                        g::push_constants(cmd,
+                                          &pc,
+                                          static_cast<std::uint32_t>(sizeof(pc)),
+                                          g::ShaderStage::AllGfx);
+                        g::bind_vertex_buffer(cmd, 0, mesh.vertex_buffer.get(), 0);
+                        g::bind_index_buffer(cmd, mesh.index_buffer.get(),
+                                             g::IndexType::U16, 0);
+                        g::draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+                    }
+                });
+        } else {
+            for (const ScenePrimitive& primitive : boot.primitives) {
+                const PrimitiveMeshGpu& mesh = mesh_for_primitive(primitive_resources, primitive.kind);
+                if (!mesh.vertex_buffer || !mesh.index_buffer || mesh.index_count == 0) {
+                    continue;
+                }
+                const ScenePushConstants pc =
+                    compose_scene_push(primitive,
+                                       render_camera,
+                                       boot.environment,
+                                       boot.render_debug_mode,
+                                       time_seconds,
+                                       aspect);
+                g::push_constants(cmd,
+                                  &pc,
+                                  static_cast<std::uint32_t>(sizeof(pc)),
+                                  g::ShaderStage::AllGfx);
+                g::bind_vertex_buffer(cmd, 0, mesh.vertex_buffer.get(), 0);
+                g::bind_index_buffer(cmd, mesh.index_buffer.get(), g::IndexType::U16, 0);
+                g::draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
             }
-            const ScenePushConstants pc =
-                compose_scene_push(primitive,
-                                   render_camera,
-                                   boot.environment,
-                                   boot.render_debug_mode,
-                                   time_seconds,
-                                   aspect);
-            g::push_constants(cmd,
-                              &pc,
-                              static_cast<std::uint32_t>(sizeof(pc)),
-                              g::ShaderStage::AllGfx);
-            g::bind_vertex_buffer(cmd, 0, mesh.vertex_buffer.get(), 0);
-            g::bind_index_buffer(cmd, mesh.index_buffer.get(), g::IndexType::U16, 0);
-            g::draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
         }
         g::end_render(cmd);
     }
