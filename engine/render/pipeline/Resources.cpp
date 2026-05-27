@@ -112,6 +112,8 @@ void release_pipeline_resources(Pipeline* p) {
     p->m1_triangle.vertex_count     = 0;
     p->m1_triangle.index_count      = 0;
 
+    release_builtin_meshes(p);
+
     p->light_cluster.cluster_aabb_buffer  = gpu::Handle<gpu::Buffer>{};
     p->light_cluster.cluster_light_buffer = gpu::Handle<gpu::Buffer>{};
     p->light_cluster.cluster_count        = 0;

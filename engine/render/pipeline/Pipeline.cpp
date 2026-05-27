@@ -38,6 +38,7 @@
 
 #include "gpu/PublicGpu.h"
 #include "jobs/JobSystem.h"
+#include "scene/World.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -94,6 +95,15 @@ Pipeline* create(const PipelineDesc& desc) {
     if (!upload_m1_triangle(p) && p->device) {
         std::fputs("[psy::render::pipeline] create: M1 triangle upload failed\n", stderr);
     }
+
+    // Upload the builtin unit meshes the ECS extract draws props with, and
+    // point the extract at the default world. Reserve the draw list once so
+    // the per-frame extract never grows the vector (DESIGN §4.4 / §14).
+    if (!upload_builtin_meshes(p) && p->device) {
+        std::fputs("[psy::render::pipeline] create: builtin mesh upload failed\n", stderr);
+    }
+    p->extract_world = &scene::World::Get();
+    p->renderables.reserve(kRenderableReserve);
 
     // Stand up the sub-pass GPU state. Each init_*() is independent;
     // any one failing is logged but doesn't abort the others — the
