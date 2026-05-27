@@ -8,7 +8,7 @@
 //
 // Compile targets:
 //   SPIR-V (Vulkan)  — slangc -profile glsl_450 -target spirv
-//   Metal IR (macOS) — slangc -profile metallib -target metallib
+//   Metal (macOS)    — slangc -target metal, then xcrun metal + metallib
 //
 // Usage (triangle demo):
 //   GraphicsPipelineDesc desc;

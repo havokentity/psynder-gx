@@ -86,7 +86,11 @@ bool create_and_register_graphics_pso(
     const std::vector<std::uint8_t>&  fs_blob,
     const char*                       vs_entry,
     const char*                       fs_entry,
-    const VertexInputDesc&            vertex_input);
+    const VertexInputDesc&            vertex_input,
+    std::uint32_t                     color_format_count,
+    std::uint8_t                      depth_format,
+    bool                              enable_depth_write,
+    bool                              enable_blend);
 
 bool create_and_register_compute_pso(
     std::uint32_t                     handle_id,

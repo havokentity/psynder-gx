@@ -182,13 +182,13 @@ bool compile_to_metal_ir(
     const std::string metal_src  = tmp_path(slang_path, entry_point, ".metal");
     const std::string metal_ir   = tmp_path(slang_path, entry_point, ".metallib");
 
-    // Step 1: slangc → Metal source
+    // Step 1: slangc -> Metal source. Slang 2026.x accepts `metal` as a
+    // target, but `metallib` is a target, not a valid profile name.
     std::string cmd1;
     cmd1  = "slangc ";
     cmd1 += "\""; cmd1 += slang_path; cmd1 += "\" ";
     cmd1 += "-entry "; cmd1 += entry_point; cmd1 += " ";
     cmd1 += "-stage "; cmd1 += stage_name_slang(stage); cmd1 += " ";
-    cmd1 += "-profile metallib ";
     cmd1 += "-target metal ";
     cmd1 += "-o \""; cmd1 += metal_src; cmd1 += "\" 2>&1";
 
@@ -287,6 +287,10 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
     entry.entry_vs     = vs_ep;
     entry.entry_fs     = fs_ep;
     entry.vertex_input = desc.vertex_input;  // cached for hot-reload re-PSO
+    entry.color_format_count = desc.color_format_count;
+    entry.depth_format = desc.depth_format;
+    entry.enable_depth_write = desc.enable_depth_write;
+    entry.enable_blend = desc.enable_blend;
 
     std::string log_vs, log_fs;
     bool vs_ok = compile_stage_for_active_backend(
@@ -318,7 +322,8 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
     // fallback inside the backend — preserves every pre-lane-09 callsite.
     const bool pso_ok = impl::create_and_register_graphics_pso(
         entry.id, entry.spirv_vs, entry.spirv_fs, vs_ep, fs_ep,
-        desc.vertex_input);
+        desc.vertex_input, desc.color_format_count, desc.depth_format,
+        desc.enable_depth_write, desc.enable_blend);
     entry.pso_registered = pso_ok;
     if (!pso_ok) {
         // The handle id is still valid; lane 07's bind_pipeline path will
@@ -453,6 +458,10 @@ void hot_reload_changed()
             std::uint32_t   id;
             std::string     entry_vs, entry_fs, entry_cs;
             VertexInputDesc vertex_input;
+            std::uint32_t   color_format_count;
+            std::uint8_t    depth_format;
+            bool            enable_depth_write;
+            bool            enable_blend;
         };
         std::vector<PipeSnap> targets;
         {
@@ -463,7 +472,11 @@ void hot_reload_changed()
                                    cached.entry_vs,
                                    cached.entry_fs,
                                    cached.entry_cs,
-                                   cached.vertex_input});
+                                   cached.vertex_input,
+                                   cached.color_format_count,
+                                   cached.depth_format,
+                                   cached.enable_depth_write,
+                                   cached.enable_blend});
             }
         }
 
@@ -507,7 +520,8 @@ void hot_reload_changed()
                 impl::create_and_register_graphics_pso(
                     t.id, new_vs, new_fs,
                     t.entry_vs.c_str(), t.entry_fs.c_str(),
-                    t.vertex_input);
+                    t.vertex_input, t.color_format_count, t.depth_format,
+                    t.enable_depth_write, t.enable_blend);
             }
             if (!t.entry_cs.empty() && !new_cs.empty()) {
                 impl::create_and_register_compute_pso(

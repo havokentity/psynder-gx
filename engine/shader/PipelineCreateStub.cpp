@@ -30,7 +30,11 @@ bool create_and_register_graphics_pso(
     const std::vector<std::uint8_t>&,
     const char*,
     const char*,
-    const VertexInputDesc&) { return true; } // no-op success — see file header
+    const VertexInputDesc&,
+    std::uint32_t,
+    std::uint8_t,
+    bool,
+    bool) { return true; } // no-op success — see file header
 
 bool create_and_register_compute_pso(
     std::uint32_t,
