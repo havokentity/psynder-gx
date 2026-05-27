@@ -41,6 +41,18 @@ third_party/freetype/
     License: FTL or GPL-2.0 (we use FTL)
     Copyright (c) 1996-present The FreeType Project
 
+third_party/fonts/JetBrainsMono/
+  JetBrains Mono font family
+    https://github.com/JetBrains/JetBrainsMono
+    License: SIL Open Font License 1.1
+    Copyright (c) 2020 The JetBrains Mono Project Authors
+
+third_party/stb/
+  stb single-file public-domain libraries
+    https://github.com/nothings/stb
+    License: public domain or MIT
+    Copyright (c) Sean Barrett and contributors
+
 third_party/rmlui/
   RmlUi HTML/CSS UI library
     https://github.com/mikke89/RmlUi
