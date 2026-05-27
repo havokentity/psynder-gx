@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Psynder — editor IPC server. Local WebSocket + HTTP on 127.0.0.1:7654;
+// Psynder-GX — editor IPC server. Local WebSocket on 127.0.0.1:7655;
 // msgpack frame format. Lane 19 owns.
 
 #pragma once
@@ -14,7 +14,7 @@ namespace psynder::editor::ipc {
 
 struct ServerDesc {
     const char* bind_host = "127.0.0.1";
-    u16         port      = 7654;
+    u16         port      = 7655;
     bool        require_session_token = true;
 };
 

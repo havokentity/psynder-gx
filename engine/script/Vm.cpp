@@ -57,9 +57,13 @@
 #include "internal/Bindings.h"
 #include "internal/GxCvars.h"
 #include "internal/Repl.h"
+#include "internal/VisualGraphCompiler.h"
 
+#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <utility>
 
 namespace psynder::script {
 
@@ -120,6 +124,62 @@ void format_value(lua_State* L, int idx, std::string& out) {
     }
 }
 
+bool run_loaded_lua_chunk(lua_State* L, int top_before, std::string& out) {
+    const int rc = lua_pcall(L, 0, LUA_MULTRET, 0);
+    if (rc != LUA_OK) {
+        const char* msg = lua_tostring(L, -1);
+        out.assign(msg ? msg : "(runtime error)");
+        lua_pop(L, 1);
+        return false;
+    }
+
+    const int n_results = lua_gettop(L) - top_before;
+    for (int i = 1; i <= n_results; ++i) {
+        if (i > 1) out += '\t';
+        format_value(L, top_before + i, out);
+    }
+    if (n_results > 0) {
+        lua_pop(L, n_results);
+    }
+    return true;
+}
+
+bool execute_visual_graph(lua_State* L,
+                          std::string_view graph_source,
+                          std::string_view name,
+                          std::string& out) {
+    detail::VisualCompileResult compiled = detail::compile_visual_graph(graph_source);
+    if (!compiled.ok) {
+        out = compiled.diagnostic;
+        return false;
+    }
+
+    const int top_before = lua_gettop(L);
+    std::string chunk_name{name.empty() ? "=visual-graph" : std::string{name}};
+    if (!chunk_name.empty() && chunk_name.front() != '=') {
+        chunk_name.insert(chunk_name.begin(), '=');
+    }
+    if (luaL_loadbuffer(L, compiled.lua_source.data(), compiled.lua_source.size(),
+                        chunk_name.c_str()) != LUA_OK) {
+        const char* msg = lua_tostring(L, -1);
+        out.assign(msg ? msg : "(load error)");
+        lua_pop(L, 1);
+        return false;
+    }
+    return run_loaded_lua_chunk(L, top_before, out);
+}
+
+bool read_text_file(std::string_view path, std::string& out) {
+    std::ifstream file{std::string{path}, std::ios::binary};
+    if (!file) {
+        return false;
+    }
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    out = ss.str();
+    return true;
+}
+
 }  // namespace
 
 // ─── Public API ──────────────────────────────────────────────────────────
@@ -167,6 +227,20 @@ bool Vm::execute_string(std::string_view source, std::string_view name) {
         return false;
     }
     lua_State* L = impl.lua.handle();
+    if (detail::is_visual_graph_name(name) || detail::has_visual_graph_marker(source)) {
+        std::string out;
+        const bool ok = execute_visual_graph(L,
+                                             detail::strip_visual_graph_marker(source),
+                                             name.empty() ? "visual-graph" : name,
+                                             out);
+        if (!ok) {
+            PSY_LOG_ERROR("script: visual graph failed: {}", out);
+        } else if (!out.empty()) {
+            PSY_LOG_INFO("script: visual graph result: {}", out);
+        }
+        return ok;
+    }
+
     std::string chunk_name{name.empty() ? "<string>" : name};
     if (luaL_loadbuffer(L, source.data(), source.size(),
                         chunk_name.c_str()) != LUA_OK) {
@@ -196,6 +270,22 @@ bool Vm::execute_file(std::string_view virtual_path) {
     }
     lua_State* L = impl.lua.handle();
     std::string path{virtual_path};
+    if (detail::is_visual_graph_name(path)) {
+        std::string source;
+        if (!read_text_file(path, source)) {
+            PSY_LOG_ERROR("script: '{}' could not be opened", path);
+            return false;
+        }
+        std::string out;
+        const bool ok = execute_visual_graph(L, source, path, out);
+        if (!ok) {
+            PSY_LOG_ERROR("script: visual graph '{}' failed: {}", path, out);
+        } else if (!out.empty()) {
+            PSY_LOG_INFO("script: visual graph '{}' result: {}", path, out);
+        }
+        return ok;
+    }
+
     if (luaL_loadfile(L, path.c_str()) != LUA_OK) {
         const char* msg = lua_tostring(L, -1);
         PSY_LOG_ERROR("script: loadfile '{}' failed: {}",
@@ -220,6 +310,22 @@ bool Vm::execute_repl(std::string_view line, std::string& out) {
     }
     lua_State* L = impl.lua.handle();
     const int top_before = lua_gettop(L);
+
+    if (detail::is_visual_graph_repl_command(line)) {
+        detail::VisualCompileResult compiled = detail::compile_visual_graph_repl(line);
+        if (!compiled.ok) {
+            out = compiled.diagnostic;
+            return false;
+        }
+        if (luaL_loadbuffer(L, compiled.lua_source.data(), compiled.lua_source.size(),
+                            "=visual-graph-repl") != LUA_OK) {
+            const char* msg = lua_tostring(L, -1);
+            out.assign(msg ? msg : "(load error)");
+            lua_pop(L, 1);
+            return false;
+        }
+        return run_loaded_lua_chunk(L, top_before, out);
+    }
 
     // First try as `return <expr>` so expressions echo their value (matches
     // the stock Lua REPL). On failure, fall back to a full statement.
@@ -247,24 +353,7 @@ bool Vm::execute_repl(std::string_view line, std::string& out) {
     }
     (void)loaded;
 
-    // pcall with LUA_MULTRET so all return values land on the stack.
-    int rc = lua_pcall(L, 0, LUA_MULTRET, 0);
-    if (rc != LUA_OK) {
-        const char* msg = lua_tostring(L, -1);
-        out.assign(msg ? msg : "(runtime error)");
-        lua_pop(L, 1);
-        return false;
-    }
-
-    const int n_results = lua_gettop(L) - top_before;
-    for (int i = 1; i <= n_results; ++i) {
-        if (i > 1) out += '\t';
-        format_value(L, top_before + i, out);
-    }
-    if (n_results > 0) {
-        lua_pop(L, n_results);
-    }
-    return true;
+    return run_loaded_lua_chunk(L, top_before, out);
 }
 
 // ─── GX extension: repl_eval ─────────────────────────────────────────────

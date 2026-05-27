@@ -10,7 +10,7 @@ plug into the server.
 Wire protocol
 -------------
 
-  • Transport: TCP on 127.0.0.1:<port> (default 7654). Loopback bind only —
+  • Transport: TCP on 127.0.0.1:<port> (default 7655). Loopback bind only —
     the `ServerDesc::bind_host` field is honoured for non-127.0.0.1 loopback
     aliases (e.g. ::1 / 127.0.0.2) but the server is dev-only and MUST NOT
     be exposed to a public interface. RFC 6455 WebSocket upgrade with the
@@ -88,7 +88,7 @@ broadcast back:
     python3 - <<'PY'
     import asyncio, websockets, msgpack
     async def main():
-        async with websockets.connect("ws://127.0.0.1:7654?token=<TOKEN>") as ws:
+        async with websockets.connect("ws://127.0.0.1:7655?token=<TOKEN>") as ws:
             await ws.send(msgpack.packb([1, "hello"]))
             print(await ws.recv())
     asyncio.run(main())

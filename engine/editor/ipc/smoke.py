@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-# psynder_editor_ipc — runtime smoke. Connects to 127.0.0.1:7654, completes
+# psynder_editor_ipc — runtime smoke. Connects to 127.0.0.1:7655, completes
 # the WebSocket upgrade, sends a single binary frame carrying msgpack
 # `[1, "hello"]`, and reads back any broadcast.
 #
@@ -132,7 +132,7 @@ def recv_frame(sock, leftover=b"", timeout=2.0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=7654)
+    ap.add_argument("--port", type=int, default=7655)
     ap.add_argument("--token", default="")
     args = ap.parse_args()
 

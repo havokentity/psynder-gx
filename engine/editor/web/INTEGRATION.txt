@@ -1,0 +1,48 @@
+Psynder-GX web workbench notes
+==============================
+
+Runtime console launch command
+------------------------------
+
+The in-game runtime console command `web_console` launches the dedicated
+PsyEditorGX Chromium shell and loads the built editor bundle directly from
+`dist/`:
+
+  web_console          open PsyEditorGX from dist/
+  web_console open     same as above
+  web_console stop     close the managed PsyEditorGX shell
+  web_console status   print root path, dist path, log path, and process state
+
+The command uses these cvars:
+
+  editor_web_root      default: engine/editor/web
+  editor_web_port      default: 5176, legacy/dev-server only
+  editor_web_url       default: auto
+  editor_web_shell     default: psyeditorgx
+
+`auto` resolves to `<editor_web_root>/dist/index.html`. Set `editor_web_url`
+only when intentionally overriding the shell target. The web app restores the
+last opened route from local storage, falling back to Workbench. The managed
+shell log is `/tmp/psynder-gx-web-console.log`.
+
+Build the bundle before launching from the engine:
+
+  npm --prefix engine/editor/web run build
+
+`editor_web_shell psyeditorgx` launches `npm run shell -- --dist <dist>`,
+which is an Electron/Chromium host with a dedicated
+`Psynder-GX/PsyEditorGX` profile. Use `editor_web_shell system` only as a
+fallback to the OS browser.
+
+Platform note
+-------------
+
+macOS and Linux use the current POSIX child-process path. Windows currently
+builds through the command stub and still needs the platform-win32 launcher
+wiring before `web_console` can own the shell lifecycle there.
+
+Workbench note
+--------------
+
+`?panel=workbench` opens the full docked workbench. Single-panel routes still
+work via `?panel=console`, `?panel=psygraph`, `?panel=profiler`, etc.
