@@ -166,15 +166,12 @@ if(TARGET Jolt)
     target_compile_definitions(psynder_physics_core PRIVATE PSYNDER_GX_HAS_JOLT=1)
 endif()
 
-# ─── Determinism: physics TUs compiled without fast-math (DESIGN §14) ───
-# Combined with Jolt's CROSS_PLATFORM_DETERMINISTIC, this gives us bitwise
-# reproducible ticks across arm64 / x86_64 — required for lockstep replay.
-if(NOT MSVC)
-    target_compile_options(psynder_physics_core PRIVATE
-        -fno-fast-math
-        -ffp-contract=off
-    )
-endif()
+# ─── Determinism: physics TUs compiled with strict FP (DESIGN §14) ──────
+# Combined with Jolt's CROSS_PLATFORM_DETERMINISTIC, this gives bitwise
+# reproducible ticks across arm64 / x86_64 / MSVC — required for lockstep
+# replay. Centralized in cmake/HotLane.cmake so the MSVC `/fp:strict` branch
+# is never missed (it previously was, here, while the net lane had it).
+psynder_determinism_fp(psynder_physics_core)
 
 # ─── Hook this lane onto the shared unit-test binary ────────────────────
 # tests/unit/CMakeLists.txt is owned by lane 25 (tests) and built only

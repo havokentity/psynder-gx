@@ -87,6 +87,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 # ─── Compiler warnings & sanitizers ───────────────────────────────────────
 include(CompilerWarnings)
 include(Sanitizers)
+include(HotLane)
 include(Dependencies)
 include(Lanes)
 include(Goldens)
