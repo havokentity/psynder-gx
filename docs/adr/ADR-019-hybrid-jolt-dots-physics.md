@@ -46,7 +46,7 @@ A **hybrid**, with **`scene::World` as the single authoritative scene**. Every "
 
 - ✅ **Player on Jolt via ECS** — `engine/physics/core/EcsCharacterBridge.h` + `samples/02_crate` play mode. The hand-rolled AABB resolver was removed; `CharacterController.h` is now the player's ECS representation (state written back from the solver). Tests: `tests/unit/physics_character_controller.cpp` (settles on ground, blocked by an ECS-projected wall, rotation extraction).
 - ⬜ **Full-physics enemies** — Jolt rigid-body capsules spawned from ECS, synced back. Reuses the same Jolt world.
-- ⬜ **DOTS mass-agent system** — steering/avoidance on the spatial broadphase, with golden determinism tests. Its own scoped milestone.
+- ✅ **DOTS mass-agent system** — `engine/physics/agents/` (lane `physics-agents`). Homogeneous steering agents (seek + Reynolds-arrive, local separation, capsule-vs-static push-out) on the scene `SpatialIndex` broadphase, parallelised via `JobSystem::parallel_for`. Agents are ECS entities in `scene::World` (`Agent`/`AgentVelocity`/`AgentTarget` + `TransformWS`) — no parallel mutable store. The tick reduces avoidance accel serially in stable entity-id order, then integrates+writes in parallel over an immutable snapshot, so it is bit-reproducible across thread counts. Golden determinism test: `tests/unit/agents_determinism.cpp`.
 
 ## Consequences
 

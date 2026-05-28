@@ -33,6 +33,7 @@ If a lane agent finds it needs a file outside its ownership, **STOP** and docume
 | 15-physics-core       | `engine/physics/core/`        | `lane/15-physics-core`        | B |
 | 16-physics-vehicle    | `engine/physics/vehicle/`     | `lane/16-physics-vehicle`     | B |
 | 17-physics-destruction| `engine/physics/destruction/` | `lane/17-physics-destruction` | B |
+| 26-physics-agents     | `engine/physics/agents/`      | `lane/26-physics-agents`      | B |
 | 18-net                | `engine/net/` (excl. voice/)  | `lane/18-net`                 | B |
 | 19-net-voice          | `engine/net/voice/`           | `lane/19-net-voice`           | B |
 | 20-script             | `engine/script/`              | `lane/20-script`              | B |
