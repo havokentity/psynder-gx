@@ -31,6 +31,7 @@ if(TARGET Catch2::Catch2WithMain)
         psynder_camera
         psynder_worldstate
         psynder_physics_destruction
+        psynder_physics_agents
     )
     # psynder_editor_core is only built when the editor is enabled.
     if(TARGET psynder_editor_core)
