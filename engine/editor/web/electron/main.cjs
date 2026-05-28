@@ -53,9 +53,9 @@ let main_window = null;
 function create_window() {
   Menu.setApplicationMenu(null);
   main_window = new BrowserWindow({
-    width: 1500,
-    height: 940,
-    minWidth: 960,
+    width: 1180,
+    height: 1040,
+    minWidth: 900,
     minHeight: 620,
     title: 'PsyEditorGX',
     backgroundColor: '#071015',
