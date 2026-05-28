@@ -33,6 +33,7 @@
 #import <CoreAudio/CoreAudio.h>
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hid/IOHIDKeys.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 #include "MacosPlatform_internal.h"
 #include "MacosKeyMap.h"
@@ -54,6 +55,13 @@ RawMouseState& raw_mouse_state() {
     static RawMouseState s;
     return s;
 }
+
+// FPS mouse-capture flag. When true the OS cursor is hidden + locked (see
+// set_mouse_captured): the IOKit HID X/Y accumulation is suppressed and the
+// relative deltas come from NSEvent.deltaX/deltaY instead, which keep flowing
+// while the cursor position is frozen and need no Input Monitoring grant.
+// Read from the IOKit callback thread, so it's atomic.
+static std::atomic<bool> g_mouse_captured{false};
 
 // ─── Keyboard state (main-thread-only) ──────────────────────────────────
 static KeyboardState g_keyboard_state;
@@ -169,8 +177,13 @@ void iokit_input_value_cb(void* /*context*/, IOReturn /*result*/,
     auto& st = raw_mouse_state();
 
     if (usage_page == kHIDPage_GenericDesktop) {
+        // While the cursor is captured, NSEvent relative deltas are the single
+        // source of X/Y motion (see pump_events) — skip the IOKit X/Y path so
+        // the two don't double-count.
+        const bool captured = g_mouse_captured.load(std::memory_order_relaxed);
         switch (usage) {
             case kHIDUsage_GD_X: {
+                if (captured) break;
                 // Atomic accumulation. fetch_add isn't defined on double in
                 // C++20 atomics by default for all stdlib versions; do CAS.
                 double cur = st.accum_dx.load(std::memory_order_relaxed);
@@ -180,6 +193,7 @@ void iokit_input_value_cb(void* /*context*/, IOReturn /*result*/,
                 break;
             }
             case kHIDUsage_GD_Y: {
+                if (captured) break;
                 double cur = st.accum_dy.load(std::memory_order_relaxed);
                 while (!st.accum_dy.compare_exchange_weak(
                            cur, cur + static_cast<double>(raw),
@@ -527,6 +541,23 @@ Window* set_esc_close_target(Window* w) {
     return prev;
 }
 
+// FPS mouse capture. Hides the OS cursor and decouples it from the physical
+// mouse (CGAssociateMouseAndMouseCursorPosition(false)) so the pointer never
+// drifts off-window or hits a screen edge. While captured, relative motion is
+// sourced from NSEvent.deltaX/deltaY (see pump_events) since the cursor
+// position is frozen. Idempotent; pass false to restore.
+void set_mouse_captured(bool captured) {
+    if (captured == g_mouse_captured.load(std::memory_order_relaxed)) return;
+    g_mouse_captured.store(captured, std::memory_order_relaxed);
+    if (captured) {
+        CGDisplayHideCursor(kCGDirectMainDisplay);
+        CGAssociateMouseAndMouseCursorPosition(false);
+    } else {
+        CGAssociateMouseAndMouseCursorPosition(true);
+        CGDisplayShowCursor(kCGDirectMainDisplay);
+    }
+}
+
 void pump_events() {
     // Clear edge-triggered pressed[] at frame boundary BEFORE dispatching
     // new events so pressed[] reflects only this frame's transitions.
@@ -598,6 +629,18 @@ void pump_events() {
                        type == NSEventTypeRightMouseDragged ||
                        type == NSEventTypeOtherMouseDragged) {
                 update_mouse_position_from_event(event);
+                // While captured, the cursor position is frozen
+                // (CGAssociateMouseAndMouseCursorPosition(false)), so derive
+                // the relative motion from NSEvent's hardware deltas instead.
+                // Same sign convention as the IOKit HID path (right/down
+                // positive) and the same point scale as the cursor-position
+                // fallback, so aim sensitivity is unchanged.
+                if (g_mouse_captured.load(std::memory_order_relaxed)) {
+                    add_atomic_double(raw_mouse_state().accum_dx,
+                                      static_cast<double>(event.deltaX));
+                    add_atomic_double(raw_mouse_state().accum_dy,
+                                      static_cast<double>(event.deltaY));
+                }
                 handled_by_engine = true;
             } else if (type == NSEventTypeLeftMouseDown ||
                        type == NSEventTypeLeftMouseUp ||

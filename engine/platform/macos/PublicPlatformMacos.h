@@ -118,6 +118,11 @@ void set_clipboard_text(const char* text);
 // window (for save/restore in nested run loops).
 Window* set_esc_close_target(Window* w);
 
+// FPS mouse capture: hide the OS cursor and lock it in place so raw deltas
+// (mouse_delta_raw) drive aim without the pointer leaving the window or
+// reaching a screen edge. Pass false to restore the cursor. Idempotent.
+void set_mouse_captured(bool captured);
+
 // Convenience wrapper: pump_events + invoke `frame()` until the window
 // reports should_close. Most samples call this. `frame_user` is forwarded
 // verbatim to the callback. Returns the number of frames pumped.
