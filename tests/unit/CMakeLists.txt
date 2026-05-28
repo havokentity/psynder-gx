@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Unit tests. Catch2-based.
+#
+# Suites are globbed (CONFIGURE_DEPENDS) so a new *.cpp is auto-registered on
+# the next configure. physics_* suites in this directory:
+#   physics_character_controller, physics_core_character_spine,
+#   physics_core_smoke, physics_core_smoke_lite, physics_core_waveb_controller,
+#   physics_vehicle_waveb_smoke,
+#   physics_lagcomp (ADR-020 / #42: hitbox-history rewind / lag comp).
 file(GLOB SRC CONFIGURE_DEPENDS *.cpp)
 if(NOT SRC)
     set(STUB "${CMAKE_CURRENT_BINARY_DIR}/_stub.cpp")
