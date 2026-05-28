@@ -15,10 +15,10 @@
 //
 // Wire encoding (one delta payload):
 //   header : u32 count                       — number of changed-entity records
-//   record : u32 id, f32 pos[3]              — full state of each changed entity
+//   record : u32 id, f32 pos[3], f32 yaw_deg — full state of each changed entity
 //
 // "Changed" = an entity present in `current` whose id is absent from the
-// baseline OR whose position differs bit-exactly from its baseline entry.
+// baseline OR whose position/yaw differs bit-exactly from its baseline entry.
 // Entities identical to the baseline are omitted. Bit-exact (memcmp) equality
 // is intentional: lockstep determinism forbids float epsilon fuzz here.
 //
@@ -38,19 +38,23 @@ namespace psynder::net {
 
 // ──────────────────────────────────────────────────────────────────────────
 // EntityState — minimal replicated entity record. POD, trivially copyable,
-// 16 bytes (u32 id + 3 * f32). SoA-friendly: an array packs with no padding.
+// 20 bytes (u32 id + 3 * f32 pos + f32 yaw_deg). SoA-friendly: an array packs
+// with no padding. `yaw_deg` is the replicated facing in degrees (1 unit = 1
+// metre for pos; angles in degrees, matching the rest of the engine).
 // ──────────────────────────────────────────────────────────────────────────
 struct EntityState {
-    u32 id     = 0;
-    f32 pos[3] = {0.f, 0.f, 0.f};
+    u32 id      = 0;
+    f32 pos[3]  = {0.f, 0.f, 0.f};
+    f32 yaw_deg = 0.f;
 };
 
 static_assert(std::is_trivially_copyable_v<EntityState>,
               "EntityState must be trivially copyable for the DOTS/SoA contract");
-static_assert(sizeof(EntityState) == 16, "EntityState wire size drifted");
+static_assert(sizeof(EntityState) == 20, "EntityState wire size drifted");
 
-// Bytes per changed-entity record on the wire: u32 id + 3 * f32.
-inline constexpr usize kDeltaRecordBytes = sizeof(u32) + 3 * sizeof(f32);  // 16
+// Bytes per changed-entity record on the wire: u32 id + 3 * f32 pos + f32 yaw.
+inline constexpr usize kDeltaRecordBytes =
+    sizeof(u32) + 3 * sizeof(f32) + sizeof(f32);  // 20
 inline constexpr usize kDeltaHeaderBytes = sizeof(u32);                    // 4
 
 // Upper bound on the encoded size for `n` changed entities. Callers use this
@@ -71,8 +75,11 @@ inline const EntityState* find_state(std::span<const EntityState> baseline,
 }
 
 inline bool state_equal(const EntityState& a, const EntityState& b) noexcept {
-    // Bit-exact compare — lockstep determinism forbids epsilon fuzz.
-    return a.id == b.id && std::memcmp(a.pos, b.pos, sizeof(a.pos)) == 0;
+    // Bit-exact compare — lockstep determinism forbids epsilon fuzz. Compare the
+    // whole replicated payload (pos + yaw) bit-for-bit.
+    return a.id == b.id &&
+           std::memcmp(a.pos, b.pos, sizeof(a.pos)) == 0 &&
+           std::memcmp(&a.yaw_deg, &b.yaw_deg, sizeof(a.yaw_deg)) == 0;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -100,6 +107,8 @@ inline usize encode_delta(std::span<const EntityState> baseline,
         out.insert(out.end(), bytes, bytes + sizeof(u32));
         const u8* pos = reinterpret_cast<const u8*>(cur.pos);
         out.insert(out.end(), pos, pos + 3 * sizeof(f32));
+        const u8* yaw = reinterpret_cast<const u8*>(&cur.yaw_deg);
+        out.insert(out.end(), yaw, yaw + sizeof(f32));
         ++changed;
     }
 
@@ -135,6 +144,8 @@ inline bool apply_delta(std::span<const EntityState> baseline,
         off += sizeof(u32);
         std::memcpy(rec.pos, delta.data() + off, 3 * sizeof(f32));
         off += 3 * sizeof(f32);
+        std::memcpy(&rec.yaw_deg, delta.data() + off, sizeof(f32));
+        off += sizeof(f32);
 
         bool replaced = false;
         for (EntityState& s : out) {
