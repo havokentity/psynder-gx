@@ -24,6 +24,7 @@
 #include "physics/core/CharacterController.h"
 #include "physics/core/EcsCharacterBridge.h"
 #include "scene/GxComponents.h"
+#include "scene/Replay.h"
 #include "scene/SceneComponents.h"
 #include "scene/World.h"
 #include "script/Script.h"
@@ -104,6 +105,15 @@ enum class TransformMode {
 enum class RenderDebugMode {
     Off,
     Depth,
+};
+
+// Play-mode input recording state. Recording captures one InputFrame per fixed
+// tick during live play; Replaying drives the sim from a recorded stream instead
+// of live input (the `replay` console command), reproducing the session.
+enum class ReplayMode {
+    Off,
+    Recording,
+    Replaying,
 };
 
 using ScenePrimitiveKind = psynder::sample02::ScenePrimitiveKind;
@@ -218,6 +228,16 @@ struct PlayModeState {
     // to the ECS each tick; shooting one applies a knockback impulse.
     std::vector<phys::EcsDynamicBody> dynamic_body_map;
     std::uint32_t dynamic_body_count = 0;
+    // Deterministic input replay (#38): record one InputFrame per fixed tick
+    // while playing; `replay` resets the world and drives the sim from the
+    // recorded stream so the session reproduces (motion, look, and shots).
+    ReplayMode replay_mode = ReplayMode::Off;
+    psynder::scene::ReplayRecorder recorder;
+    std::vector<psynder::scene::InputFrame> replay_frames;  // owned during playback
+    psynder::scene::ReplayPlayer replay_player;
+    std::uint32_t replay_tick = 0;
+    bool replay_prev_fire = false;
+    bool replay_fire_request = false;
     float fixed_accum_seconds = 0.0f;
     float yaw_deg = 180.0f;
     float pitch_deg = 0.0f;
@@ -1148,6 +1168,11 @@ void print_play_state(const PlayModeState& play, psynder::console::Output& out) 
                    play.capsule_height_m);
     out.FormatLine("static_colliders: {}", play.static_collider_count);
     out.FormatLine("dynamic_bodies: {}", play.dynamic_body_count);
+    const char* replay_label =
+        play.replay_mode == ReplayMode::Recording ? "recording"
+        : play.replay_mode == ReplayMode::Replaying ? "replaying"
+        : "off";
+    out.FormatLine("replay: {} ({} recorded ticks)", replay_label, play.recorder.size());
     out.FormatLine("collision_debug: {}", play.collision_debug ? "on" : "off");
 }
 
@@ -1273,10 +1298,50 @@ bool start_play_mode(PlayModeState& play,
     play.eye_position = {spawn.x, spawn.y + play.eye_height_m, spawn.z};
     play.static_collider_count = static_collider_count;
     play.spawn_label = std::move(spawn_label);
+    // Record this session's per-tick input so it can be replayed deterministically.
+    play.replay_mode = ReplayMode::Recording;
+    play.recorder.clear();
+    play.recorder.reserve(120u * 60u);  // ~60 s headroom at 120 Hz
+    play.replay_tick = 0;
     if (out) {
         out->FormatLine("play: started from {} ({} static colliders)",
                         play.spawn_label,
                         play.static_collider_count);
+    }
+    return true;
+}
+
+// Reset the play world to its start state and replay the recorded input stream
+// (#38). Because the player capsule, Jolt step, and dynamic crates are all
+// deterministic, feeding the same per-tick inputs into a fresh world reproduces
+// the session — motion, look, and shots.
+bool start_replay(PlayModeState& play,
+                  const PlayerBootState& boot,
+                  const EditorCameraState& editor_camera,
+                  psynder::console::Output* out = nullptr) {
+    if (play.recorder.empty()) {
+        if (out) out->PrintLine("replay: nothing recorded yet (play and move first)");
+        return false;
+    }
+    // Snapshot the recorded stream before stop_play_mode() wipes the recorder.
+    std::vector<psynder::scene::InputFrame> frames(
+        play.recorder.frames().begin(), play.recorder.frames().end());
+    stop_play_mode(play);
+    if (!start_play_mode(play, boot, editor_camera, out)) {
+        return false;
+    }
+    play.replay_frames = std::move(frames);
+    play.replay_player = psynder::scene::ReplayPlayer(
+        std::span<const psynder::scene::InputFrame>(play.replay_frames.data(),
+                                                    play.replay_frames.size()));
+    play.replay_mode = ReplayMode::Replaying;
+    play.replay_tick = 0;
+    play.fixed_accum_seconds = 0.0f;
+    play.replay_prev_fire = false;
+    play.replay_fire_request = false;
+    if (out) {
+        out->FormatLine("replay: playing back {} recorded ticks",
+                        play.replay_frames.size());
     }
     return true;
 }
@@ -1293,9 +1358,56 @@ bool update_play_mode(PlayModeState& play,
         return false;
     }
 
+    constexpr float kFixedDt = 1.0f / 120.0f;
+    const PlayModeTuning tuning = current_play_tuning(boot);
+
+    // ----- REPLAY: drive the sim from the recorded input stream, not live input.
+    // The world was reset to play-start by start_replay(), so feeding the same
+    // per-tick stream into the same deterministic Jolt step reproduces the run.
+    if (play.replay_mode == ReplayMode::Replaying) {
+        namespace rs = psynder::scene;
+        play.fixed_accum_seconds = std::min(play.fixed_accum_seconds + dt_seconds, 0.25f);
+        while (play.fixed_accum_seconds >= kFixedDt && !play.replay_player.done()) {
+            const rs::InputFrame& f = play.replay_player.next();
+            play.yaw_deg = f.yaw_deg;
+            play.pitch_deg = f.pitch_deg;
+            const float rspeed = (f.buttons & rs::kReplayBtnRun)
+                ? tuning.run_speed_mps : tuning.walk_speed_mps;
+            character_spine::CharacterInput rcin{};
+            rcin.velocity_mps[0] = f.move_x * rspeed;
+            rcin.velocity_mps[1] = f.move_z * rspeed;
+            rcin.jump = (f.buttons & rs::kReplayBtnJump) != 0u;
+            rcin.crouch = (f.buttons & rs::kReplayBtnCrouch) != 0u;
+            character_spine::set_character_input(play.phys_pawn, rcin);
+            if (auto* in = play.sim_world->get<phys::CharacterInput>(play.pawn)) {
+                in->move_dir_x = f.move_x;
+                in->move_dir_z = f.move_z;
+                in->speed_mps = rspeed;
+                in->jump = rcin.jump ? 1u : 0u;
+            }
+            const bool fire_now = (f.buttons & rs::kReplayBtnFire) != 0u;
+            if (fire_now && !play.replay_prev_fire) play.replay_fire_request = true;
+            play.replay_prev_fire = fire_now;
+            character_spine::step_fixed(play.phys_world);
+            play.fixed_accum_seconds -= kFixedDt;
+            ++play.replay_tick;
+        }
+        if (play.replay_player.done()) {
+            play.replay_mode = ReplayMode::Off;  // playback finished — freeze the pawn
+        }
+        phys::sync_dynamics_to_ecs(play.phys_world, *play.sim_world, play.dynamic_body_map);
+        const character_spine::Transform rt = character_spine::character_transform(play.phys_pawn);
+        const m::Vec3 rfoot{rt.foot_position_m[0], rt.foot_position_m[1], rt.foot_position_m[2]};
+        if (auto* xf = play.sim_world->get<psynder::scene::TransformWS>(play.pawn)) {
+            xf->prev_mtw = xf->mtw;
+            xf->mtw = phys::foot_transform(rfoot);
+        }
+        play.eye_position = {rfoot.x, rfoot.y + play.eye_height_m, rfoot.z};
+        return true;
+    }
+
     const bool shift_down =
         input->key_down(p::KeyCode::LeftShift) || input->key_down(p::KeyCode::RightShift);
-    const PlayModeTuning tuning = current_play_tuning(boot);
     if (mouse.dx != 0.0f || mouse.dy != 0.0f) {
         play.yaw_deg -= mouse.dx * tuning.mouse_sensitivity_deg_per_px;
         play.pitch_deg =
@@ -1337,10 +1449,22 @@ bool update_play_mode(PlayModeState& play,
         in->jump = cin.jump ? 1u : 0u;
     }
 
-    constexpr float kFixedDt = 1.0f / 120.0f;
+    // Per-tick input record (world-space move dir + look angles + button mask),
+    // captured once per frame and emitted for each fixed tick this frame runs.
+    std::uint32_t buttons = 0u;
+    if (cin.jump) buttons |= psynder::scene::kReplayBtnJump;
+    if (shift_down) buttons |= psynder::scene::kReplayBtnRun;
+    if (cin.crouch) buttons |= psynder::scene::kReplayBtnCrouch;
+    if (mouse.left) buttons |= psynder::scene::kReplayBtnFire;
+
     play.fixed_accum_seconds =
         std::min(play.fixed_accum_seconds + dt_seconds, 0.25f);
     while (play.fixed_accum_seconds >= kFixedDt) {
+        if (play.replay_mode == ReplayMode::Recording) {
+            play.recorder.record(psynder::scene::InputFrame{
+                play.replay_tick, move.x, move.z, play.yaw_deg, play.pitch_deg, buttons});
+            ++play.replay_tick;
+        }
         character_spine::step_fixed(play.phys_world);
         play.fixed_accum_seconds -= kFixedDt;
     }
@@ -1851,6 +1975,15 @@ void register_sample_editor_commands(PlayerBootState& boot,
                     return;
                 }
                 (void)start_play_mode(*play, boot, *editor_camera, &out);
+            });
+    }
+    if (play && editor_camera && con.FindCommand("replay") == nullptr) {
+        con.RegisterCommand(
+            "replay",
+            "Reset play mode and replay the recorded input stream (#38).",
+            [&boot, play, editor_camera](std::span<const std::string_view>,
+                                         psynder::console::Output& out) {
+                (void)start_replay(*play, boot, *editor_camera, &out);
             });
     }
     if (play && con.FindCommand("play_state") == nullptr) {
@@ -4604,9 +4737,12 @@ int main(int argc, char** argv) {
         // (combat slice over the canonical Collider) and destroys the crate it
         // hits — "shoot a crate, it disappears." The destroy runs here, outside
         // any for_each_chunk, so it's a safe structural change. The ground and
-        // large structures are spared (Plane / oversized colliders).
-        if (play_mode.active && play_mode.input_captured && play_mode.sim_world &&
-            !psynder::console::runtime_console_open() && mouse_left_pressed) {
+        // large structures are spared (Plane / oversized colliders). A replay
+        // (#38) re-fires here too via replay_fire_request (no capture needed).
+        if (play_mode.active && play_mode.sim_world &&
+            !psynder::console::runtime_console_open() &&
+            ((play_mode.input_captured && mouse_left_pressed) ||
+             play_mode.replay_fire_request)) {
             namespace mt = psynder::math;
             const float fire_yaw = play_mode.yaw_deg * mt::kDegToRad;
             const float fire_pitch = play_mode.pitch_deg * mt::kDegToRad;
@@ -4652,6 +4788,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            play_mode.replay_fire_request = false;
         }
 
         viewport_camera_dirty =

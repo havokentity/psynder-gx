@@ -22,18 +22,28 @@
 namespace psynder::scene {
 
 // ─── Input frame ──────────────────────────────────────────────────────────
-// One tick of player intent. `buttons` is a bitset (fire/jump/use/...). Move
-// axes are normalised intent in [-1,1] (1 unit = 1 metre after the sim scales
-// them); kept as f32 so the recorded stream is byte-identical to what the live
-// sim consumed (the determinism contract is "same bytes in, same bytes out").
+// One tick of player intent. `buttons` is a bitset (see kReplayBtn* below).
+// move_x/move_z are the world-space horizontal move direction in [-1,1] (already
+// yaw-rotated; 1 unit = 1 metre after the sim scales by walk/run speed).
+// yaw_deg/pitch_deg are the look angles at this tick (drive the camera + the
+// hitscan ray on replay). All f32/u32 so the recorded stream is byte-identical
+// to what the live sim consumed ("same bytes in, same bytes out").
 struct InputFrame {
     psynder::u32 tick;
     f32          move_x;
     f32          move_z;
+    f32          yaw_deg;
+    f32          pitch_deg;
     psynder::u32 buttons;
 };
 static_assert(std::is_trivially_copyable_v<InputFrame>,
               "InputFrame must be POD for deterministic record/replay");
+
+// Button bits for InputFrame::buttons.
+inline constexpr psynder::u32 kReplayBtnJump   = 1u << 0;
+inline constexpr psynder::u32 kReplayBtnFire   = 1u << 1;
+inline constexpr psynder::u32 kReplayBtnRun    = 1u << 2;
+inline constexpr psynder::u32 kReplayBtnCrouch = 1u << 3;
 
 // ─── State keyframe ─────────────────────────────────────────────────────────
 // A periodic full-sim snapshot so a player can seek without replaying from

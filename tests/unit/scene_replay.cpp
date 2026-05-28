@@ -46,8 +46,10 @@ bool bit_identical(const ToySim& a, const ToySim& b) noexcept {
 InputFrame make_input(u32 t) noexcept {
     const f32 mx = static_cast<f32>((t % 7u)) * 0.25f - 0.75f;
     const f32 mz = static_cast<f32>((t % 5u)) * -0.5f + 0.5f;
+    const f32 yaw = static_cast<f32>((t % 360u));
+    const f32 pitch = static_cast<f32>((t % 170u)) * 0.5f - 42.5f;
     const u32 btn = (t % 3u == 0u) ? 0x1u : 0x0u;  // fire every third tick
-    return InputFrame{t, mx, mz, btn};
+    return InputFrame{t, mx, mz, yaw, pitch, btn};
 }
 
 constexpr u32 kTicks = 240;
