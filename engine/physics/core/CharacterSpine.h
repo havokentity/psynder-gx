@@ -71,6 +71,20 @@ struct CharacterInput {
     bool lean_right = false;
 };
 
+// Opaque handle to a static body added via add_static_box / add_static_sphere.
+// A default-constructed (zero) handle is invalid. Hand it to remove_static_body
+// to delete that exact body — used to drop the Jolt collider of a destroyed prop
+// (e.g. a shot crate) so no invisible wall is left behind. The id is stable: it
+// is never reused for the life of the world, so a stale handle can't alias a
+// later body.
+struct StaticBodyHandle {
+    std::uint64_t id = 0;
+    constexpr bool valid() const noexcept { return id != 0; }
+    constexpr explicit operator bool() const noexcept { return id != 0; }
+    friend constexpr bool operator==(StaticBodyHandle,
+                                     StaticBodyHandle) noexcept = default;
+};
+
 World* create_world(const WorldDesc& desc = {});
 void   destroy_world(World* world);
 
@@ -79,9 +93,13 @@ bool add_static_ground(World* world,
                        float half_extent_x_m,
                        float half_extent_z_m,
                        float top_y_m = 0.0f);
-bool add_static_box(World* world, const BoxDesc& desc);
-bool add_static_sphere(World* world, const SphereDesc& desc);
+StaticBodyHandle add_static_box(World* world, const BoxDesc& desc);
+StaticBodyHandle add_static_sphere(World* world, const SphereDesc& desc);
 bool add_static_capsule(World* world, const StaticCapsuleDesc& desc);
+
+// Removes a static body previously added to `world`. Returns false if the
+// handle is invalid or the body is not present (e.g. already removed).
+bool remove_static_body(World* world, StaticBodyHandle handle);
 
 Character* create_capsule_character(World* world, const CapsuleDesc& desc = {});
 void       destroy_character(World* world, Character* character);

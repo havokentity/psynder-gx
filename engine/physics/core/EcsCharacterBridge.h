@@ -26,8 +26,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <utility>
+#include <vector>
 
 namespace psynder::physics {
+
+// One ECS static collider projected into the Jolt world: the source entity and
+// the Jolt body handle it produced. Returned by build_jolt_statics_from_ecs so
+// the caller can later remove_static_body() the body of a destroyed prop.
+using EcsStaticBody = std::pair<psynder::Entity, character_spine::StaticBodyHandle>;
 
 // Recover the pure rotation quaternion from a TransformWS (strips scale out of
 // the mtw basis columns, then matrix->quat via the standard branch method).
@@ -77,16 +84,20 @@ inline psynder::math::Quat rotation_from_transform(const scene::TransformWS& xf)
 
 // Add a Jolt static body for every ECS Collider entity in `ecs`. Box/Plane map
 // to static boxes (a Plane's thin box is dropped so its top face sits at the
-// authored surface); Sphere maps to a static sphere. Returns the body count.
-inline std::size_t build_jolt_statics_from_ecs(character_spine::World* world,
-                                               scene::World& ecs) {
-    if (!world) return 0;
-    std::size_t count = 0;
-    ecs.for_each_chunk<scene::TransformWS, scene::Collider>(
-        [&](std::size_t n, scene::TransformWS* xf, scene::Collider* col) {
+// authored surface); Sphere maps to a static sphere. Returns the entity->handle
+// mapping so a caller can remove the Jolt body when its ECS entity is destroyed
+// (e.g. a shot crate) and avoid leaving an invisible collider behind.
+inline std::vector<EcsStaticBody> build_jolt_statics_from_ecs(
+    character_spine::World* world, scene::World& ecs) {
+    std::vector<EcsStaticBody> mapping;
+    if (!world) return mapping;
+    ecs.for_each_chunk_with_entities<scene::TransformWS, scene::Collider>(
+        [&](std::size_t n, const psynder::Entity* ents,
+            scene::TransformWS* xf, scene::Collider* col) {
             for (std::size_t i = 0; i < n; ++i) {
                 const psynder::math::Quat q = rotation_from_transform(xf[i]);
                 const f32* m = xf[i].mtw.m;
+                character_spine::StaticBodyHandle handle{};
                 if (col[i].kind == scene::ShapeKind::Sphere) {
                     character_spine::SphereDesc d{};
                     d.center_m[0] = m[12];
@@ -97,7 +108,7 @@ inline std::size_t build_jolt_statics_from_ecs(character_spine::World* world,
                     d.rotation_quat[2] = q.z;
                     d.rotation_quat[3] = q.w;
                     d.radius_m = std::max(0.05f, col[i].half_extents.x);
-                    if (character_spine::add_static_sphere(world, d)) ++count;
+                    handle = character_spine::add_static_sphere(world, d);
                 } else {
                     character_spine::BoxDesc d{};
                     f32 cy = m[13];
@@ -114,11 +125,12 @@ inline std::size_t build_jolt_statics_from_ecs(character_spine::World* world,
                     d.half_extents_m[0] = std::max(0.05f, col[i].half_extents.x);
                     d.half_extents_m[1] = std::max(0.05f, col[i].half_extents.y);
                     d.half_extents_m[2] = std::max(0.05f, col[i].half_extents.z);
-                    if (character_spine::add_static_box(world, d)) ++count;
+                    handle = character_spine::add_static_box(world, d);
                 }
+                if (handle.valid()) mapping.push_back({ents[i], handle});
             }
         });
-    return count;
+    return mapping;
 }
 
 }  // namespace psynder::physics

@@ -28,13 +28,27 @@ struct Character {
     float max_horizontal_speed_mps = 6.0f;
 };
 
+struct StaticBody {
+    std::uint64_t id = 0;
+    ::psynder::physics::RigidBody* body = nullptr;
+};
+
 struct World {
     ::psynder::physics::World* physics_world = nullptr;
     std::uint32_t tick_hz = 120;
     float fixed_dt_seconds = 1.0f / 120.0f;
-    std::vector<::psynder::physics::RigidBody*> static_bodies;
+    std::vector<StaticBody> static_bodies;
+    std::uint64_t next_static_id = 1;  // 0 is the reserved invalid handle
     std::vector<Character*> characters;
 };
+
+// Records a freshly created static rigid body and hands back its stable handle.
+StaticBodyHandle register_static_body(World* world,
+                                      ::psynder::physics::RigidBody* body) {
+    const std::uint64_t id = world->next_static_id++;
+    world->static_bodies.push_back(StaticBody{id, body});
+    return StaticBodyHandle{id};
+}
 
 World* create_world(const WorldDesc& desc) {
     auto* world = new (std::nothrow) World();
@@ -69,8 +83,8 @@ void destroy_world(World* world) {
     }
     world->characters.clear();
 
-    for (::psynder::physics::RigidBody* body : world->static_bodies) {
-        ::psynder::physics::destroy_body(world->physics_world, body);
+    for (const StaticBody& entry : world->static_bodies) {
+        ::psynder::physics::destroy_body(world->physics_world, entry.body);
     }
     world->static_bodies.clear();
 
@@ -78,12 +92,12 @@ void destroy_world(World* world) {
     delete world;
 }
 
-bool add_static_box(World* world, const BoxDesc& desc) {
-    if (!world || !world->physics_world) return false;
+StaticBodyHandle add_static_box(World* world, const BoxDesc& desc) {
+    if (!world || !world->physics_world) return {};
     if (desc.half_extents_m[0] <= 0.0f ||
         desc.half_extents_m[1] <= 0.0f ||
         desc.half_extents_m[2] <= 0.0f) {
-        return false;
+        return {};
     }
 
     ::psynder::physics::BodyDesc body{};
@@ -104,15 +118,14 @@ bool add_static_box(World* world, const BoxDesc& desc) {
 
     ::psynder::physics::RigidBody* rigid_body =
         ::psynder::physics::create_body(world->physics_world, body);
-    if (!rigid_body) return false;
+    if (!rigid_body) return {};
 
-    world->static_bodies.push_back(rigid_body);
-    return true;
+    return register_static_body(world, rigid_body);
 }
 
-bool add_static_sphere(World* world, const SphereDesc& desc) {
-    if (!world || !world->physics_world) return false;
-    if (desc.radius_m <= 0.0f) return false;
+StaticBodyHandle add_static_sphere(World* world, const SphereDesc& desc) {
+    if (!world || !world->physics_world) return {};
+    if (desc.radius_m <= 0.0f) return {};
 
     ::psynder::physics::BodyDesc body{};
     body.shape = ::psynder::physics::Shape::Sphere;
@@ -130,10 +143,9 @@ bool add_static_sphere(World* world, const SphereDesc& desc) {
 
     ::psynder::physics::RigidBody* rigid_body =
         ::psynder::physics::create_body(world->physics_world, body);
-    if (!rigid_body) return false;
+    if (!rigid_body) return {};
 
-    world->static_bodies.push_back(rigid_body);
-    return true;
+    return register_static_body(world, rigid_body);
 }
 
 bool add_static_capsule(World* world, const StaticCapsuleDesc& desc) {
@@ -162,7 +174,7 @@ bool add_static_capsule(World* world, const StaticCapsuleDesc& desc) {
         ::psynder::physics::create_body(world->physics_world, body);
     if (!rigid_body) return false;
 
-    world->static_bodies.push_back(rigid_body);
+    register_static_body(world, rigid_body);
     return true;
 }
 
@@ -178,7 +190,21 @@ bool add_static_ground(World* world,
     ground.half_extents_m[1] = 0.5f;
     ground.half_extents_m[2] = half_extent_z_m;
     ground.friction = 0.8f;
-    return add_static_box(world, ground);
+    return add_static_box(world, ground).valid();
+}
+
+bool remove_static_body(World* world, StaticBodyHandle handle) {
+    if (!world || !world->physics_world || !handle.valid()) return false;
+    auto& bodies = world->static_bodies;
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+        if (bodies[i].id != handle.id) continue;
+        ::psynder::physics::destroy_body(world->physics_world, bodies[i].body);
+        // Statics are independent, so order doesn't matter: swap-remove.
+        bodies[i] = bodies.back();
+        bodies.pop_back();
+        return true;
+    }
+    return false;
 }
 
 Character* create_capsule_character(World* world, const CapsuleDesc& desc) {

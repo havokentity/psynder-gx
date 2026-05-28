@@ -210,6 +210,10 @@ struct PlayModeState {
     psynder::Entity pawn{};                          // ECS pawn (TransformWS)
     character_spine::World* phys_world = nullptr;     // Jolt static world + capsule
     character_spine::Character* phys_pawn = nullptr;  // Jolt CharacterVirtual
+    // ECS prop entity -> its projected Jolt static body. When a prop is
+    // destroyed (e.g. a shot crate) we remove_static_body its handle so no
+    // invisible collider is left behind (the collision-ghost fix).
+    std::vector<phys::EcsStaticBody> static_body_map;
     float fixed_accum_seconds = 0.0f;
     float yaw_deg = 180.0f;
     float pitch_deg = 0.0f;
@@ -1207,7 +1211,8 @@ bool start_play_mode(PlayModeState& play,
         if (out) out->PrintLine("play: failed to create Jolt world");
         return false;
     }
-    phys::build_jolt_statics_from_ecs(phys_world, *world);
+    std::vector<phys::EcsStaticBody> static_body_map =
+        phys::build_jolt_statics_from_ecs(phys_world, *world);
     character_spine::CapsuleDesc cap_desc{};
     cap_desc.foot_position_m[0] = spawn.x;
     cap_desc.foot_position_m[1] = spawn.y;
@@ -1229,6 +1234,7 @@ bool start_play_mode(PlayModeState& play,
     play.pawn = pawn;
     play.phys_world = phys_world;
     play.phys_pawn = phys_pawn;
+    play.static_body_map = std::move(static_body_map);
     play.fixed_accum_seconds = 0.0f;
     play.yaw_deg = yaw;
     play.pitch_deg = std::clamp(pitch, -85.0f, 85.0f);
@@ -4586,6 +4592,16 @@ int main(int argc, char** argv) {
                     : 0.0f;
                 if (col && col->kind != psynder::scene::ShapeKind::Plane && max_he < 3.0f) {
                     play_mode.sim_world->destroy(hit.entity);
+                    // Drop the matching Jolt static body too, or its collider
+                    // would linger as an invisible wall (the collision ghost).
+                    for (std::size_t i = 0; i < play_mode.static_body_map.size(); ++i) {
+                        if (play_mode.static_body_map[i].first != hit.entity) continue;
+                        character_spine::remove_static_body(
+                            play_mode.phys_world, play_mode.static_body_map[i].second);
+                        play_mode.static_body_map[i] = play_mode.static_body_map.back();
+                        play_mode.static_body_map.pop_back();
+                        break;
+                    }
                 }
             }
         }

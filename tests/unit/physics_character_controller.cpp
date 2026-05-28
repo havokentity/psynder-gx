@@ -135,3 +135,55 @@ TEST_CASE("character: a wall projected from the ECS blocks the capsule",
     REQUIRE(t.foot_position_m[0] < 1.4f);  // stopped at the wall, didn't tunnel
     spine::destroy_world(pw);
 }
+
+TEST_CASE("character: removing a static body drops its collider (no ghost)",
+          "[physics][ecs][character]") {
+    // Same wall as above, but we destroy its Jolt body via the handle returned
+    // from build_jolt_statics_from_ecs — the capsule must then walk through the
+    // space the wall occupied, proving no invisible collider lingers behind a
+    // destroyed prop (the collision-ghost fix).
+    World w;
+    add_ground(w);
+    PropDesc wall;
+    wall.position = {2.0f, 0.5f, 0.0f};
+    wall.shape = ShapeKind::Box;
+    wall.half_extents = {0.5f, 1.0f, 5.0f};  // spans x in [1.5, 2.5]
+    const Entity wall_e = spawn_prop(w, wall);
+
+    spine::WorldDesc desc{};
+    desc.max_bodies = 64;
+    spine::World* pw = spine::create_world(desc);
+    REQUIRE(pw != nullptr);
+
+    const auto mapping = psynder::physics::build_jolt_statics_from_ecs(pw, w);
+    REQUIRE(mapping.size() == 2);  // ground + wall
+
+    spine::StaticBodyHandle wall_handle{};
+    for (const auto& [entity, handle] : mapping) {
+        if (entity == wall_e) wall_handle = handle;
+    }
+    REQUIRE(wall_handle.valid());
+
+    REQUIRE(spine::remove_static_body(pw, wall_handle));
+    REQUIRE_FALSE(spine::remove_static_body(pw, wall_handle));  // already gone
+    REQUIRE_FALSE(spine::remove_static_body(pw, spine::StaticBodyHandle{}));
+
+    spine::CapsuleDesc cap{};
+    cap.foot_position_m[0] = 0.0f;
+    cap.foot_position_m[1] = 0.5f;
+    cap.foot_position_m[2] = 0.0f;
+    cap.radius_m = 0.38f;
+    cap.height_m = 1.82f;
+    cap.max_horizontal_speed_mps = 6.0f;
+    spine::Character* pawn = spine::create_capsule_character(pw, cap);
+    REQUIRE(pawn != nullptr);
+
+    for (int i = 0; i < 360; ++i) {
+        spine::set_desired_horizontal_velocity(pawn, 4.0f, 0.0f);  // walk +X
+        spine::step_fixed(pw);
+    }
+
+    const spine::Transform t = spine::character_transform(pawn);
+    REQUIRE(t.foot_position_m[0] > 2.5f);  // walked clean through the old wall
+    spine::destroy_world(pw);
+}
