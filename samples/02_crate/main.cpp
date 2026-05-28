@@ -21,6 +21,7 @@
 #include "math/Math.h"
 #include "platform/Platform.h"
 #include "physics/core/CharacterController.h"
+#include "physics/core/EcsCharacterBridge.h"
 #include "scene/GxComponents.h"
 #include "scene/SceneComponents.h"
 #include "scene/World.h"
@@ -111,6 +112,7 @@ using SceneEnvironment = psynder::sample02::SceneEnvironment;
 using ScenePlayerStart = psynder::sample02::ScenePlayerStart;
 using ScenePlayerController = psynder::sample02::ScenePlayerController;
 namespace phys = psynder::physics;
+namespace character_spine = psynder::physics::character_spine;
 
 struct EditorPickRay {
     psynder::math::Vec3 origin{};
@@ -198,11 +200,15 @@ struct PlayModeState {
     bool active = false;
     bool collision_debug = false;
     bool input_captured = false;
-    // The play simulation runs on scene::World (the single source of truth for
-    // colliders, the player capsule, and the rendered scene) — no parallel
-    // character_spine world. Reset on each start/stop via the unique_ptr.
+    // scene::World is the authoritative scene: it holds the render prop entities
+    // and the player's TransformWS. Jolt (character_spine) is the SOLVER —
+    // static bodies are projected from the ECS Colliders at play-start and the
+    // player capsule's solved transform is written back into the ECS pawn each
+    // tick (see EcsCharacterBridge.h / ADR-019). No parallel mutable scene.
     std::unique_ptr<psynder::scene::World> sim_world;
-    psynder::Entity pawn{};  // player capsule entity in sim_world
+    psynder::Entity pawn{};                          // ECS pawn (TransformWS)
+    character_spine::World* phys_world = nullptr;     // Jolt static world + capsule
+    character_spine::Character* phys_pawn = nullptr;  // Jolt CharacterVirtual
     float fixed_accum_seconds = 0.0f;
     float yaw_deg = 180.0f;
     float pitch_deg = 0.0f;
@@ -1110,6 +1116,11 @@ bool console_cvar_bool(std::string_view name, bool fallback) {
 
 void stop_play_mode(PlayModeState& play) {
     const bool keep_collision_debug = play.collision_debug;
+    if (play.phys_world) {
+        character_spine::destroy_world(play.phys_world);  // also frees the pawn
+        play.phys_world = nullptr;
+        play.phys_pawn = nullptr;
+    }
     play = {};  // resets sim_world (destroys the ECS sim world) + all fields
     play.collision_debug = keep_collision_debug;
 }
@@ -1183,10 +1194,40 @@ bool start_play_mode(PlayModeState& play,
     pawn_desc.height_m = tuning.capsule_height_m;
     const psynder::Entity pawn = phys::spawn_character(*world, pawn_desc);
 
+    // Build the Jolt solver world: project the ECS static colliders into Jolt
+    // (immutable for the session) and create the player capsule. The ECS pawn's
+    // TransformWS is written from the solved capsule each tick — Jolt is the
+    // solver, the ECS stays authoritative (ADR-019 / EcsCharacterBridge.h).
+    character_spine::WorldDesc world_desc{};
+    world_desc.max_bodies = static_cast<std::uint32_t>(
+        std::max<std::size_t>(256, static_cast<std::size_t>(static_collider_count) + 8));
+    character_spine::World* phys_world = character_spine::create_world(world_desc);
+    if (!phys_world) {
+        if (out) out->PrintLine("play: failed to create Jolt world");
+        return false;
+    }
+    phys::build_jolt_statics_from_ecs(phys_world, *world);
+    character_spine::CapsuleDesc cap_desc{};
+    cap_desc.foot_position_m[0] = spawn.x;
+    cap_desc.foot_position_m[1] = spawn.y;
+    cap_desc.foot_position_m[2] = spawn.z;
+    cap_desc.radius_m = tuning.capsule_radius_m;
+    cap_desc.height_m = tuning.capsule_height_m;
+    cap_desc.max_horizontal_speed_mps = tuning.run_speed_mps;
+    character_spine::Character* phys_pawn =
+        character_spine::create_capsule_character(phys_world, cap_desc);
+    if (!phys_pawn) {
+        character_spine::destroy_world(phys_world);
+        if (out) out->PrintLine("play: failed to create pawn capsule");
+        return false;
+    }
+
     play.active = true;
     play.input_captured = console_cvar_bool("play_capture_input", true);
     play.sim_world = std::move(world);
     play.pawn = pawn;
+    play.phys_world = phys_world;
+    play.phys_pawn = phys_pawn;
     play.fixed_accum_seconds = 0.0f;
     play.yaw_deg = yaw;
     play.pitch_deg = std::clamp(pitch, -85.0f, 85.0f);
@@ -1211,8 +1252,8 @@ bool update_play_mode(PlayModeState& play,
                       float dt_seconds) {
     namespace m = psynder::math;
     namespace p = psynder::platform;
-    if (!play.active || !play.sim_world || !input ||
-        boot.render_state != PlayerBootRenderState::SceneRendering) {
+    if (!play.active || !play.sim_world || !play.phys_world || !play.phys_pawn ||
+        !input || boot.render_state != PlayerBootRenderState::SceneRendering) {
         return false;
     }
 
@@ -1229,7 +1270,10 @@ bool update_play_mode(PlayModeState& play,
 
     const float yaw = play.yaw_deg * m::kDegToRad;
     const m::Vec3 forward = m::normalize({std::sin(yaw), 0.0f, std::cos(yaw)});
-    const m::Vec3 right = m::normalize({std::cos(yaw), 0.0f, -std::sin(yaw)});
+    // Camera screen-right is cross(forward, up) (see math::look_at_rh): for
+    // up=+Y that is (-cos(yaw), 0, sin(yaw)). The previous vector was its
+    // negation, which made D strafe left / A strafe right.
+    const m::Vec3 right = m::normalize({-std::cos(yaw), 0.0f, std::sin(yaw)});
     m::Vec3 move{0.0f, 0.0f, 0.0f};
     if (input->key_down(p::KeyCode::W)) move = m::add(move, forward);
     if (input->key_down(p::KeyCode::S)) move = m::sub(move, forward);
@@ -1240,30 +1284,40 @@ bool update_play_mode(PlayModeState& play,
     }
 
     const float speed = shift_down ? tuning.run_speed_mps : tuning.walk_speed_mps;
+
+    // Feed desired motion into the Jolt CharacterVirtual and mirror it into the
+    // ECS CharacterInput (gameplay-readable). Jolt solves capsule-vs-world.
+    character_spine::CharacterInput cin{};
+    cin.velocity_mps[0] = move.x * speed;
+    cin.velocity_mps[1] = move.z * speed;
+    cin.jump = input->key_pressed(p::KeyCode::Space);
+    cin.crouch =
+        input->key_down(p::KeyCode::LeftCtrl) || input->key_down(p::KeyCode::RightCtrl);
+    character_spine::set_character_input(play.phys_pawn, cin);
     if (auto* in = play.sim_world->get<phys::CharacterInput>(play.pawn)) {
         in->move_dir_x = move.x;
         in->move_dir_z = move.z;
         in->speed_mps = speed;
-        in->jump = input->key_pressed(p::KeyCode::Space) ? 1u : 0u;
+        in->jump = cin.jump ? 1u : 0u;
     }
 
     constexpr float kFixedDt = 1.0f / 120.0f;
-    const m::Vec3 gravity{0.0f, -9.81f, 0.0f};
     play.fixed_accum_seconds =
         std::min(play.fixed_accum_seconds + dt_seconds, 0.25f);
     while (play.fixed_accum_seconds >= kFixedDt) {
-        phys::character_input_system(*play.sim_world);
-        phys::character_physics_step(*play.sim_world, kFixedDt, gravity);
+        character_spine::step_fixed(play.phys_world);
         play.fixed_accum_seconds -= kFixedDt;
     }
 
-    if (const auto* xf = play.sim_world->get<psynder::scene::TransformWS>(play.pawn)) {
-        play.eye_position = {
-            xf->mtw.m[12],
-            xf->mtw.m[13] + play.eye_height_m,
-            xf->mtw.m[14],
-        };
+    // Write the solved capsule transform back into the ECS pawn (authoritative)
+    // and derive the eye position for the camera.
+    const character_spine::Transform t = character_spine::character_transform(play.phys_pawn);
+    const m::Vec3 foot{t.foot_position_m[0], t.foot_position_m[1], t.foot_position_m[2]};
+    if (auto* xf = play.sim_world->get<psynder::scene::TransformWS>(play.pawn)) {
+        xf->prev_mtw = xf->mtw;
+        xf->mtw = phys::foot_transform(foot);
     }
+    play.eye_position = {foot.x, foot.y + play.eye_height_m, foot.z};
     return true;
 }
 
@@ -4027,7 +4081,8 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
             g::bind_pipeline(cmd, primitive_resources.overlay_pipeline);
         };
         bind_depth_overlay();
-        if (boot.editor_grid_visible &&
+        if (!play.active &&
+            boot.editor_grid_visible &&
             primitive_resources.grid.vertex_buffer &&
             primitive_resources.grid.index_buffer &&
             primitive_resources.grid.index_count > 0) {
@@ -4043,6 +4098,8 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
         if (primitive_resources.cube.vertex_buffer &&
             primitive_resources.cube.index_buffer &&
             primitive_resources.cube.index_count > 0) {
+            // Editor-only authoring markers — hidden while playing.
+          if (!play.active) {
             for (const ScenePlayerStart& player_start : boot.player_starts) {
                 if (player_start.name.empty()) {
                     continue;
@@ -4079,6 +4136,7 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
                                      0);
                 g::draw_indexed(cmd, primitive_resources.cube.index_count, 1, 0, 0, 0);
             }
+          }  // !play.active (editor authoring markers)
             if (play.active && play.collision_debug) {
                 const ScenePushConstants pc =
                     compose_play_collision_marker_push(play, render_camera, aspect);
@@ -4095,7 +4153,8 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
             }
         }
         SelectedSceneTransform selected_transform{};
-        if (selected_scene_transform(boot, selected_transform) &&
+        if (!play.active &&
+            selected_scene_transform(boot, selected_transform) &&
             !(boot.transform_mode == TransformMode::Scale && !selected_transform.allow_scale) &&
             primitive_resources.cube.vertex_buffer &&
             primitive_resources.cube.index_buffer &&
@@ -4324,6 +4383,7 @@ int main(int argc, char** argv) {
     auto previous_frame_start = FrameClock::now();
     auto next_viewport_camera_sync = FrameClock::now();
     bool viewport_camera_dirty = false;
+    bool mouse_captured_now = false;  // FPS cursor lock state (play mode)
 
     while (!plat::should_close(win)) {
         const auto frame_start = FrameClock::now();
@@ -4451,7 +4511,13 @@ int main(int argc, char** argv) {
             restart_on_exit = true;
             plat::request_close(win);
         } else if (psynder::console::consume_runtime_console_quit_requested()) {
-            plat::request_close(win);
+            // The runtime console turns a console-closed Esc into a quit
+            // request. In play mode Esc is in-game input (release the mouse,
+            // then return to editor — handled below), so swallow the quit
+            // while playing instead of closing the whole app.
+            if (!play_mode.active) {
+                plat::request_close(win);
+            }
         }
         if (!play_mode.active && !psynder::console::runtime_console_open() && input) {
             if (input->key_pressed(psynder::platform::KeyCode::F1)) {
@@ -4469,6 +4535,16 @@ int main(int argc, char** argv) {
             } else {
                 stop_play_mode(play_mode);
             }
+        }
+        // FPS mouse lock: hide + lock the cursor while play mode owns input.
+        // Released when the console is open (so the cursor can type/click) or
+        // when capture is toggled off / play mode stops.
+        const bool want_mouse_capture = play_mode.active &&
+                                        play_mode.input_captured &&
+                                        !psynder::console::runtime_console_open();
+        if (want_mouse_capture != mouse_captured_now) {
+            plat::set_mouse_captured(want_mouse_capture);
+            mouse_captured_now = want_mouse_capture;
         }
         reconcile_runtime_selection(boot);
         if (gizmo_drag.active && !scene_entity_exists(boot, gizmo_drag.entity_name)) {
@@ -4722,6 +4798,7 @@ int main(int argc, char** argv) {
         (void)sync_editor_viewport_camera(boot, editor_camera);
     }
     stop_play_mode(play_mode);
+    plat::set_mouse_captured(false);  // restore the cursor on exit
     psynder::ui::imm::shutdown_runtime_console_gpu(console_overlay);
     shutdown_primitive_renderer(primitive_resources);
     psynder::console::set_runtime_console_clipboard_setter({});
