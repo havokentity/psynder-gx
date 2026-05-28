@@ -8,6 +8,7 @@
 // prove the local contract.
 
 #include "camera/Camera.h"
+#include "../combat/Combat.h"
 #include "SceneDocument.h"
 #include "SceneImport.h"
 #include "core/console/Console.h"
@@ -4560,6 +4561,35 @@ int main(int argc, char** argv) {
         } else {
             editor_camera.orbiting_prev = false;
         }
+        // Hitscan fire: left-click in captured play mode raycasts the ECS props
+        // (combat slice over the canonical Collider) and destroys the crate it
+        // hits — "shoot a crate, it disappears." The destroy runs here, outside
+        // any for_each_chunk, so it's a safe structural change. The ground and
+        // large structures are spared (Plane / oversized colliders).
+        if (play_mode.active && play_mode.input_captured && play_mode.sim_world &&
+            !psynder::console::runtime_console_open() && mouse_left_pressed) {
+            namespace mt = psynder::math;
+            const float fire_yaw = play_mode.yaw_deg * mt::kDegToRad;
+            const float fire_pitch = play_mode.pitch_deg * mt::kDegToRad;
+            const mt::Vec3 fire_dir{
+                std::cos(fire_pitch) * std::sin(fire_yaw),
+                -std::sin(fire_pitch),
+                std::cos(fire_pitch) * std::cos(fire_yaw),
+            };
+            const psynder::combat::Ray shot{play_mode.eye_position, fire_dir};
+            const psynder::combat::Hit hit =
+                psynder::combat::raycast_nearest(*play_mode.sim_world, shot, 100.0f);
+            if (hit.hit && hit.entity != play_mode.pawn) {
+                const auto* col = play_mode.sim_world->get<psynder::scene::Collider>(hit.entity);
+                const float max_he = col
+                    ? std::max({col->half_extents.x, col->half_extents.y, col->half_extents.z})
+                    : 0.0f;
+                if (col && col->kind != psynder::scene::ShapeKind::Plane && max_he < 3.0f) {
+                    play_mode.sim_world->destroy(hit.entity);
+                }
+            }
+        }
+
         viewport_camera_dirty =
             viewport_camera_dirty || (!play_mode.active && camera_changed_this_frame);
         if (viewport_camera_dirty && frame_start >= next_viewport_camera_sync) {
