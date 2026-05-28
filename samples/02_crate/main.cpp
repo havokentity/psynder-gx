@@ -214,6 +214,10 @@ struct PlayModeState {
     // destroyed (e.g. a shot crate) we remove_static_body its handle so no
     // invisible collider is left behind (the collision-ghost fix).
     std::vector<phys::EcsStaticBody> static_body_map;
+    // ECS prop entity -> its Jolt dynamic body (ADR-019 class 2). Synced back
+    // to the ECS each tick; shooting one applies a knockback impulse.
+    std::vector<phys::EcsDynamicBody> dynamic_body_map;
+    std::uint32_t dynamic_body_count = 0;
     float fixed_accum_seconds = 0.0f;
     float yaw_deg = 180.0f;
     float pitch_deg = 0.0f;
@@ -1143,6 +1147,7 @@ void print_play_state(const PlayModeState& play, psynder::console::Output& out) 
                    play.capsule_radius_m,
                    play.capsule_height_m);
     out.FormatLine("static_colliders: {}", play.static_collider_count);
+    out.FormatLine("dynamic_bodies: {}", play.dynamic_body_count);
     out.FormatLine("collision_debug: {}", play.collision_debug ? "on" : "off");
 }
 
@@ -1199,6 +1204,26 @@ bool start_play_mode(PlayModeState& play,
     pawn_desc.height_m = tuning.capsule_height_m;
     const psynder::Entity pawn = phys::spawn_character(*world, pawn_desc);
 
+    // Spawn a small stack of dynamic crates in front of the spawn so play mode
+    // immediately shows Jolt rigid bodies (ADR-019 class 2): they fall, stack,
+    // and get knocked when shot. They carry scene::DynamicBody, so the static
+    // projection skips them and build_jolt_dynamics_from_ecs picks them up.
+    {
+        const float spawn_yaw_rad = yaw * psynder::math::kDegToRad;
+        const float fx = std::sin(spawn_yaw_rad);
+        const float fz = std::cos(spawn_yaw_rad);
+        const float bx = spawn.x + fx * 3.0f;
+        const float bz = spawn.z + fz * 3.0f;
+        for (int level = 0; level < 3; ++level) {
+            psynder::scene::DynamicPropDesc crate;
+            crate.position = {bx, 0.5f + static_cast<float>(level) * 1.02f, bz};
+            crate.half_extents = {0.5f, 0.5f, 0.5f};
+            crate.mass_kg = 8.0f;
+            crate.material.albedo = {0.86f, 0.46f, 0.18f};  // orange = dynamic
+            psynder::scene::spawn_dynamic_prop(*world, crate);
+        }
+    }
+
     // Build the Jolt solver world: project the ECS static colliders into Jolt
     // (immutable for the session) and create the player capsule. The ECS pawn's
     // TransformWS is written from the solved capsule each tick — Jolt is the
@@ -1213,6 +1238,8 @@ bool start_play_mode(PlayModeState& play,
     }
     std::vector<phys::EcsStaticBody> static_body_map =
         phys::build_jolt_statics_from_ecs(phys_world, *world);
+    std::vector<phys::EcsDynamicBody> dynamic_body_map =
+        phys::build_jolt_dynamics_from_ecs(phys_world, *world);
     character_spine::CapsuleDesc cap_desc{};
     cap_desc.foot_position_m[0] = spawn.x;
     cap_desc.foot_position_m[1] = spawn.y;
@@ -1235,6 +1262,8 @@ bool start_play_mode(PlayModeState& play,
     play.phys_world = phys_world;
     play.phys_pawn = phys_pawn;
     play.static_body_map = std::move(static_body_map);
+    play.dynamic_body_count = static_cast<std::uint32_t>(dynamic_body_map.size());
+    play.dynamic_body_map = std::move(dynamic_body_map);
     play.fixed_accum_seconds = 0.0f;
     play.yaw_deg = yaw;
     play.pitch_deg = std::clamp(pitch, -85.0f, 85.0f);
@@ -1315,6 +1344,10 @@ bool update_play_mode(PlayModeState& play,
         character_spine::step_fixed(play.phys_world);
         play.fixed_accum_seconds -= kFixedDt;
     }
+
+    // Write the Jolt-solved dynamic-body transforms back into the ECS so the
+    // render walk + raycast see them move (ADR-019 / EcsCharacterBridge.h).
+    phys::sync_dynamics_to_ecs(play.phys_world, *play.sim_world, play.dynamic_body_map);
 
     // Write the solved capsule transform back into the ECS pawn (authoritative)
     // and derive the eye position for the camera.
@@ -4586,11 +4619,26 @@ int main(int argc, char** argv) {
             const psynder::combat::Hit hit =
                 psynder::combat::raycast_nearest(*play_mode.sim_world, shot, 100.0f);
             if (hit.hit && hit.entity != play_mode.pawn) {
+                // A dynamic rigid body? Knock it back with an impulse along the
+                // shot (ADR-019 class 2) instead of destroying it.
+                bool knocked = false;
+                for (auto& dyn : play_mode.dynamic_body_map) {
+                    if (dyn.first != hit.entity) continue;
+                    constexpr float kImpulse = 36.0f;  // kg*m/s along the shot
+                    character_spine::dynamic_body_apply_impulse(
+                        play_mode.phys_world, dyn.second,
+                        fire_dir.x * kImpulse,
+                        fire_dir.y * kImpulse + 6.0f,  // a little pop upward
+                        fire_dir.z * kImpulse);
+                    knocked = true;
+                    break;
+                }
                 const auto* col = play_mode.sim_world->get<psynder::scene::Collider>(hit.entity);
                 const float max_he = col
                     ? std::max({col->half_extents.x, col->half_extents.y, col->half_extents.z})
                     : 0.0f;
-                if (col && col->kind != psynder::scene::ShapeKind::Plane && max_he < 3.0f) {
+                if (!knocked && col && col->kind != psynder::scene::ShapeKind::Plane &&
+                    max_he < 3.0f) {
                     play_mode.sim_world->destroy(hit.entity);
                     // Drop the matching Jolt static body too, or its collider
                     // would linger as an invisible wall (the collision ghost).

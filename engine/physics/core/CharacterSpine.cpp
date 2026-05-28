@@ -33,21 +33,35 @@ struct StaticBody {
     ::psynder::physics::RigidBody* body = nullptr;
 };
 
+struct DynamicBody {
+    std::uint64_t id = 0;
+    ::psynder::physics::RigidBody* body = nullptr;
+};
+
 struct World {
     ::psynder::physics::World* physics_world = nullptr;
     std::uint32_t tick_hz = 120;
     float fixed_dt_seconds = 1.0f / 120.0f;
     std::vector<StaticBody> static_bodies;
-    std::uint64_t next_static_id = 1;  // 0 is the reserved invalid handle
+    std::vector<DynamicBody> dynamic_bodies;
+    std::uint64_t next_body_id = 1;  // 0 is the reserved invalid handle (both kinds)
     std::vector<Character*> characters;
 };
 
 // Records a freshly created static rigid body and hands back its stable handle.
 StaticBodyHandle register_static_body(World* world,
                                       ::psynder::physics::RigidBody* body) {
-    const std::uint64_t id = world->next_static_id++;
+    const std::uint64_t id = world->next_body_id++;
     world->static_bodies.push_back(StaticBody{id, body});
     return StaticBodyHandle{id};
+}
+
+// Records a freshly created dynamic rigid body and hands back its stable handle.
+DynamicBodyHandle register_dynamic_body(World* world,
+                                        ::psynder::physics::RigidBody* body) {
+    const std::uint64_t id = world->next_body_id++;
+    world->dynamic_bodies.push_back(DynamicBody{id, body});
+    return DynamicBodyHandle{id};
 }
 
 World* create_world(const WorldDesc& desc) {
@@ -87,6 +101,11 @@ void destroy_world(World* world) {
         ::psynder::physics::destroy_body(world->physics_world, entry.body);
     }
     world->static_bodies.clear();
+
+    for (const DynamicBody& entry : world->dynamic_bodies) {
+        ::psynder::physics::destroy_body(world->physics_world, entry.body);
+    }
+    world->dynamic_bodies.clear();
 
     ::psynder::physics::destroy_world(world->physics_world);
     delete world;
@@ -205,6 +224,102 @@ bool remove_static_body(World* world, StaticBodyHandle handle) {
         return true;
     }
     return false;
+}
+
+DynamicBodyHandle add_dynamic_box(World* world, const DynamicBoxDesc& desc) {
+    if (!world || !world->physics_world) return {};
+    if (desc.half_extents_m[0] <= 0.0f ||
+        desc.half_extents_m[1] <= 0.0f ||
+        desc.half_extents_m[2] <= 0.0f ||
+        desc.mass_kg <= 0.0f) {
+        return {};
+    }
+
+    ::psynder::physics::BodyDesc body{};
+    body.shape = ::psynder::physics::Shape::Box;
+    body.pos[0] = desc.center_m[0];
+    body.pos[1] = desc.center_m[1];
+    body.pos[2] = desc.center_m[2];
+    body.rot_quat[0] = desc.rotation_quat[0];
+    body.rot_quat[1] = desc.rotation_quat[1];
+    body.rot_quat[2] = desc.rotation_quat[2];
+    body.rot_quat[3] = desc.rotation_quat[3];
+    body.mass_kg = desc.mass_kg;
+    body.friction = desc.friction;
+    body.restitution = desc.restitution;
+    body.dims[0] = desc.half_extents_m[0];
+    body.dims[1] = desc.half_extents_m[1];
+    body.dims[2] = desc.half_extents_m[2];
+
+    ::psynder::physics::RigidBody* rigid_body =
+        ::psynder::physics::create_body(world->physics_world, body);
+    if (!rigid_body) return {};
+
+    return register_dynamic_body(world, rigid_body);
+}
+
+DynamicBodyHandle add_dynamic_sphere(World* world, const DynamicSphereDesc& desc) {
+    if (!world || !world->physics_world) return {};
+    if (desc.radius_m <= 0.0f || desc.mass_kg <= 0.0f) return {};
+
+    ::psynder::physics::BodyDesc body{};
+    body.shape = ::psynder::physics::Shape::Sphere;
+    body.pos[0] = desc.center_m[0];
+    body.pos[1] = desc.center_m[1];
+    body.pos[2] = desc.center_m[2];
+    body.rot_quat[0] = desc.rotation_quat[0];
+    body.rot_quat[1] = desc.rotation_quat[1];
+    body.rot_quat[2] = desc.rotation_quat[2];
+    body.rot_quat[3] = desc.rotation_quat[3];
+    body.mass_kg = desc.mass_kg;
+    body.friction = desc.friction;
+    body.restitution = desc.restitution;
+    body.dims[0] = desc.radius_m;
+
+    ::psynder::physics::RigidBody* rigid_body =
+        ::psynder::physics::create_body(world->physics_world, body);
+    if (!rigid_body) return {};
+
+    return register_dynamic_body(world, rigid_body);
+}
+
+bool remove_dynamic_body(World* world, DynamicBodyHandle handle) {
+    if (!world || !world->physics_world || !handle.valid()) return false;
+    auto& bodies = world->dynamic_bodies;
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+        if (bodies[i].id != handle.id) continue;
+        ::psynder::physics::destroy_body(world->physics_world, bodies[i].body);
+        bodies[i] = bodies.back();
+        bodies.pop_back();
+        return true;
+    }
+    return false;
+}
+
+bool dynamic_body_transform(const World* world, DynamicBodyHandle handle,
+                            float out_pos[3], float out_quat[4]) {
+    if (!world || !handle.valid()) return false;
+    for (const DynamicBody& entry : world->dynamic_bodies) {
+        if (entry.id != handle.id) continue;
+        ::psynder::physics::body_get_transform(entry.body, out_pos, out_quat);
+        return true;
+    }
+    return false;
+}
+
+void dynamic_body_apply_impulse(World* world, DynamicBodyHandle handle,
+                                float ix, float iy, float iz) {
+    if (!world || !handle.valid()) return;
+    // The underlying body takes a force (N) cleared each step; convert the
+    // requested impulse (kg·m/s) into a one-tick force: F = J / dt.
+    const float inv_dt =
+        world->fixed_dt_seconds > 0.0f ? 1.0f / world->fixed_dt_seconds : 0.0f;
+    for (const DynamicBody& entry : world->dynamic_bodies) {
+        if (entry.id != handle.id) continue;
+        ::psynder::physics::body_apply_force(entry.body,
+                                             ix * inv_dt, iy * inv_dt, iz * inv_dt);
+        return;
+    }
 }
 
 Character* create_capsule_character(World* world, const CapsuleDesc& desc) {

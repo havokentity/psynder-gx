@@ -409,3 +409,67 @@ TEST_CASE("physics-core character spine: fixed input stream is deterministic",
     REQUIRE(approx(end_a.foot_position_m[2], end_b.foot_position_m[2], 1.0e-5f));
     REQUIRE(approx(end_a.yaw_deg, end_b.yaw_deg, 1.0e-5f));
 }
+
+TEST_CASE("physics-core character spine: dynamic body falls and settles on ground",
+          "[physics][spine][dynamic]") {
+    SpineScope scope;
+    REQUIRE(spine::add_static_ground(scope.world, 12.0f, 12.0f));
+
+    spine::DynamicBoxDesc desc{};
+    desc.center_m[1] = 3.0f;
+    desc.half_extents_m[0] = 0.5f;
+    desc.half_extents_m[1] = 0.5f;
+    desc.half_extents_m[2] = 0.5f;
+    desc.mass_kg = 8.0f;
+
+    // Invalid descs are rejected (zero mass / zero extent).
+    spine::DynamicBoxDesc invalid = desc;
+    invalid.mass_kg = 0.0f;
+    REQUIRE_FALSE(spine::add_dynamic_box(scope.world, invalid));
+
+    const spine::DynamicBodyHandle handle = spine::add_dynamic_box(scope.world, desc);
+    REQUIRE(handle.valid());
+
+    float pos[3] = {0, 0, 0};
+    float quat[4] = {0, 0, 0, 1};
+    REQUIRE(spine::dynamic_body_transform(scope.world, handle, pos, quat));
+    const float start_y = pos[1];
+
+    for (int i = 0; i < 360; ++i) spine::step_fixed(scope.world);  // ~3 s to settle
+
+    REQUIRE(spine::dynamic_body_transform(scope.world, handle, pos, quat));
+    REQUIRE(pos[1] < start_y - 1.0f);  // it fell
+    REQUIRE(pos[1] > 0.2f);            // rests near 0.5 (half-extent on the ground)
+    REQUIRE(pos[1] < 0.9f);
+}
+
+TEST_CASE("physics-core character spine: impulse moves a dynamic body; remove drops it",
+          "[physics][spine][dynamic]") {
+    SpineScope scope;
+    REQUIRE(spine::add_static_ground(scope.world, 12.0f, 12.0f));
+
+    spine::DynamicBoxDesc desc{};
+    desc.center_m[1] = 0.5f;  // resting on the ground
+    desc.mass_kg = 6.0f;
+    const spine::DynamicBodyHandle handle = spine::add_dynamic_box(scope.world, desc);
+    REQUIRE(handle.valid());
+
+    settle(scope.world, 30);
+
+    float pos[3] = {0, 0, 0};
+    float quat[4] = {0, 0, 0, 1};
+    REQUIRE(spine::dynamic_body_transform(scope.world, handle, pos, quat));
+    const float start_x = pos[0];
+
+    spine::dynamic_body_apply_impulse(scope.world, handle, 30.0f, 0.0f, 0.0f);  // kick +X
+    for (int i = 0; i < 60; ++i) spine::step_fixed(scope.world);
+
+    REQUIRE(spine::dynamic_body_transform(scope.world, handle, pos, quat));
+    REQUIRE(pos[0] > start_x + 0.3f);  // the impulse pushed it along +X
+
+    // Removing it succeeds once, then reports gone; an invalid handle is false.
+    REQUIRE(spine::remove_dynamic_body(scope.world, handle));
+    REQUIRE_FALSE(spine::remove_dynamic_body(scope.world, handle));
+    REQUIRE_FALSE(spine::remove_dynamic_body(scope.world, spine::DynamicBodyHandle{}));
+    REQUIRE_FALSE(spine::dynamic_body_transform(scope.world, handle, pos, quat));
+}

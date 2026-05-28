@@ -101,6 +101,50 @@ bool add_static_capsule(World* world, const StaticCapsuleDesc& desc);
 // handle is invalid or the body is not present (e.g. already removed).
 bool remove_static_body(World* world, StaticBodyHandle handle);
 
+// ─── Dynamic rigid bodies (ADR-019 class 2) ────────────────────────────────
+// Gravity-driven, stackable bodies that respond to impulses. Their solved
+// transform is read back each tick (dynamic_body_transform) and written into
+// the ECS. Opaque handle; same never-reused-id rule as StaticBodyHandle.
+struct DynamicBodyHandle {
+    std::uint64_t id = 0;
+    constexpr bool valid() const noexcept { return id != 0; }
+    constexpr explicit operator bool() const noexcept { return id != 0; }
+    friend constexpr bool operator==(DynamicBodyHandle,
+                                     DynamicBodyHandle) noexcept = default;
+};
+
+struct DynamicBoxDesc {
+    float center_m[3] = {0.0f, 0.0f, 0.0f};
+    float rotation_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float half_extents_m[3] = {0.5f, 0.5f, 0.5f};
+    float mass_kg = 8.0f;
+    float friction = 0.5f;
+    float restitution = 0.1f;
+};
+
+struct DynamicSphereDesc {
+    float center_m[3] = {0.0f, 0.0f, 0.0f};
+    float rotation_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float radius_m = 0.5f;
+    float mass_kg = 8.0f;
+    float friction = 0.5f;
+    float restitution = 0.1f;
+};
+
+DynamicBodyHandle add_dynamic_box(World* world, const DynamicBoxDesc& desc);
+DynamicBodyHandle add_dynamic_sphere(World* world, const DynamicSphereDesc& desc);
+bool remove_dynamic_body(World* world, DynamicBodyHandle handle);
+
+// Reads a dynamic body's solved world transform: center position (metres) and
+// rotation quaternion {x, y, z, w}. Returns false for an invalid handle.
+bool dynamic_body_transform(const World* world, DynamicBodyHandle handle,
+                            float out_pos[3], float out_quat[4]);
+
+// Applies an instantaneous impulse (kg·m/s) consumed by the next step_fixed —
+// used for shot knockback. No-op for an invalid handle.
+void dynamic_body_apply_impulse(World* world, DynamicBodyHandle handle,
+                                float ix, float iy, float iz);
+
 Character* create_capsule_character(World* world, const CapsuleDesc& desc = {});
 void       destroy_character(World* world, Character* character);
 

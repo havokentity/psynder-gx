@@ -187,3 +187,42 @@ TEST_CASE("character: removing a static body drops its collider (no ghost)",
     REQUIRE(t.foot_position_m[0] > 2.5f);  // walked clean through the old wall
     spine::destroy_world(pw);
 }
+
+TEST_CASE("character: dynamic bodies fall from the ECS and sync back; statics skip them",
+          "[physics][ecs][dynamic]") {
+    // A dynamic crate spawned in the ECS must (a) NOT be projected as a static
+    // collider, (b) be picked up as a Jolt dynamic body, and (c) have its solved
+    // transform written back into TransformWS so render/raycast see it move
+    // (ADR-019 class 2).
+    World w;
+    add_ground(w);
+    psynder::scene::DynamicPropDesc crate;
+    crate.position = {0.0f, 3.0f, 0.0f};
+    crate.half_extents = {0.5f, 0.5f, 0.5f};
+    crate.mass_kg = 8.0f;
+    const Entity crate_e = psynder::scene::spawn_dynamic_prop(w, crate);
+
+    spine::WorldDesc desc{};
+    desc.max_bodies = 64;
+    spine::World* pw = spine::create_world(desc);
+    REQUIRE(pw != nullptr);
+
+    const auto statics = psynder::physics::build_jolt_statics_from_ecs(pw, w);
+    REQUIRE(statics.size() == 1);  // ground only — the dynamic crate is skipped
+
+    const auto dynamics = psynder::physics::build_jolt_dynamics_from_ecs(pw, w);
+    REQUIRE(dynamics.size() == 1);
+    REQUIRE(dynamics[0].first == crate_e);
+
+    const float y_start = w.get<TransformWS>(crate_e)->mtw.m[13];
+    for (int i = 0; i < 360; ++i) {
+        spine::step_fixed(pw);
+        psynder::physics::sync_dynamics_to_ecs(pw, w, dynamics);
+    }
+    const float y_end = w.get<TransformWS>(crate_e)->mtw.m[13];
+
+    REQUIRE(y_end < y_start - 1.0f);  // fell (the sync wrote the drop into the ECS)
+    REQUIRE(y_end > 0.2f);            // settled on the ground (~0.5)
+    REQUIRE(y_end < 0.9f);
+    spine::destroy_world(pw);
+}
