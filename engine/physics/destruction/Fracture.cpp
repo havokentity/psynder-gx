@@ -160,7 +160,47 @@ void fracture(const FracturePattern& pattern, u64 seed, std::vector<Shard>& out)
     }
 }
 
-// TODO(ADR-021/#45): spawn shards as Jolt rigid bodies (ADR-019 class 2) via
-// character_spine; route through DestructionWorldState (#1).
+// ─────────────────────────────────────────────────────────────────────────────
+void place_shards(const std::vector<Shard>& local,
+                  const f32 center_m[3],
+                  const f32 rotation_quat[4],
+                  std::vector<PlacedShard>& out) {
+    out.clear();
+    out.reserve(local.size());
+
+    // Rodrigues quaternion-vector rotation: v' = v + 2*w*(qv x v) + 2*(qv x (qv x v)).
+    // Pure float arithmetic (no matrix, no library calls) so the result is
+    // bit-identical across standard libraries — required for lockstep replay.
+    const f32 qx = rotation_quat[0];
+    const f32 qy = rotation_quat[1];
+    const f32 qz = rotation_quat[2];
+    const f32 qw = rotation_quat[3];
+
+    for (const Shard& s : local) {
+        const f32 vx = s.centroid_m[0];
+        const f32 vy = s.centroid_m[1];
+        const f32 vz = s.centroid_m[2];
+
+        // t = 2 * (qv x v)
+        const f32 tx = 2.0f * (qy * vz - qz * vy);
+        const f32 ty = 2.0f * (qz * vx - qx * vz);
+        const f32 tz = 2.0f * (qx * vy - qy * vx);
+
+        // v' = v + qw * t + (qv x t)
+        const f32 rx = vx + qw * tx + (qy * tz - qz * ty);
+        const f32 ry = vy + qw * ty + (qz * tx - qx * tz);
+        const f32 rz = vz + qw * tz + (qx * ty - qy * tx);
+
+        PlacedShard p{};
+        p.center_m[0] = center_m[0] + rx;
+        p.center_m[1] = center_m[1] + ry;
+        p.center_m[2] = center_m[2] + rz;
+        p.half_extents_m[0] = s.half_extents_m[0];
+        p.half_extents_m[1] = s.half_extents_m[1];
+        p.half_extents_m[2] = s.half_extents_m[2];
+        p.mass_kg = s.mass_kg;
+        out.push_back(p);
+    }
+}
 
 } // namespace psynder::physics::destruction

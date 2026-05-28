@@ -140,9 +140,51 @@ inline std::vector<EcsStaticBody> build_jolt_statics_from_ecs(
 // dynamic body handle. The handle is read back each tick (sync_dynamics_to_ecs).
 using EcsDynamicBody = std::pair<psynder::Entity, character_spine::DynamicBodyHandle>;
 
+// Project one ECS dynamic collider into a Jolt dynamic rigid body (ADR-019
+// class 2). Box/Plane map to a dynamic box, Sphere to a dynamic sphere. Returns
+// an invalid handle for a non-positive mass. Shared by the play-start chunk
+// builder and the mid-session single-entity spawn (e.g. fracture shards).
+inline character_spine::DynamicBodyHandle add_jolt_dynamic_body(
+    character_spine::World* world, const scene::TransformWS& xf,
+    const scene::Collider& col, const scene::DynamicBody& dyn) {
+    if (!world || dyn.mass_kg <= 0.0f) return {};
+    const psynder::math::Quat q = rotation_from_transform(xf);
+    const f32* m = xf.mtw.m;
+    if (col.kind == scene::ShapeKind::Sphere) {
+        character_spine::DynamicSphereDesc d{};
+        d.center_m[0] = m[12];
+        d.center_m[1] = m[13];
+        d.center_m[2] = m[14];
+        d.rotation_quat[0] = q.x;
+        d.rotation_quat[1] = q.y;
+        d.rotation_quat[2] = q.z;
+        d.rotation_quat[3] = q.w;
+        d.radius_m = std::max(0.05f, col.half_extents.x);
+        d.mass_kg = dyn.mass_kg;
+        d.friction = dyn.friction;
+        d.restitution = dyn.restitution;
+        return character_spine::add_dynamic_sphere(world, d);
+    }
+    character_spine::DynamicBoxDesc d{};
+    d.center_m[0] = m[12];
+    d.center_m[1] = m[13];
+    d.center_m[2] = m[14];
+    d.rotation_quat[0] = q.x;
+    d.rotation_quat[1] = q.y;
+    d.rotation_quat[2] = q.z;
+    d.rotation_quat[3] = q.w;
+    d.half_extents_m[0] = std::max(0.05f, col.half_extents.x);
+    d.half_extents_m[1] = std::max(0.05f, col.half_extents.y);
+    d.half_extents_m[2] = std::max(0.05f, col.half_extents.z);
+    d.mass_kg = dyn.mass_kg;
+    d.friction = dyn.friction;
+    d.restitution = dyn.restitution;
+    return character_spine::add_dynamic_box(world, d);
+}
+
 // Spawn a Jolt dynamic rigid body for every ECS entity carrying a DynamicBody
-// (mass > 0) alongside TransformWS + Collider (ADR-019 class 2). Box/Plane map
-// to dynamic boxes, Sphere to a dynamic sphere. Returns the entity->handle map.
+// (mass > 0) alongside TransformWS + Collider (ADR-019 class 2). Returns the
+// entity->handle map.
 inline std::vector<EcsDynamicBody> build_jolt_dynamics_from_ecs(
     character_spine::World* world, scene::World& ecs) {
     std::vector<EcsDynamicBody> mapping;
@@ -151,45 +193,26 @@ inline std::vector<EcsDynamicBody> build_jolt_dynamics_from_ecs(
         [&](std::size_t n, const psynder::Entity* ents, scene::TransformWS* xf,
             scene::Collider* col, scene::DynamicBody* dyn) {
             for (std::size_t i = 0; i < n; ++i) {
-                if (dyn[i].mass_kg <= 0.0f) continue;
-                const psynder::math::Quat q = rotation_from_transform(xf[i]);
-                const f32* m = xf[i].mtw.m;
-                character_spine::DynamicBodyHandle handle{};
-                if (col[i].kind == scene::ShapeKind::Sphere) {
-                    character_spine::DynamicSphereDesc d{};
-                    d.center_m[0] = m[12];
-                    d.center_m[1] = m[13];
-                    d.center_m[2] = m[14];
-                    d.rotation_quat[0] = q.x;
-                    d.rotation_quat[1] = q.y;
-                    d.rotation_quat[2] = q.z;
-                    d.rotation_quat[3] = q.w;
-                    d.radius_m = std::max(0.05f, col[i].half_extents.x);
-                    d.mass_kg = dyn[i].mass_kg;
-                    d.friction = dyn[i].friction;
-                    d.restitution = dyn[i].restitution;
-                    handle = character_spine::add_dynamic_sphere(world, d);
-                } else {
-                    character_spine::DynamicBoxDesc d{};
-                    d.center_m[0] = m[12];
-                    d.center_m[1] = m[13];
-                    d.center_m[2] = m[14];
-                    d.rotation_quat[0] = q.x;
-                    d.rotation_quat[1] = q.y;
-                    d.rotation_quat[2] = q.z;
-                    d.rotation_quat[3] = q.w;
-                    d.half_extents_m[0] = std::max(0.05f, col[i].half_extents.x);
-                    d.half_extents_m[1] = std::max(0.05f, col[i].half_extents.y);
-                    d.half_extents_m[2] = std::max(0.05f, col[i].half_extents.z);
-                    d.mass_kg = dyn[i].mass_kg;
-                    d.friction = dyn[i].friction;
-                    d.restitution = dyn[i].restitution;
-                    handle = character_spine::add_dynamic_box(world, d);
-                }
+                const character_spine::DynamicBodyHandle handle =
+                    add_jolt_dynamic_body(world, xf[i], col[i], dyn[i]);
                 if (handle.valid()) mapping.push_back({ents[i], handle});
             }
         });
     return mapping;
+}
+
+// Project a SINGLE ECS dynamic entity into Jolt, for bodies created mid-session
+// (e.g. fracture shards) after build_jolt_dynamics_from_ecs already ran. Returns
+// {entity, handle}; the handle is invalid if the entity lacks the components or
+// has non-positive mass. Push the result onto the play-mode dynamic_body_map so
+// sync_dynamics_to_ecs keeps driving it.
+inline EcsDynamicBody spawn_jolt_dynamic_for_entity(
+    character_spine::World* world, scene::World& ecs, psynder::Entity e) {
+    const scene::TransformWS* xf = ecs.get<scene::TransformWS>(e);
+    const scene::Collider* col = ecs.get<scene::Collider>(e);
+    const scene::DynamicBody* dyn = ecs.get<scene::DynamicBody>(e);
+    if (!xf || !col || !dyn) return {e, {}};
+    return {e, add_jolt_dynamic_body(world, *xf, *col, *dyn)};
 }
 
 // Write each dynamic body's Jolt-solved transform back into its ECS TransformWS

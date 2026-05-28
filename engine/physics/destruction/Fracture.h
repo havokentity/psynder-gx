@@ -82,7 +82,28 @@ FracturePattern make_unit_box_pattern();
 // ─────────────────────────────────────────────────────────────────────────────
 void fracture(const FracturePattern& pattern, u64 seed, std::vector<Shard>& out);
 
-// TODO(ADR-021/#45): spawn shards as Jolt rigid bodies (ADR-019 class 2) via
-// character_spine; route through DestructionWorldState (#1).
+// ─────────────────────────────────────────────────────────────────────────────
+// PlacedShard — a shard positioned in world space (centroid + half-extents in
+// metres, mass in kg). The bridge that spawns Jolt rigid bodies / ECS props
+// consumes these; this struct deliberately stays free of math-lib types so the
+// destruction lane has no dependency on scene/physics-core.
+// ─────────────────────────────────────────────────────────────────────────────
+struct PlacedShard {
+    f32 center_m[3];        // world-space centroid (metres)
+    f32 half_extents_m[3];  // AABB half-size (metres)
+    f32 mass_kg;            // mass in kilograms (> 0)
+};
+static_assert(sizeof(PlacedShard) == 28, "PlacedShard must stay tightly packed POD");
+
+// Transform asset-local shards into world space given the source body's world
+// centre and rotation quaternion {x, y, z, w}. Each local centroid is rotated
+// by the quaternion (Rodrigues form, no matrix/library dependence) and offset
+// by the centre; half-extents and mass pass through unchanged. Pure and
+// deterministic — identical inputs yield bit-identical output on every target,
+// so a fractured break replays bit-exact in lockstep (ADR-021/#45).
+void place_shards(const std::vector<Shard>& local,
+                  const f32 center_m[3],
+                  const f32 rotation_quat[4],
+                  std::vector<PlacedShard>& out);
 
 } // namespace psynder::physics::destruction

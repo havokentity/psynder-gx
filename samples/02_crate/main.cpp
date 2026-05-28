@@ -23,6 +23,7 @@
 #include "platform/Platform.h"
 #include "physics/core/CharacterController.h"
 #include "physics/core/EcsCharacterBridge.h"
+#include "physics/destruction/FractureSpawn.h"
 #include "scene/GxComponents.h"
 #include "scene/Replay.h"
 #include "scene/SceneComponents.h"
@@ -248,6 +249,21 @@ struct PlayModeState {
     std::uint32_t static_collider_count = 0;
     std::string spawn_label;
 };
+
+// Fracture a shot static crate into a burst of Jolt dynamic shards (ADR-021/#45).
+// Delegates the deterministic spawn to the destruction lane; the seed is the
+// destroyed entity's raw id, so a replay (#38) reproduces the identical break.
+inline std::uint32_t fracture_static_crate(PlayModeState& play,
+                                           const psynder::scene::TransformWS& xf,
+                                           const psynder::scene::Collider& col,
+                                           const psynder::scene::RenderMaterial& mat,
+                                           const psynder::math::Vec3& shot_dir,
+                                           std::uint64_t seed) {
+    if (!play.sim_world || !play.phys_world) return 0;
+    return psynder::physics::destruction::spawn_fracture_shards(
+        play.phys_world, *play.sim_world, xf, col, mat, shot_dir, seed,
+        play.dynamic_body_map);
+}
 
 struct PrimitiveVertex {
     float pos[3];
@@ -1254,8 +1270,12 @@ bool start_play_mode(PlayModeState& play,
     // TransformWS is written from the solved capsule each tick — Jolt is the
     // solver, the ECS stays authoritative (ADR-019 / EcsCharacterBridge.h).
     character_spine::WorldDesc world_desc{};
+    // Headroom for fracture (ADR-021/#45): a shot static crate is replaced by a
+    // 2x2x2 = 8-shard burst of dynamic bodies. Budget for every static collider
+    // plus its potential shards so a play session can fracture freely.
     world_desc.max_bodies = static_cast<std::uint32_t>(
-        std::max<std::size_t>(256, static_cast<std::size_t>(static_collider_count) + 8));
+        std::max<std::size_t>(512,
+                              static_cast<std::size_t>(static_collider_count) * 9 + 64));
     character_spine::World* phys_world = character_spine::create_world(world_desc);
     if (!phys_world) {
         if (out) out->PrintLine("play: failed to create Jolt world");
@@ -4775,6 +4795,21 @@ int main(int argc, char** argv) {
                     : 0.0f;
                 if (!knocked && col && col->kind != psynder::scene::ShapeKind::Plane &&
                     max_he < 3.0f) {
+                    // Snapshot the crate's transform + look before destroying it so
+                    // we can fracture it into dynamic shards (ADR-021/#45).
+                    const auto* hit_xf =
+                        play_mode.sim_world->get<psynder::scene::TransformWS>(hit.entity);
+                    const auto* hit_mat =
+                        play_mode.sim_world->get<psynder::scene::RenderMaterial>(hit.entity);
+                    if (hit_xf) {
+                        const psynder::scene::RenderMaterial mat =
+                            hit_mat ? *hit_mat
+                                    : psynder::scene::RenderMaterial{
+                                          {0.76f, 0.82f, 0.88f}, 0.65f, 0.0f,
+                                          {0.0f, 0.0f, 0.0f}, 0.0f};
+                        fracture_static_crate(play_mode, *hit_xf, *col, mat, fire_dir,
+                                              hit.entity.raw);
+                    }
                     play_mode.sim_world->destroy(hit.entity);
                     // Drop the matching Jolt static body too, or its collider
                     // would linger as an invisible wall (the collision ghost).
