@@ -9,7 +9,10 @@
 
 using psynder::Entity;
 using psynder::math::Vec3;
+using psynder::scene::Collider;
 using psynder::scene::CommandBuffer;
+using psynder::scene::ShapeKind;
+using psynder::scene::TransformWS;
 using psynder::scene::World;
 namespace combat = psynder::combat;
 
@@ -17,17 +20,20 @@ namespace {
 
 Entity spawn_target(World& w, Vec3 pos, float hp) {
     const Entity e = w.create();
-    w.add(e, combat::WorldPos{pos});
-    w.add(e, combat::BoxCollider{{0.5f, 0.5f, 0.5f}});
+    TransformWS xf{};
+    xf.mtw = psynder::math::translate(pos);
+    xf.prev_mtw = xf.mtw;
+    w.add(e, xf);
+    w.add(e, Collider{ShapeKind::Box, {0.5f, 0.5f, 0.5f}});
     w.add(e, combat::Health{hp, hp});
     return e;
 }
 
 std::size_t count_pickups(World& w, Vec3& out_first_pos) {
     std::size_t n = 0;
-    w.for_each_chunk<combat::Pickup, combat::WorldPos>(
-        [&](std::size_t count, combat::Pickup*, combat::WorldPos* pos) {
-            if (n == 0 && count > 0) out_first_pos = pos[0].p;
+    w.for_each_chunk<combat::Pickup, TransformWS>(
+        [&](std::size_t count, combat::Pickup*, TransformWS* xf) {
+            if (n == 0 && count > 0) out_first_pos = combat::world_position(xf[0]);
             n += count;
         });
     return n;

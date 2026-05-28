@@ -17,6 +17,7 @@
 #pragma once
 
 #include "scene/CommandBuffer.h"
+#include "scene/SceneComponents.h"  // canonical Collider / ShapeKind + TransformWS
 #include "scene/World.h"
 
 #include "math/Bounds.h"
@@ -32,10 +33,25 @@ namespace psynder::combat {
 using psynder::math::Vec3;
 
 // ─── Components (POD, trivially copyable — DOTS contract) ──────────────────
-PSYNDER_COMPONENT(WorldPos)    { Vec3 p; };             ///< world position, metres
-PSYNDER_COMPONENT(BoxCollider) { Vec3 half_extents; };  ///< AABB half-size, metres
+// Position + collider are the CANONICAL scene components (scene::TransformWS +
+// scene::Collider), the same ones the renderer and the character controller use
+// — so a hitscan strikes exactly the props you see and walk into. Health/Pickup
+// are combat-specific.
 PSYNDER_COMPONENT(Health)      { f32 hp; f32 max_hp; };
 PSYNDER_COMPONENT(Pickup)      { u32 kind; };           ///< dropped on death
+
+// World position from a TransformWS (its translation column).
+inline Vec3 world_position(const psynder::scene::TransformWS& xf) noexcept {
+    return {xf.mtw.m[12], xf.mtw.m[13], xf.mtw.m[14]};
+}
+
+// AABB half-extents of a collider (sphere uses its radius on every axis).
+inline Vec3 collider_half_extents(const psynder::scene::Collider& c) noexcept {
+    if (c.kind == psynder::scene::ShapeKind::Sphere) {
+        return {c.half_extents.x, c.half_extents.x, c.half_extents.x};
+    }
+    return c.half_extents;
+}
 
 // ─── Hitscan ───────────────────────────────────────────────────────────────
 struct Ray {
@@ -75,18 +91,20 @@ inline bool ray_aabb(const Ray& ray, const psynder::math::Aabb& box, f32 max_t, 
     return true;
 }
 
-// Fire a hitscan ray and return the nearest entity (with WorldPos + BoxCollider)
+// Fire a hitscan ray and return the nearest entity (with TransformWS + Collider)
 // it strikes within max_range. Brute-force over the matching chunks — fully
 // cache-coherent; swap in the spatial index (engine/scene/Spatial.h) once entity
-// counts make a broadphase worthwhile.
+// counts make a broadphase worthwhile. Colliders are tested as world AABBs
+// (rotation-aware OBB tests are a later refinement).
 inline Hit raycast_nearest(psynder::scene::World& world, const Ray& ray, f32 max_range) {
     Hit best{};
     best.t = max_range;
-    world.for_each_chunk_with_entities<WorldPos, BoxCollider>(
-        [&](usize n, const psynder::Entity* ents, WorldPos* pos, BoxCollider* col) {
+    world.for_each_chunk_with_entities<psynder::scene::TransformWS, psynder::scene::Collider>(
+        [&](usize n, const psynder::Entity* ents,
+            psynder::scene::TransformWS* xf, psynder::scene::Collider* col) {
             for (usize i = 0; i < n; ++i) {
-                const psynder::math::Aabb box =
-                    psynder::math::aabb_from_center_extents(pos[i].p, col[i].half_extents);
+                const psynder::math::Aabb box = psynder::math::aabb_from_center_extents(
+                    world_position(xf[i]), collider_half_extents(col[i]));
                 f32 t = 0.0f;
                 if (ray_aabb(ray, box, max_range, t) && t < best.t) {
                     best.hit = true;
@@ -112,13 +130,16 @@ inline void apply_damage(psynder::scene::World& world, const Hit& hit, f32 damag
 inline void reap_dead(psynder::scene::World& world,
                       psynder::scene::CommandBuffer& cb,
                       u32 pickup_kind = 1u) {
-    world.for_each_chunk_with_entities<Health, WorldPos>(
-        [&](usize n, const psynder::Entity* ents, Health* h, WorldPos* pos) {
+    world.for_each_chunk_with_entities<Health, psynder::scene::TransformWS>(
+        [&](usize n, const psynder::Entity* ents, Health* h, psynder::scene::TransformWS* xf) {
             for (usize i = 0; i < n; ++i) {
                 if (h[i].hp <= 0.0f) {
                     cb.destroy(ents[i]);
                     const psynder::Entity drop = cb.create();
-                    cb.add(drop, WorldPos{pos[i].p});
+                    psynder::scene::TransformWS dxf{};
+                    dxf.mtw = psynder::math::translate(world_position(xf[i]));
+                    dxf.prev_mtw = dxf.mtw;
+                    cb.add(drop, dxf);
                     cb.add(drop, Pickup{pickup_kind});
                 }
             }
