@@ -2,6 +2,10 @@
 
 When multiple agents work on Psynder-GX in parallel (the standard mode of operation — see [PLAN.md](PLAN.md) and the 25-lane carve-up), strict ownership prevents merge hell. This file is the load-bearing reference.
 
+## Base branch & lane flow (current — read first)
+
+**`nextgen/new-release` is the integration trunk.** Cut every lane branch **from `nextgen/new-release`** (not from `main`), and **merge it back into `nextgen/new-release`** when the lane's work is done and green. `nextgen/new-release` was cut from `codex/miniwave-dots-crate` — the de-facto main carrying the scene-on-ECS + Jolt hybrid-physics + roadmap work; `origin/main` is stale behind it. When the prototype is good enough, `nextgen/new-release` is promoted to `main` via a **single PR**. Lanes do **not** target `main` directly, and do not open PRs against `main`. The `Branch` column in the lane table below names each lane's branch; all of them base off `nextgen/new-release`.
+
 ## File ownership per lane
 
 Every parallel agent owns ONE directory plus its subdirectory `CMakeLists.txt`. **The agent never touches files outside its owned set.** Cross-cutting edits (top-level `CMakeLists.txt`, `CMakePresets.json`, `vcpkg.json`, root `cmake/*.cmake`, `.github/`, `.clang-*`, `LICENSE-*`, `README.md`, `DESIGN-PSYNDER-GX.md`, `AGENTS.md`, `PLAN.md`) are reserved for the orchestrator and are not in any lane.
@@ -89,7 +93,7 @@ You may freely edit internal headers (anything `_internal.h`, `Impl/*.h`, or `.c
 
 ## Integration branch
 
-The orchestrator maintains `integration/wave-N` as a periodically-rebased branch carrying every in-flight lane PR, for live user testing. Lane PRs target `main`; the orchestrator merges your branch into the integration branch as you push. You don't need to interact with it.
+`nextgen/new-release` is the integration branch for the current prototype push (see "Base branch & lane flow" at the top). Lane branches are cut from it and **merged back into it** as each agent finishes; the orchestrator promotes it to `main` via one PR when the prototype is ready. The older `integration/wave-N` branches are historical.
 
 ## Mac vs Win/Linux validation
 
