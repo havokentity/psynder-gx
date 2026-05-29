@@ -37,7 +37,8 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 ### G — Gameplay slice (FPS)
 - [ ] Weapons: hitscan + projectile, fire rate, spread; damage application via
       lag-comp rewind; tests.
-- [ ] Health/armor/damage/death/respawn components + systems (deterministic).
+- [x] Health/armor/damage/death/respawn components + systems (deterministic).
+      **DONE (iter 4) — new `engine/gameplay` lane.**
 - [ ] Rounds/scoring/spawn points; pickups (health/ammo/weapon).
 - [ ] FPS controller polish (air control, crouch/jump tuning) on the Jolt capsule.
 
@@ -125,3 +126,15 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   default). Note: Input/snapshot use POD memcpy — endianness is a cross-platform
   follow-up (consistent with the existing codec). Next: **N — client/server split
   in the player path.**
+- (iter 4) **FPS gameplay foundation: health/armor/damage/death/respawn** — new
+  `engine/gameplay` lane (`psynder_gameplay`, determinism FP flags; auto-covered
+  by perf_guardrails). POD components Health/Armor/Dead/Respawnable; deterministic
+  `apply_damage` (Quake armor ratio 2/3, capped by points; lethal -> Dead tag with
+  respawn delay) + `update_respawns` (timers tick in place, respawns applied in
+  ascending entity-id order, reused scratch -> no per-tick alloc; restores health
+  + moves to spawn). Tests: armor-vs-health split, capping, death tagging,
+  timed respawn + move, and cross-world determinism. 595/595 green.
+  PIVOT (per Charter §4): deferred the "client/server split in the player path"
+  (editor-gated, can't verify headlessly, and better done once gameplay exists to
+  replicate) in favour of building the gameplay the netcode will carry. Next:
+  **G — weapons (hitscan + projectile) applying damage via the lag-comp rewind.**
