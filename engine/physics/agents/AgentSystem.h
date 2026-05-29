@@ -53,6 +53,13 @@ struct AgentTuning {
     f32 seek_weight         = 1.0f;   ///< weight on the seek force
     f32 static_skin_m       = 0.05f;  ///< extra clearance kept from static colliders
     u32 job_grain           = 64u;    ///< parallel_for chunk size (agents per job)
+    // Ground crowd (navmesh-style) mode: constrain agents to the ground plane —
+    // steer in XZ only and clamp the centre to ground_y + radius. Off by default
+    // so the open-field golden test keeps its full-3D behaviour.
+    bool planar             = false;
+    f32  ground_y           = 0.0f;   ///< ground height for planar mode (metres)
+    // Per-agent static colliders considered for the hard non-penetration resolve.
+    u32  max_static_contacts = 8u;
 };
 
 // The immovable colliders agents push out of, as parallel entity + AABB arrays
@@ -84,6 +91,11 @@ struct AgentScratch {
     std::vector<math::Aabb> agent_aabbs;     // id-ordered agent AABBs
     std::vector<Entity>     agent_entities;  // id-ordered agent ids
     std::vector<Entity>     qhit;            // reused per-query neighbour buffer
+    // Per-agent nearby static AABB indices (size n * max_static_contacts;
+    // ~0u = empty), gathered serially in the read phase and consumed by the
+    // parallel write-phase hard non-penetration resolve (no index query in the
+    // parallel phase — Spatial.h queries are single-threaded).
+    std::vector<u32>        near_static;
     scene::SpatialIndex     agent_index;     // broadphase over the agents
     scene::SpatialIndex     static_index;    // broadphase over StaticColliders
 

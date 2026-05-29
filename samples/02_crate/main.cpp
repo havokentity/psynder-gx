@@ -298,6 +298,12 @@ inline void gather_play_static_colliders(PlayModeState& play) {
             for (std::size_t i = 0; i < n; ++i) {
                 if (play.sim_world->get<s::DynamicBody>(ents[i]) != nullptr) continue;
                 if (play.sim_world->get<s::Agent>(ents[i]) != nullptr) continue;
+                // Skip the floor: the ground plane / oversized ground slab is not
+                // a horizontal obstacle — planar grounding keeps agents on it, and
+                // including it would fight the ground clamp.
+                if (col[i].kind == s::ShapeKind::Plane) continue;
+                if (col[i].half_extents.x > 30.0f || col[i].half_extents.z > 30.0f)
+                    continue;
                 const float* m = xf[i].mtw.m;
                 float cx = m[12];
                 float cy = m[13];
@@ -383,8 +389,13 @@ inline void drive_play_crowd(PlayModeState& play, const psynder::math::Vec3& goa
     for (const psynder::Entity e : play.crowd) {
         if (auto* tgt = play.sim_world->get<s::AgentTarget>(e)) tgt->goal = goal;
     }
+    // Ground crowd: planar steering (XZ only) + ground clamp so agents stay on the
+    // floor, plus the hard static non-penetration so they flow around walls/crates.
+    psynder::physics::agents::AgentTuning tune{};
+    tune.planar = true;
+    tune.ground_y = 0.0f;
     psynder::physics::agents::update_agents(*play.sim_world, play_static_view(play),
-                                            play.agent_scratch, dt);
+                                            play.agent_scratch, dt, tune);
 }
 
 struct PrimitiveVertex {

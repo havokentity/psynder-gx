@@ -16,6 +16,7 @@
 // lives in agents_determinism.cpp).
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <cmath>
 #include <vector>
@@ -101,11 +102,63 @@ TEST_CASE("crowd agents do not end up inside static boxes", "[agents]") {
         for (int i = 0; i < 16; ++i) REQUIRE(std::isfinite(xf.mtw.m[i]));
     }
 
-    // (a) no agent centre inside a static box (keep at least ~half a radius of
-    // clearance — push-out is a soft force, not a hard constraint).
+    // (a) no agent centre inside a static box. Static avoidance is a HARD
+    // position-level non-penetration resolve, so the centre stays clear of every
+    // box (require at least half a radius of margin, comfortably met).
     const f32 clearance = 0.5f * kRadius;
     for (Entity e : agents) {
         const math::Vec3 p = pos_of(*w.get<scene::TransformWS>(e));
+        for (const math::Aabb& b : static_aabbs) {
+            REQUIRE_FALSE(inside_grown(p, b, clearance));
+        }
+    }
+}
+
+TEST_CASE("crowd planar mode keeps agents grounded and out of walls", "[agents]") {
+    Pool pool;
+    scene::World w;
+
+    // A tall wall (y up to 4 m) between agents and their goal — in planar mode
+    // agents must stay on the ground plane AND flow around it horizontally,
+    // never climbing over or tunnelling through.
+    std::vector<Entity>     static_ents;
+    std::vector<math::Aabb> static_aabbs;
+    for (int i = -1; i <= 1; ++i) {
+        const f32 cx = static_cast<f32>(i) * 2.0f;
+        static_ents.push_back(Entity{static_cast<u64>(2000 + i + 1)});
+        static_aabbs.push_back(math::Aabb{{cx - 1.0f, 0.0f, -1.0f},
+                                          {cx + 1.0f, 4.0f, 1.0f}});
+    }
+    const StaticColliders statics{
+        std::span<const Entity>(static_ents.data(), static_ents.size()),
+        std::span<const math::Aabb>(static_aabbs.data(), static_aabbs.size())};
+
+    constexpr f32 kGround = 0.0f;
+    const math::Vec3 goal{0.0f, kRadius, 8.0f};
+    std::vector<Entity> agents;
+    for (int i = 0; i < 6; ++i) {
+        scene::Agent a{};
+        a.max_speed_mps = 3.0f;
+        a.max_force = 9.0f;
+        a.radius_m = kRadius;
+        a.arrive_radius_m = 1.5f;
+        const f32 x = (static_cast<f32>(i) - 2.5f) * 1.0f;
+        agents.push_back(scene::spawn_agent(w, a, {x, kRadius, -8.0f}, goal));
+    }
+
+    AgentTuning tune{};
+    tune.planar = true;
+    tune.ground_y = kGround;
+
+    AgentScratch scratch;
+    for (u32 t = 0; t < kTicks; ++t) update_agents(w, statics, scratch, kDt, tune);
+
+    const f32 clearance = 0.5f * kRadius;
+    for (Entity e : agents) {
+        const math::Vec3 p = pos_of(*w.get<scene::TransformWS>(e));
+        // Grounded: centre pinned to ground_y + radius (no floating / sinking).
+        REQUIRE(p.y == Catch::Approx(kGround + kRadius).margin(1e-4));
+        // Still out of every (tall) wall box.
         for (const math::Aabb& b : static_aabbs) {
             REQUIRE_FALSE(inside_grown(p, b, clearance));
         }

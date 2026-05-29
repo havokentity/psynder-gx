@@ -97,6 +97,13 @@ void update_agents(scene::World& ecs, const StaticColliders& statics,
         scratch.agent_aabbs.resize(n);
         scratch.agent_entities.resize(n);
     }
+    const u32 kContacts = tuning.max_static_contacts;
+    if (kContacts > 0) {
+        if (scratch.near_static.size() < n * kContacts)
+            scratch.near_static.resize(n * kContacts);
+        std::fill(scratch.near_static.begin(),
+                  scratch.near_static.begin() + static_cast<isize>(n * kContacts), ~0u);
+    }
 
     // ── Stable id-sorted permutation: iterate by ENTITY id, never gather/storage
     //    order (ECS swap-remove makes storage order history-dependent). ─────────
@@ -177,38 +184,32 @@ void update_agents(scene::World& ecs, const StaticColliders& statics,
         }
         a = math::mul(a, tuning.separation_weight);
 
-        // Push-out from static colliders overlapping the agent's reach.
-        if (have_statics) {
-            const f32 reach = radius + tuning.static_skin_m;
-            scratch.static_index.query_sphere(p, reach + tuning.perception_radius_m, qhit);
+        accel[slot] = a;  // agent-agent separation only
+
+        // Record nearby static colliders for the write-phase HARD non-penetration
+        // resolve. A soft push-out force can't beat a strong seek (agents pressed
+        // through walls), so statics are resolved at the position level instead.
+        // The index query mutates per-query scratch (single-threaded by contract),
+        // so we gather the candidates here, serially, and resolve in parallel.
+        if (have_statics && kContacts > 0) {
+            const f32 record_r =
+                radius + tuning.static_skin_m + tuning.perception_radius_m;
+            scratch.static_index.query_sphere(p, record_r, qhit);
             std::sort(qhit.begin(), qhit.end(),
                       [](Entity x, Entity y) { return x.raw < y.raw; });
+            u32 stored = 0;
             for (Entity he : qhit) {
+                if (stored >= kContacts) break;
                 const Entity* se = statics.entities.data();
                 const usize sn = statics.entities.size();
                 usize si = sn;
                 for (usize j = 0; j < sn; ++j)
                     if (se[j].raw == he.raw) { si = j; break; }
                 if (si == sn) continue;
-                const math::Aabb& box = statics.aabbs[si];
-                const Vec3 cp{std::clamp(p.x, box.min.x, box.max.x),
-                              std::clamp(p.y, box.min.y, box.max.y),
-                              std::clamp(p.z, box.min.z, box.max.z)};
-                const Vec3 d = math::sub(p, cp);
-                const f32 dist = vec_len(d);
-                if (dist < reach) {
-                    if (dist > 1e-6f) {
-                        const f32 pen = (reach - dist);
-                        a = math::add(a, math::mul(math::mul(d, 1.0f / dist),
-                                                   pen * tuning.separation_weight));
-                    } else {
-                        a = math::add(a, Vec3{0.0f, reach * tuning.separation_weight, 0.0f});
-                    }
-                }
+                scratch.near_static[slot * kContacts + stored] = static_cast<u32>(si);
+                ++stored;
             }
         }
-
-        accel[slot] = a;
     }
 
     // ── COMPUTE + WRITE PHASE (parallel, order-independent) ───────────────────
@@ -234,14 +235,62 @@ void update_agents(scene::World& ecs, const StaticColliders& statics,
                 Vec3 seek = math::mul(math::sub(desired, vel0), tuning.seek_weight);
 
                 Vec3 acc = math::add(seek, accel[slot]);
+                if (tuning.planar) acc.y = 0.0f;  // ground crowd: no vertical steering
                 acc = clamp_length(acc, a.max_force);
 
                 // Semi-implicit Euler: v += a*dt (clamped), p += v*dt.
                 Vec3 v = clamp_length(math::add(vel0, math::mul(acc, dt_seconds)),
                                       a.max_speed_mps);
+                if (tuning.planar) v.y = 0.0f;
                 if (!is_finite(v)) v = Vec3{0.0f, 0.0f, 0.0f};
                 Vec3 np = math::add(p, math::mul(v, dt_seconds));
+                if (tuning.planar) np.y = tuning.ground_y + a.radius_m;
                 if (!is_finite(np)) np = p;
+
+                // HARD non-penetration vs the recorded static colliders: push the
+                // agent centre out of each box expanded by (radius + skin), along
+                // the axis of least penetration, and kill the velocity into that
+                // face. Guarantees the agent never ends a tick inside / through a
+                // wall regardless of how hard seek pulled it in. Deterministic:
+                // boxes are processed in the stored (id-sorted) order; pure math,
+                // no shared state, so it is chunk/thread-order independent.
+                if (have_statics && kContacts > 0) {
+                    const f32 reach = a.radius_m + tuning.static_skin_m;
+                    for (u32 c = 0; c < kContacts; ++c) {
+                        const u32 si = scratch.near_static[slot * kContacts + c];
+                        if (si == ~0u) break;
+                        const math::Aabb& box = statics.aabbs[si];
+                        const f32 lo[3] = {box.min.x - reach, box.min.y - reach,
+                                           box.min.z - reach};
+                        const f32 hi[3] = {box.max.x + reach, box.max.y + reach,
+                                           box.max.z + reach};
+                        f32 cc[3] = {np.x, np.y, np.z};
+                        const bool inside = cc[0] > lo[0] && cc[0] < hi[0] &&
+                                            cc[1] > lo[1] && cc[1] < hi[1] &&
+                                            cc[2] > lo[2] && cc[2] < hi[2];
+                        if (!inside) continue;
+                        int best = -1;
+                        f32 best_pen = 1e30f, best_sign = 1.0f;
+                        for (int ax = 0; ax < 3; ++ax) {
+                            if (tuning.planar && ax == 1) continue;  // ground clamp owns Y
+                            const f32 pen_lo = cc[ax] - lo[ax];
+                            const f32 pen_hi = hi[ax] - cc[ax];
+                            const f32 pen = pen_lo < pen_hi ? pen_lo : pen_hi;
+                            if (pen < best_pen) {
+                                best_pen = pen;
+                                best = ax;
+                                best_sign = pen_lo < pen_hi ? -1.0f : 1.0f;
+                            }
+                        }
+                        if (best < 0) continue;
+                        cc[best] += best_sign * best_pen;
+                        np = Vec3{cc[0], cc[1], cc[2]};
+                        f32 vv[3] = {v.x, v.y, v.z};
+                        if (vv[best] * best_sign < 0.0f) vv[best] = 0.0f;  // stop into-wall
+                        v = Vec3{vv[0], vv[1], vv[2]};
+                    }
+                    if (tuning.planar) np.y = tuning.ground_y + a.radius_m;
+                }
 
                 scratch.vel_ptr[slot]->velocity = v;
                 scene::TransformWS& t = *scratch.xf_ptr[slot];
