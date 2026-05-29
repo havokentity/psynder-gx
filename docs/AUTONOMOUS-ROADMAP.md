@@ -26,8 +26,8 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 ### N — Netcode (finish the loop into real play)
 - [x] Wire lag-comp hitbox rewind into `ReplicationSession` (rewind to client
       view-time for server-side hitreg); golden test. **DONE (iter 1).**
-- [ ] Per-peer interest management in the session (use `InterestSet` broadphase);
-      bandwidth + correctness tests.
+- [x] Per-peer interest management in the session (use `InterestSet` broadphase);
+      bandwidth + correctness tests. **DONE (iter 2).**
 - [ ] Over-the-wire integration: drive the session through `Loopback`/`HostImpl`
       transport (Input + snapshot serialization), an end-to-end loopback test.
 - [ ] Client/server split in the player path (server ticks authoritative; client
@@ -96,3 +96,17 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   for the cross-platform determinism pass (P). Next: **N — per-peer interest
   management in the session.** CI verification of this push happens at the start
   of iter 2.
+- (iter 2) **Per-peer area-of-interest in `ReplicationSession`.** Verified iter-1
+  CI green first. Added an `aoi_radius_m` (default infinite). Finite radius
+  engages the `InterestSet` broadphase (rebuilt from the authoritative world each
+  tick, queried per peer around its own entity); each client then receives a full
+  snapshot of only the entities in its interest sphere (own always included).
+  Default (all-visible) keeps the existing shared-delta compression untouched, so
+  the keystone convergence/lag-comp/determinism tests are unchanged. Tests: a
+  distant peer is culled at a 5 m radius (visible_count==1) while the server keeps
+  the full world; infinite radius keeps all visible. 588/588 green. Decision: AoI
+  snapshots are full-per-peer (membership exact as entities enter/leave); the
+  delta codec (apply_delta overlays, no removals) is unchanged — inter-frame AoI
+  delta WITH removals is a tracked follow-up (would need a removed-ids section in
+  the wire format + the size-pinned snapshot tests updated). Next: **N —
+  over-the-wire transport integration (Loopback/HostImpl).**

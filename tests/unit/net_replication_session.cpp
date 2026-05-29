@@ -161,3 +161,33 @@ TEST_CASE("net: lag-compensated hitreg hits where the shooter saw the target",
                 std::span<const EntityState>(sess.authoritative()),
                 /*exclude=*/1u, o, d, 0.5f, 1000.0f) == 0u);
 }
+
+TEST_CASE("net: per-peer AoI culls entities outside the interest radius",
+          "[net][determinism]") {
+    const TickConfig cfg = tick_config_128();
+    // 5 m interest radius; client 1 runs far past it while client 0 sits still.
+    ReplicationSession sess(cfg, /*clients=*/2, /*latency=*/0, /*aoi_radius_m=*/5.0f);
+    for (u32 t = 0; t < 60; ++t) {
+        std::array<Input, 2> ins{};
+        ins[1].move[0] = 40.0f;  // ~18.75 m out after 60 ticks at 128 Hz
+        sess.advance(std::span<const Input>(ins.data(), 2));
+    }
+    // Each peer now sees only itself — the other is outside the 5 m sphere.
+    REQUIRE(sess.visible_count(0) == 1u);
+    REQUIRE(sess.visible_count(1) == 1u);
+    // The server still owns the full authoritative world regardless of AoI.
+    REQUIRE(sess.authoritative().size() == 2u);
+    REQUIRE(sess.authoritative()[1].pos[0] > 5.0f);
+}
+
+TEST_CASE("net: infinite AoI keeps every entity visible to every peer", "[net]") {
+    const TickConfig cfg = tick_config_128();
+    ReplicationSession sess(cfg, 2, 0);  // default radius => no culling
+    for (u32 t = 0; t < 60; ++t) {
+        std::array<Input, 2> ins{};
+        ins[1].move[0] = 40.0f;
+        sess.advance(std::span<const Input>(ins.data(), 2));
+    }
+    REQUIRE(sess.visible_count(0) == 2u);
+    REQUIRE(sess.visible_count(1) == 2u);
+}

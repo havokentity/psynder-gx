@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "net/InterestManagement.h"
 #include "net/Prediction.h"
 #include "net/SnapshotReplication.h"
 #include "net/TickConfig.h"
@@ -63,8 +64,17 @@ struct HitEvent {
 class ReplicationSession {
 public:
     // `client_count` entities (one per client); each snapshot/input crosses the
-    // channel after `latency_ticks` ticks each way (>= 0).
-    ReplicationSession(const TickConfig& cfg, u32 client_count, u32 latency_ticks);
+    // channel after `latency_ticks` ticks each way (>= 0). `aoi_radius_m` is the
+    // per-peer area-of-interest radius (metres): a client only receives entities
+    // within that sphere of its own entity. The default is effectively infinite
+    // (all entities visible) — the existing shared-delta path. A finite radius
+    // engages per-peer AoI culling (each peer gets a full filtered snapshot).
+    ReplicationSession(const TickConfig& cfg, u32 client_count, u32 latency_ticks,
+                       f32 aoi_radius_m = 1.0e9f);
+
+    // Entities the given client received in its last snapshot (its AoI set size;
+    // == client_count when AoI is infinite).
+    usize visible_count(u32 client) const noexcept { return clients_[client].last_visible; }
 
     // Advance one tick. `inputs` is one Input per client for this tick (its
     // .tick field is stamped with the current tick). Drives: client push +
@@ -89,12 +99,15 @@ public:
     usize last_delta_bytes() const noexcept { return last_delta_bytes_; }
 
 private:
+    static constexpr f32 kAllVisibleRadius = 1.0e8f;  // >= this => no AoI culling
+
     struct ClientState {
         InputRing<256>           ring;
         EntityState              predicted{};
         std::vector<EntityState> baseline;  // last full snapshot applied (delta base)
         u32                      last_applied_server_tick = 0;
         bool                     has_baseline = false;
+        usize                    last_visible = 0;  // entities in its last snapshot
     };
     // Lag-compensated hit registration for a fire input applied at `server_tick`
     // from `client`: rewind to the shooter's view-tick and ray-test there.
@@ -110,11 +123,13 @@ private:
         u32              client = 0;
         u32              server_tick = 0;
         u32              acked_input_tick = 0;
+        bool             full = false;  // true => decode against an empty baseline
         std::vector<u8>  delta;
     };
 
     f32 dt_;
     u32 latency_;
+    f32 aoi_radius_;
     u32 tick_ = 0;
 
     std::vector<EntityState> server_world_;        // authoritative
@@ -134,6 +149,14 @@ private:
     // the client saw the target — server-authoritative, deterministic.
     std::vector<std::pair<u32, std::vector<EntityState>>> history_;
     std::vector<HitEvent> hit_events_;
+
+    // Per-peer area-of-interest (engaged when aoi_radius_ < kAllVisibleRadius):
+    // an InterestSet broadphase rebuilt from the authoritative world each tick,
+    // queried per peer around its own entity. Scratch reused (no per-tick alloc).
+    InterestSet              interest_;
+    std::vector<EntityPos>   interest_pts_;
+    std::vector<u32>         aoi_ids_;
+    std::vector<EntityState> filtered_;
 };
 
 }  // namespace psynder::net

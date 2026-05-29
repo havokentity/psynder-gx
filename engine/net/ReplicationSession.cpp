@@ -44,9 +44,10 @@ u32 raycast_nearest_entity(std::span<const EntityState> world, u32 exclude_id,
 }
 
 ReplicationSession::ReplicationSession(const TickConfig& cfg, u32 client_count,
-                                       u32 latency_ticks)
+                                       u32 latency_ticks, f32 aoi_radius_m)
     : dt_(static_cast<f32>(cfg.frame_sec)),
       latency_(latency_ticks),
+      aoi_radius_(aoi_radius_m),
       server_world_(client_count),
       server_last_input_(client_count, 0u),
       clients_(client_count),
@@ -98,8 +99,8 @@ void ReplicationSession::advance(std::span<const Input> inputs) {
         const usize window = static_cast<usize>(2u * latency_) + 8u;
         while (history_.size() > window) history_.erase(history_.begin());
     }
-    {
-        // Delta-encode the authoritative snapshot against the previously-sent one
+    if (aoi_radius_ >= kAllVisibleRadius) {
+        // All-visible path: one shared delta vs the previously-sent full world
         // (full snapshot on the first tick). The in-order lossless channel keeps
         // every client's applied baseline equal to this `server_prev_`.
         std::vector<u8> delta;
@@ -109,10 +110,49 @@ void ReplicationSession::advance(std::span<const Input> inputs) {
         encode_delta(base, std::span<const EntityState>(server_world_), delta);
         last_delta_bytes_ = delta.size();
         for (u32 c = 0; c < cc; ++c) {
-            s2c_.push_back(S2C{t + latency_, c, t, server_last_input_[c], delta});
+            s2c_.push_back(S2C{t + latency_, c, t, server_last_input_[c],
+                               /*full=*/false, delta});
+            clients_[c].last_visible = server_world_.size();
         }
         server_prev_ = server_world_;
         server_has_prev_ = true;
+    } else {
+        // Per-peer area-of-interest: rebuild the InterestSet broadphase from the
+        // authoritative world, then for each peer send a FULL snapshot of just
+        // the entities within aoi_radius_ of its own entity (own always included
+        // since dist 0 <= radius). A full per-peer snapshot keeps membership
+        // exact as entities enter/leave the sphere (inter-frame AoI delta with
+        // removals is a follow-up). Deterministic: aoi_query sorts ids and the
+        // filtered set keeps stable world order.
+        interest_pts_.clear();
+        for (const EntityState& e : server_world_) {
+            interest_pts_.push_back(
+                EntityPos{e.id, {e.pos[0], e.pos[1], e.pos[2]}});
+        }
+        interest_.rebuild(std::span<const EntityPos>(interest_pts_));
+        last_delta_bytes_ = 0;
+        for (u32 c = 0; c < cc; ++c) {
+            const EntityState& own = server_world_[c];
+            aoi_ids_.clear();
+            interest_.aoi_query({own.pos[0], own.pos[1], own.pos[2]}, aoi_radius_,
+                                aoi_ids_);
+            filtered_.clear();
+            for (const EntityState& e : server_world_) {
+                bool in = (e.id == own.id);
+                if (!in) {
+                    for (u32 id : aoi_ids_) {
+                        if (id == e.id) { in = true; break; }
+                    }
+                }
+                if (in) filtered_.push_back(e);
+            }
+            clients_[c].last_visible = filtered_.size();
+            std::vector<u8> delta;
+            encode_delta(std::span<const EntityState>(), filtered_, delta);
+            last_delta_bytes_ += delta.size();
+            s2c_.push_back(S2C{t + latency_, c, t, server_last_input_[c],
+                               /*full=*/true, std::move(delta)});
+        }
     }
 
     // (3) Clients: apply the snapshots that arrive this tick, then reconcile —
@@ -130,9 +170,12 @@ void ReplicationSession::advance(std::span<const Input> inputs) {
             }
             ClientState& cs = clients_[m.client];
             std::vector<EntityState> full;
+            // AoI snapshots are full (vs empty); all-visible ones are deltas vs
+            // this peer's last applied snapshot.
             const std::span<const EntityState> base =
-                cs.has_baseline ? std::span<const EntityState>(cs.baseline)
-                                : std::span<const EntityState>();
+                (!m.full && cs.has_baseline)
+                    ? std::span<const EntityState>(cs.baseline)
+                    : std::span<const EntityState>();
             if (!apply_delta(base, std::span<const u8>(m.delta), full)) {
                 continue;  // truncated — cannot happen on the lossless channel
             }
