@@ -87,6 +87,10 @@ struct MtlCmdBuf  : CmdBuffer {
     id<MTLRenderPipelineState>    bound_render_pso = nil;
     id<MTLComputePipelineState>   bound_compute_pso = nil;
     MTLSize                       compute_tgs      = MTLSizeMake(1, 1, 1);
+    // Triangle fill mode for the bound render PSO. Metal carries fill mode
+    // as render-command-encoder state (not pipeline state), so bind_pipeline
+    // stashes the bound pipeline's mode here and replays it on encoder open.
+    MTLTriangleFillMode           bound_fill_mode  = MTLTriangleFillModeFill;
     // Cached index binding consumed by drawIndexedPrimitives.
     id<MTLBuffer>                 index_mtl        = nil;
     MTLIndexType                  index_mtl_type   = MTLIndexTypeUInt16;
@@ -779,6 +783,10 @@ struct Entry {
     id            render_pso  = nil;   // id<MTLRenderPipelineState>
     id            compute_pso = nil;   // id<MTLComputePipelineState>
     MTLSize       compute_tgs = MTLSizeMake(1, 1, 1);
+    // Triangle fill mode requested by the GraphicsPipelineDesc. Stored here
+    // (not on the PSO) because Metal applies fill mode at the encoder, not
+    // in MTLRenderPipelineState. bind_pipeline replays it onto the encoder.
+    bool          fill_lines  = false;
 };
 
 static Entry  g_entries[kMaxPipelines] = {};
@@ -804,7 +812,8 @@ static Entry* find_locked(std::uint32_t needle) {
 // declares the prototype locally + links.
 extern "C" {
 
-void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) {
+void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso,
+                                        bool fill_wireframe) {
     // ARC is OFF for this TU (per CMakeLists: -fno-objc-arc), so we can
     // bridge-cast a raw void* to a strong reference and assign without
     // ownership semantics getting in the way. The caller (lane 08) must
@@ -818,6 +827,7 @@ void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) 
     auto& cnt = pipeline_shim::g_count;
     if (auto* e = pipeline_shim::find_locked(handle_id)) {
         e->render_pso = pso;
+        e->fill_lines = fill_wireframe;
         return;
     }
     if (cnt >= pipeline_shim::kMaxPipelines) {
@@ -826,6 +836,7 @@ void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) 
     }
     s[cnt].handle_id  = handle_id;
     s[cnt].render_pso = pso;
+    s[cnt].fill_lines = fill_wireframe;
     ++cnt;
 }
 
@@ -947,6 +958,7 @@ void MetalBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
         c->encoder.label = @"psy::gpu user pass";
         if (c->bound_render_pso) {
             [c->encoder setRenderPipelineState:c->bound_render_pso];
+            [c->encoder setTriangleFillMode:c->bound_fill_mode];
         }
         if (has_depth && depth_state_) {
             [c->encoder setDepthStencilState:depth_state_];
@@ -969,6 +981,7 @@ void MetalBackend::end_render(CmdBuffer* cmd) {
         [c->encoder release];
         c->encoder = nil;
         c->bound_render_pso = nil;
+        c->bound_fill_mode  = MTLTriangleFillModeFill;
         c->index_mtl        = nil;
     }
 }
@@ -1013,6 +1026,7 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     id  shim_render_pso  = nil;
     id  shim_compute_pso = nil;
     MTLSize shim_tgs     = MTLSizeMake(1, 1, 1);
+    bool shim_fill_lines = false;
     bool found = false;
     {
         std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
@@ -1020,6 +1034,7 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
             shim_render_pso  = entry->render_pso;
             shim_compute_pso = entry->compute_pso;
             shim_tgs         = entry->compute_tgs;
+            shim_fill_lines  = entry->fill_lines;
             found = true;
         }
     }
@@ -1048,9 +1063,17 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     id<MTLRenderPipelineState>  render_pso  = static_cast<id<MTLRenderPipelineState>>(shim_render_pso);
     id<MTLComputePipelineState> compute_pso = static_cast<id<MTLComputePipelineState>>(shim_compute_pso);
 
+    // Fill mode is encoder state, not pipeline state. Always resolve it for
+    // the bound pipeline so binding a Solid pipeline after a Wireframe one
+    // resets the encoder back to a filled raster (and vice-versa).
+    const MTLTriangleFillMode fill =
+        shim_fill_lines ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
+
     if (c->encoder && render_pso) {
         c->bound_render_pso = render_pso;
+        c->bound_fill_mode  = fill;
         [c->encoder setRenderPipelineState:render_pso];
+        [c->encoder setTriangleFillMode:fill];
     }
     if (c->compute_encoder && compute_pso) {
         c->bound_compute_pso = compute_pso;
@@ -1060,6 +1083,7 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     // If neither encoder is open yet, stash for the next encode-open.
     if (!c->encoder && !c->compute_encoder) {
         c->bound_render_pso  = render_pso;
+        c->bound_fill_mode   = fill;
         c->bound_compute_pso = compute_pso;
         c->compute_tgs       = shim_tgs;
     }

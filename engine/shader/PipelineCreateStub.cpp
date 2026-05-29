@@ -34,6 +34,7 @@ bool create_and_register_graphics_pso(
     std::uint32_t,
     std::uint8_t,
     bool,
+    bool,
     bool) { return true; } // no-op success — see file header
 
 bool create_and_register_compute_pso(
