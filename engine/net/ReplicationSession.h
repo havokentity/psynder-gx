@@ -44,6 +44,22 @@ namespace psynder::net {
 // copy the look yaw. Pure float ops (no fast-math reassociation).
 void step_entity(EntityState& e, const Input& in, f32 dt) noexcept;
 
+// Deterministic ray-vs-entity hitscan: nearest entity (treated as a sphere of
+// `radius`) struck by the ray, excluding `exclude_id`. Returns the victim's id
+// (0 = miss). Used for lag-compensated server-side hit registration against a
+// rewound snapshot. Pure float ops; no trig.
+u32 raycast_nearest_entity(std::span<const EntityState> world, u32 exclude_id,
+                           const f32 origin[3], const f32 dir[3], f32 radius,
+                           f32 max_t) noexcept;
+
+// A server-registered hit (attacker shot victim at server_tick), produced by the
+// lag-compensated hitreg path. POD.
+struct HitEvent {
+    u32 attacker = 0;
+    u32 victim = 0;
+    u32 server_tick = 0;
+};
+
 class ReplicationSession {
 public:
     // `client_count` entities (one per client); each snapshot/input crosses the
@@ -58,6 +74,11 @@ public:
 
     u32 tick() const noexcept { return tick_; }
     u32 client_count() const noexcept { return static_cast<u32>(clients_.size()); }
+
+    // Server-side lag-compensated hits registered so far (attacker fired with
+    // kInputBtnFire; the server rewound the world to that client's view-tick
+    // before the ray test, so it hits where the shooter SAW the target).
+    const std::vector<HitEvent>& hit_events() const noexcept { return hit_events_; }
 
     // Server-authoritative world (one EntityState per client).
     const std::vector<EntityState>& authoritative() const noexcept { return server_world_; }
@@ -75,6 +96,10 @@ private:
         u32                      last_applied_server_tick = 0;
         bool                     has_baseline = false;
     };
+    // Lag-compensated hit registration for a fire input applied at `server_tick`
+    // from `client`: rewind to the shooter's view-tick and ray-test there.
+    void register_fire_(u32 server_tick, u32 client, const Input& in);
+
     struct C2S {  // client -> server: an input + the client's snapshot ack
         u32   deliver_tick = 0;
         u32   client = 0;
@@ -102,6 +127,13 @@ private:
     std::vector<S2C>         s2c_;  // in-flight snapshots
     std::vector<Input>       scratch_;  // predict_present pending-input scratch
     usize                    last_delta_bytes_ = 0;
+
+    // Lag-compensation snapshot history: recent authoritative worlds keyed by
+    // tick (ring, trimmed to a window > 2*latency). On a fire input the server
+    // rewinds to the shooter's view-tick before the ray test, so hits land where
+    // the client saw the target — server-authoritative, deterministic.
+    std::vector<std::pair<u32, std::vector<EntityState>>> history_;
+    std::vector<HitEvent> hit_events_;
 };
 
 }  // namespace psynder::net

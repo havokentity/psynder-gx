@@ -105,3 +105,59 @@ TEST_CASE("net: replication session is deterministic across runs",
     REQUIRE(a.size() == b.size());
     REQUIRE(std::memcmp(a.data(), b.data(), a.size() * sizeof(EntityState)) == 0);
 }
+
+TEST_CASE("net: raycast_nearest_entity hits on-axis, misses off-axis", "[net]") {
+    const f32 o[3] = {0.0f, 0.0f, 0.0f};
+    const f32 d[3] = {1.0f, 0.0f, 0.0f};  // +X
+    std::array<EntityState, 2> w{};
+    w[0].id = 2;
+    w[0].pos[0] = 5.0f;  // on the +X axis -> hit
+    w[1].id = 3;
+    w[1].pos[0] = 5.0f;
+    w[1].pos[2] = 2.0f;  // off axis (z=2 > radius 0.5)
+    REQUIRE(raycast_nearest_entity(std::span<const EntityState>(w), /*exclude=*/0u,
+                                   o, d, 0.5f, 100.0f) == 2u);
+    // Exclude the on-axis one: the off-axis entity is a clean miss.
+    REQUIRE(raycast_nearest_entity(std::span<const EntityState>(w), /*exclude=*/2u,
+                                   o, d, 0.5f, 100.0f) == 0u);
+}
+
+TEST_CASE("net: lag-compensated hitreg hits where the shooter saw the target",
+          "[net][determinism]") {
+    const TickConfig cfg = tick_config_128();
+    constexpr u32 kLat = 3;
+    constexpr u32 kPhase1 = 32;  // client 1 runs out along +X
+    constexpr u32 kTotal = 70;   // then strafes +Z while client 0 fires +X
+
+    ReplicationSession sess(cfg, /*clients=*/2, kLat);
+    for (u32 t = 0; t < kTotal; ++t) {
+        std::array<Input, 2> ins{};
+        // Client 0: stationary at origin, aiming +X (yaw 90, pitch 0); fires
+        // every tick once client 1 starts strafing.
+        ins[0].yaw_deg = 90.0f;
+        if (t >= kPhase1) ins[0].buttons = kInputBtnFire;
+        // Client 1: run +X onto the shot axis, then strafe +Z off it.
+        if (t < kPhase1) {
+            ins[1].move[0] = 40.0f;
+        } else {
+            ins[1].move[2] = 20.0f;
+        }
+        sess.advance(std::span<const Input>(ins.data(), 2));
+    }
+
+    // Lag compensation registered a hit of client 0 (id 1) on client 1 (id 2):
+    // the server rewound to when the shooter saw the target still on the axis.
+    bool hit = false;
+    for (const HitEvent& h : sess.hit_events()) {
+        if (h.attacker == 1u && h.victim == 2u) hit = true;
+    }
+    REQUIRE(hit);
+
+    // Without rewind, a ray against the CURRENT authoritative world misses —
+    // client 1 has strafed well off the axis by now. (Proves lag comp did work.)
+    const f32 o[3] = {0.0f, 0.0f, 0.0f};
+    const f32 d[3] = {1.0f, 0.0f, 0.0f};
+    REQUIRE(raycast_nearest_entity(
+                std::span<const EntityState>(sess.authoritative()),
+                /*exclude=*/1u, o, d, 0.5f, 1000.0f) == 0u);
+}

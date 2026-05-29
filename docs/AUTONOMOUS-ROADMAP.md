@@ -24,8 +24,8 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 ## Prioritized backlog (top = next)
 
 ### N — Netcode (finish the loop into real play)
-- [ ] Wire lag-comp hitbox rewind into `ReplicationSession` (rewind to client
-      view-time for server-side hitreg); golden test.
+- [x] Wire lag-comp hitbox rewind into `ReplicationSession` (rewind to client
+      view-time for server-side hitreg); golden test. **DONE (iter 1).**
 - [ ] Per-peer interest management in the session (use `InterestSet` broadphase);
       bandwidth + correctness tests.
 - [ ] Over-the-wire integration: drive the session through `Loopback`/`HostImpl`
@@ -82,3 +82,17 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 - (init) Charter + roadmap created; entering autonomous mode at 583 green tests,
   CI green. First item: **N — lag-comp hitbox rewind into the session.**
+- (iter 1) **Lag-compensated server-side hitreg in `ReplicationSession`.** Added
+  a per-tick authoritative snapshot-history ring (window > 2*latency) + a
+  deterministic `raycast_nearest_entity` (ray-vs-sphere, no trig). A `kInputBtnFire`
+  input rewinds the world to the shooter's view-tick (server_tick - 2*latency)
+  and ray-tests there, recording `HitEvent{attacker,victim,tick}`. Tests: shot
+  hits the target where the shooter SAW it while a naive current-world ray misses
+  (proves lag comp), + a raycast unit test. 585/585 green. Decision: the net
+  session uses its own EntityState snapshot-history rewind (cleaner than
+  shoehorning LagComp.h's physics-oriented OpaqueWorldState); LagComp.h remains
+  the physics-side rewind. Caveat: fire direction uses libm sin/cos (per-platform
+  deterministic, not yet cross-platform bit-identical) — fine for hitreg, flagged
+  for the cross-platform determinism pass (P). Next: **N — per-peer interest
+  management in the session.** CI verification of this push happens at the start
+  of iter 2.
