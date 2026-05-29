@@ -714,6 +714,17 @@ bool MetalBackend::texture_readback_mip0(Texture* base_tex,
 
     @autoreleasepool {
         id<MTLTexture> h = tex->handle;
+        // [MTLTexture getBytes:...] is only valid for CPU-readable storage
+        // (Shared / Managed). A GPU-private texture — e.g. a Sampled-only
+        // texture with no transfer usage, or how a paravirtualised CI GPU backs
+        // one — cannot be read directly; getBytes would trip Metal's validation
+        // and abort the process. Fail cleanly instead. (Apple Silicon unified
+        // memory usually makes textures Shared, so this path is hit mainly on
+        // virtualised CI runners, not on real hardware.)
+        if (h.storageMode == MTLStorageModePrivate ||
+            h.storageMode == MTLStorageModeMemoryless) {
+            return false;
+        }
         const NSUInteger w = h.width;
         const NSUInteger hh = h.height;
         // bpp inferred from the texture's MTLPixelFormat. We only handle
