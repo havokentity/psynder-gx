@@ -2,7 +2,9 @@
 // Psynder-GX — lane 18 / net core scaffold tests: snapshot replication delta
 // (#40), interest management (#43), client prediction reconcile (#41).
 
+#include <algorithm>
 #include <array>
+#include <random>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -98,6 +100,144 @@ TEST_CASE("net: aoi_query returns exactly the in-range ids",
     CHECK(ids[0] == 1);
     CHECK(ids[1] == 2);
     CHECK(ids[2] == 3);  // boundary entity included
+}
+
+// ── #43 interest management: broadphase InterestSet matches the oracle ──────
+
+// Sorted brute-force oracle: the id-sorted set the broadphase must reproduce.
+static std::vector<u32> brute_sorted(math::Vec3 center, f32 radius,
+                                     std::span<const EntityPos> all) {
+    std::vector<u32> ids;
+    aoi_query(center, radius, all, ids);  // free-function brute-force scan
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+TEST_CASE("net: InterestSet broadphase matches the brute-force oracle exactly",
+          "[net][interest][aoi][broadphase]") {
+    InterestSet set;
+    set.rebuild({});  // empty roster -> empty result
+    std::vector<u32> ids;
+    CHECK(set.aoi_query(math::Vec3{0, 0, 0}, 10.f, ids) == 0);
+
+    std::vector<EntityPos> all = {
+        {1, {  0.f,  0.f, 0.f}},  // at center -> in
+        {2, { 10.f,  0.f, 0.f}},  // dist 10   -> in
+        {3, {  6.f,  8.f, 0.f}},  // dist 10   -> in (boundary, inclusive)
+        {4, { 11.f,  0.f, 0.f}},  // dist 11   -> out
+        {5, {100.f,100.f, 0.f}},  // far       -> out
+    };
+    set.rebuild(all);
+    const usize n = set.aoi_query(math::Vec3{0, 0, 0}, /*radius=*/10.f, ids);
+    REQUIRE(n == 3);
+    CHECK(ids == brute_sorted(math::Vec3{0, 0, 0}, 10.f, all));  // {1,2,3}
+}
+
+TEST_CASE("net: InterestSet boundary (distance == radius) matches the oracle",
+          "[net][interest][aoi][broadphase][boundary]") {
+    std::vector<EntityPos> all = {
+        {1, {6.f, 8.f, 0.f}},      // exactly radius 10 -> inclusive -> in
+        {2, {6.f, 8.0001f, 0.f}},  // one ULP past 10   -> out
+    };
+    InterestSet set;
+    set.rebuild(all);
+    std::vector<u32> ids;
+    const usize n = set.aoi_query(math::Vec3{0, 0, 0}, /*radius=*/10.f, ids);
+    CHECK(ids == brute_sorted(math::Vec3{0, 0, 0}, 10.f, all));
+    REQUIRE(n == 1);
+    CHECK(ids[0] == 1);  // boundary entity in, ULP-past entity out
+}
+
+TEST_CASE("net: InterestSet equals the oracle over seeded random distributions",
+          "[net][interest][aoi][broadphase][parity]") {
+    std::mt19937 rng(0xA01Fu);
+    std::uniform_real_distribution<f32> coord(-500.f, 500.f);
+
+    for (u32 trial = 0; trial < 16; ++trial) {
+        const usize count = 64 + (rng() % 256);
+        std::vector<EntityPos> all;
+        all.reserve(count);
+        for (usize i = 0; i < count; ++i)
+            all.push_back(EntityPos{static_cast<u32>(i + 1),
+                                    math::Vec3{coord(rng), coord(rng), coord(rng)}});
+
+        InterestSet set;
+        set.rebuild(all);
+
+        // A spread of query centres + radii, including very large and tiny.
+        for (u32 q = 0; q < 8; ++q) {
+            const math::Vec3 center{coord(rng), coord(rng), coord(rng)};
+            const f32 radius = 1.f + (static_cast<f32>(rng() % 1200));
+            std::vector<u32> got;
+            set.aoi_query(center, radius, got);
+            CHECK(got == brute_sorted(center, radius, all));
+        }
+    }
+}
+
+TEST_CASE("net: InterestSet refit tracks moved positions and matches the oracle",
+          "[net][interest][aoi][broadphase][refit]") {
+    std::vector<EntityPos> all = {
+        {1, {1000.f, 0.f, 0.f}},  // far outside
+        {2, {1000.f, 0.f, 0.f}},  // far outside
+        {3, {1000.f, 0.f, 0.f}},  // far outside
+    };
+    InterestSet set;
+    set.rebuild(all);
+    std::vector<u32> ids;
+    set.aoi_query(math::Vec3{0, 0, 0}, 5.f, ids);
+    CHECK(ids.empty());
+
+    // Move two into range in place; same roster -> cheap refit path.
+    all[0].pos = math::Vec3{1.f, 0.f, 0.f};
+    all[2].pos = math::Vec3{0.f, 2.f, 0.f};
+    set.refit(all);
+    set.aoi_query(math::Vec3{0, 0, 0}, 5.f, ids);
+    CHECK(ids == brute_sorted(math::Vec3{0, 0, 0}, 5.f, all));  // {1,3}
+}
+
+TEST_CASE("net: InterestSet query is deterministic across repeated calls",
+          "[net][interest][aoi][broadphase][determinism]") {
+    std::mt19937 rng(0xDE7Eu);
+    std::uniform_real_distribution<f32> coord(-300.f, 300.f);
+    std::vector<EntityPos> all;
+    for (usize i = 0; i < 500; ++i)
+        all.push_back(EntityPos{static_cast<u32>(i + 1),
+                                math::Vec3{coord(rng), coord(rng), coord(rng)}});
+    InterestSet set;
+    set.rebuild(all);
+
+    std::vector<u32> first;
+    set.aoi_query(math::Vec3{10.f, -20.f, 5.f}, 150.f, first);
+    for (u32 rep = 0; rep < 5; ++rep) {
+        std::vector<u32> again;
+        set.aoi_query(math::Vec3{10.f, -20.f, 5.f}, 150.f, again);
+        CHECK(again == first);  // byte-identical id-sorted result every call
+    }
+    // ...and matches the oracle.
+    CHECK(first == brute_sorted(math::Vec3{10.f, -20.f, 5.f}, 150.f, all));
+}
+
+TEST_CASE("net: InterestSet scales to 2000 entities and matches the oracle",
+          "[net][interest][aoi][broadphase][scale]") {
+    std::mt19937 rng(0x5CA1Eu);
+    std::uniform_real_distribution<f32> coord(-1000.f, 1000.f);
+    std::vector<EntityPos> all;
+    all.reserve(2000);
+    for (usize i = 0; i < 2000; ++i)
+        all.push_back(EntityPos{static_cast<u32>(i + 1),
+                                math::Vec3{coord(rng), coord(rng), coord(rng)}});
+    InterestSet set;
+    set.rebuild(all);
+    REQUIRE(set.size() == 2000);
+
+    for (u32 q = 0; q < 8; ++q) {
+        const math::Vec3 center{coord(rng), coord(rng), coord(rng)};
+        const f32 radius = 50.f + static_cast<f32>(rng() % 900);
+        std::vector<u32> got;
+        set.aoi_query(center, radius, got);
+        CHECK(got == brute_sorted(center, radius, all));
+    }
 }
 
 // ── #41 prediction: reconcile replays pending inputs to the expected state ──
