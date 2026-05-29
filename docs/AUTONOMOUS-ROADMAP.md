@@ -35,8 +35,9 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       predicts) — headless server smoke.
 
 ### G — Gameplay slice (FPS)
-- [ ] Weapons: hitscan + projectile, fire rate, spread; damage application via
-      lag-comp rewind; tests.
+- [x] Weapons: hitscan + projectile, fire rate, ammo; damage application; tests.
+      **DONE (iter 5).** (Spread + wiring net HitEvents to apply_damage on the
+      server lag-comp path = follow-ups with the client/server split.)
 - [x] Health/armor/damage/death/respawn components + systems (deterministic).
       **DONE (iter 4) — new `engine/gameplay` lane.**
 - [ ] Rounds/scoring/spawn points; pickups (health/ammo/weapon).
@@ -138,3 +139,16 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   (editor-gated, can't verify headlessly, and better done once gameplay exists to
   replicate) in favour of building the gameplay the netcode will carry. Next:
   **G — weapons (hitscan + projectile) applying damage via the lag-comp rewind.**
+- (iter 5) **Hitscan + projectile weapons in `engine/gameplay`.** Weapon +
+  Projectile components; `fire_hitscan` (ready-check spends ammo + sets cooldown,
+  ray-vs-sphere nearest Health target excluding shooter, ties by lower id, applies
+  weapon damage), `fire_projectile` (spawns a moving Projectile entity carrying
+  the damage), `tick_weapons` (cooldowns), `tick_projectiles` (integrate, proximity
+  damage to the first non-owner Health entity, despawn on hit/ttl; gather-then-
+  mutate in id order for determinism). Tests: damage-on-hit + fire-rate gating +
+  ammo, off-axis miss still costs a round, empty weapon can't fire, projectile
+  travel/impact/despawn + ttl despawn, cross-world determinism. 601/601 green.
+  Caveats: spread (random cone) deferred — needs a deterministic seeded RNG so it
+  stays lockstep-safe; wiring the net session's lag-comp HitEvents to apply_damage
+  (net-id <-> Entity map) lands with the client/server split. Next: **G —
+  rounds/scoring/spawn points + pickups (health/ammo/weapon).**

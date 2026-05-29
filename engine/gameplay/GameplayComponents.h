@@ -43,4 +43,28 @@ PSYNDER_COMPONENT(Respawnable) {
 };
 static_assert(sizeof(Respawnable) == 16, "Respawnable layout frozen");
 
+// A weapon held by a shooter. fire_interval_s gates the fire rate; cooldown_s
+// counts down to 0 (ready). ammo < 0 means infinite. hit_radius is the target
+// hitbox sphere the hitscan ray tests against (metres).
+PSYNDER_COMPONENT(Weapon) {
+    f32 damage;
+    f32 fire_interval_s;
+    f32 cooldown_s;
+    i32 ammo;
+    f32 hit_radius;
+};
+static_assert(sizeof(Weapon) == 20, "Weapon layout frozen");
+
+// A flying projectile (rocket / grenade-ish): integrates by velocity, damages
+// the first Health entity it reaches, and despawns on hit or ttl. `owner` is
+// excluded from its own hits.
+PSYNDER_COMPONENT(Projectile) {
+    psynder::math::Vec3 velocity;  // m/s, world space
+    f32                 damage;
+    f32                 ttl_s;
+    Entity              owner;
+};
+// 32 bytes: the u64 Entity forces 8-byte alignment (20 data bytes -> padded).
+static_assert(sizeof(Projectile) == 32, "Projectile layout frozen");
+
 }  // namespace psynder::gameplay
