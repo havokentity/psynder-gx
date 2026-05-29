@@ -28,8 +28,9 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       view-time for server-side hitreg); golden test. **DONE (iter 1).**
 - [x] Per-peer interest management in the session (use `InterestSet` broadphase);
       bandwidth + correctness tests. **DONE (iter 2).**
-- [ ] Over-the-wire integration: drive the session through `Loopback`/`HostImpl`
+- [x] Over-the-wire integration: drive the session through `Loopback`/`HostImpl`
       transport (Input + snapshot serialization), an end-to-end loopback test.
+      **DONE (iter 3).**
 - [ ] Client/server split in the player path (server ticks authoritative; client
       predicts) — headless server smoke.
 
@@ -110,3 +111,17 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   delta WITH removals is a tracked follow-up (would need a removed-ids section in
   the wire format + the size-pinned snapshot tests updated). Next: **N —
   over-the-wire transport integration (Loopback/HostImpl).**
+- (iter 3) **Over-the-wire replication through the real rUDP transport.** New
+  test `net_over_the_wire.cpp` drives the netcode payloads through `HostImpl` over
+  the `LoopbackBus` (not the in-memory channel): (a) an `Input` and a snapshot
+  `encode_delta` cross the wire byte-intact (reply via `InboundMessage.from`);
+  (b) a 20-input move replicates end-to-end — client sends inputs over the wire,
+  server integrates with the shared `step_entity` and ships snapshots, and the
+  client's view converges BIT-EXACTLY to a reference integration. Uses the
+  `make_test_host`/`pump` harness; reliable delivery flushed by pumping the rUDP
+  window. 590/590 green. Decision: pinned the serialization+transport path the
+  session plugs into; a pluggable transport adapter for ReplicationSession is the
+  tracked follow-up (keeps the deterministic in-memory channel as the unit-test
+  default). Note: Input/snapshot use POD memcpy — endianness is a cross-platform
+  follow-up (consistent with the existing codec). Next: **N — client/server split
+  in the player path.**
