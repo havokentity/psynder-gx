@@ -20,6 +20,7 @@ target_link_libraries(sample_02_crate PRIVATE
     psynder_scene
     psynder_physics_core
     psynder_physics_destruction
+    psynder_physics_agents
     psynder_script
 )
 

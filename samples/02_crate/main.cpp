@@ -21,6 +21,8 @@
 #include "jobs/JobSystem.h"
 #include "math/Math.h"
 #include "platform/Platform.h"
+#include "physics/agents/AgentComponents.h"
+#include "physics/agents/AgentSystem.h"
 #include "physics/core/CharacterController.h"
 #include "physics/core/EcsCharacterBridge.h"
 #include "physics/destruction/FractureSpawn.h"
@@ -248,6 +250,19 @@ struct PlayModeState {
     psynder::math::Vec3 eye_position{0.0f, 1.62f, 0.0f};
     std::uint32_t static_collider_count = 0;
     std::string spawn_label;
+
+    // DOTS mass-agent crowd (ADR-019 class 1): ~24 steering agents spawned at
+    // play-start that chase the player and flow around the static crates/walls.
+    // Agents are ordinary ECS entities (TransformWS + Agent + AgentVelocity +
+    // AgentTarget + Collider + RenderMaterial) so the existing render walk +
+    // raycast see them like any other prop. The scratch + StaticColliders
+    // buffers persist across ticks (reused, zero per-tick heap alloc — the
+    // fixed-tick determinism contract). The static-collider AABBs are gathered
+    // once at play-start (the same immovable set projected to Jolt).
+    psynder::physics::agents::AgentScratch agent_scratch;
+    std::vector<psynder::Entity>   agent_static_entities;  // StaticColliders ids
+    std::vector<psynder::math::Aabb> agent_static_aabbs;   // StaticColliders boxes
+    std::vector<psynder::Entity>   crowd;                  // spawned agent entities
 };
 
 // Fracture a shot static crate into a burst of Jolt dynamic shards (ADR-021/#45).
@@ -263,6 +278,113 @@ inline std::uint32_t fracture_static_crate(PlayModeState& play,
     return psynder::physics::destruction::spawn_fracture_shards(
         play.phys_world, *play.sim_world, xf, col, mat, shot_dir, seed,
         play.dynamic_body_map);
+}
+
+// Gather the world-space AABBs of every IMMOVABLE static collider in the sim
+// world into the reusable StaticColliders backing buffers, so the agent crowd
+// avoids the crates + walls. This mirrors build_jolt_statics_from_ecs's filter:
+// skip dynamic bodies (they move + are projected to Jolt separately) and skip
+// the agents themselves. Called once at play-start (the static set is immutable
+// for the session). Box/Plane use centre +/- half_extents; Sphere uses its
+// radius. Determinism: pure read of the just-spawned (deterministic) scene.
+inline void gather_play_static_colliders(PlayModeState& play) {
+    namespace s = psynder::scene;
+    play.agent_static_entities.clear();
+    play.agent_static_aabbs.clear();
+    if (!play.sim_world) return;
+    play.sim_world->for_each_chunk_with_entities<s::TransformWS, s::Collider>(
+        [&](std::size_t n, const psynder::Entity* ents, s::TransformWS* xf,
+            s::Collider* col) {
+            for (std::size_t i = 0; i < n; ++i) {
+                if (play.sim_world->get<s::DynamicBody>(ents[i]) != nullptr) continue;
+                if (play.sim_world->get<s::Agent>(ents[i]) != nullptr) continue;
+                const float* m = xf[i].mtw.m;
+                float cx = m[12];
+                float cy = m[13];
+                float cz = m[14];
+                psynder::math::Vec3 he;
+                if (col[i].kind == s::ShapeKind::Sphere) {
+                    const float r = std::max(0.05f, col[i].half_extents.x);
+                    he = {r, r, r};
+                } else {
+                    if (col[i].kind == s::ShapeKind::Plane) {
+                        cy -= col[i].half_extents.y;  // top face at the surface
+                    }
+                    he = {std::max(0.05f, col[i].half_extents.x),
+                          std::max(0.05f, col[i].half_extents.y),
+                          std::max(0.05f, col[i].half_extents.z)};
+                }
+                play.agent_static_entities.push_back(ents[i]);
+                play.agent_static_aabbs.push_back(
+                    psynder::math::Aabb{{cx - he.x, cy - he.y, cz - he.z},
+                                        {cx + he.x, cy + he.y, cz + he.z}});
+            }
+        });
+}
+
+// View over the gathered static colliders (valid until the next gather).
+inline psynder::physics::agents::StaticColliders play_static_view(
+    const PlayModeState& play) {
+    return psynder::physics::agents::StaticColliders{
+        std::span<const psynder::Entity>(play.agent_static_entities.data(),
+                                         play.agent_static_entities.size()),
+        std::span<const psynder::math::Aabb>(play.agent_static_aabbs.data(),
+                                             play.agent_static_aabbs.size())};
+}
+
+// Spawn the steering crowd near the dynamic-crate stack (ADR-019 class 1). Fixed
+// count + fixed ring positions + fixed params => the crowd spawns deterministically
+// (no RNG, no wall-clock). Each agent carries Agent/AgentVelocity/AgentTarget AND
+// a Collider + teal RenderMaterial, so the existing render walk draws it and the
+// hitscan path can raycast it like any prop. Target is overwritten each tick.
+inline void spawn_play_crowd(PlayModeState& play, const psynder::math::Vec3& spawn,
+                             float spawn_yaw_rad) {
+    namespace s = psynder::scene;
+    if (!play.sim_world) return;
+    constexpr int kCrowd = 24;
+    constexpr float kRadius = 0.4f;
+    const float fx = std::sin(spawn_yaw_rad);
+    const float fz = std::cos(spawn_yaw_rad);
+    // Ring centred a few metres ahead of the player, behind the crate stack.
+    const float cx = spawn.x + fx * 6.0f;
+    const float cz = spawn.z + fz * 6.0f;
+    play.crowd.clear();
+    play.crowd.reserve(kCrowd);
+    for (int i = 0; i < kCrowd; ++i) {
+        const float ang = (static_cast<float>(i) / static_cast<float>(kCrowd)) *
+                          6.2831853f;
+        const float ring = 3.0f + static_cast<float>(i % 3) * 0.8f;
+        const psynder::math::Vec3 pos{cx + std::cos(ang) * ring, kRadius,
+                                      cz + std::sin(ang) * ring};
+        s::Agent a{};
+        a.max_speed_mps = 3.0f;   // ~jog
+        a.max_force = 9.0f;       // m/s^2
+        a.radius_m = kRadius;     // capsule radius
+        a.arrive_radius_m = 1.5f;
+        const psynder::Entity e = s::spawn_agent(*play.sim_world, a, pos, spawn);
+        // Render + raycast as a teal sphere matching the agent radius.
+        play.sim_world->add(e, s::Collider{s::ShapeKind::Sphere,
+                                           {kRadius, kRadius, kRadius}});
+        play.sim_world->add(e, s::RenderMaterial{{0.10f, 0.70f, 0.66f}, 0.55f, 0.0f,
+                                                 {0.02f, 0.18f, 0.17f}, 0.6f});
+        play.crowd.push_back(e);
+    }
+}
+
+// One fixed-tick drive of the crowd: point every agent at the player's CURRENT
+// world position (the chase goal, taken from the already-deterministic sim) then
+// advance the DOTS steering system, which writes each agent's TransformWS. Call
+// once per fixed tick from the play loop, AFTER step_fixed so the goal is the
+// player's post-step position. Deterministic: pure consumer of the sim state.
+inline void drive_play_crowd(PlayModeState& play, const psynder::math::Vec3& goal,
+                             float dt) {
+    namespace s = psynder::scene;
+    if (!play.sim_world || play.crowd.empty()) return;
+    for (const psynder::Entity e : play.crowd) {
+        if (auto* tgt = play.sim_world->get<s::AgentTarget>(e)) tgt->goal = goal;
+    }
+    psynder::physics::agents::update_agents(*play.sim_world, play_static_view(play),
+                                            play.agent_scratch, dt);
 }
 
 struct PrimitiveVertex {
@@ -1318,6 +1440,12 @@ bool start_play_mode(PlayModeState& play,
     play.eye_position = {spawn.x, spawn.y + play.eye_height_m, spawn.z};
     play.static_collider_count = static_collider_count;
     play.spawn_label = std::move(spawn_label);
+    // Spawn the DOTS steering crowd (ADR-019 class 1) AFTER the Jolt static
+    // projection so agents are never projected as immovable bodies — they are
+    // movers solved by the custom agent system, not Jolt. Gather the immutable
+    // static-collider AABBs once so the crowd flows around the crates/walls.
+    spawn_play_crowd(play, spawn, yaw * psynder::math::kDegToRad);
+    gather_play_static_colliders(play);
     // Record this session's per-tick input so it can be replayed deterministically.
     play.replay_mode = ReplayMode::Recording;
     play.recorder.clear();
@@ -1409,6 +1537,15 @@ bool update_play_mode(PlayModeState& play,
             if (fire_now && !play.replay_prev_fire) play.replay_fire_request = true;
             play.replay_prev_fire = fire_now;
             character_spine::step_fixed(play.phys_world);
+            // Chase one fixed tick: target = player's post-step foot position.
+            {
+                const character_spine::Transform pt =
+                    character_spine::character_transform(play.phys_pawn);
+                drive_play_crowd(play,
+                                 {pt.foot_position_m[0], pt.foot_position_m[1],
+                                  pt.foot_position_m[2]},
+                                 kFixedDt);
+            }
             play.fixed_accum_seconds -= kFixedDt;
             ++play.replay_tick;
         }
@@ -1486,6 +1623,15 @@ bool update_play_mode(PlayModeState& play,
             ++play.replay_tick;
         }
         character_spine::step_fixed(play.phys_world);
+        // Chase one fixed tick: target = player's post-step foot position.
+        {
+            const character_spine::Transform pt =
+                character_spine::character_transform(play.phys_pawn);
+            drive_play_crowd(play,
+                             {pt.foot_position_m[0], pt.foot_position_m[1],
+                              pt.foot_position_m[2]},
+                             kFixedDt);
+        }
         play.fixed_accum_seconds -= kFixedDt;
     }
 
@@ -4775,6 +4921,22 @@ int main(int argc, char** argv) {
             const psynder::combat::Hit hit =
                 psynder::combat::raycast_nearest(*play_mode.sim_world, shot, 100.0f);
             if (hit.hit && hit.entity != play_mode.pawn) {
+                // A steering-crowd agent (ADR-019 class 1)? It has no Jolt body
+                // and isn't a fracturable crate — just despawn it cleanly and
+                // drop it from the crowd list so the chase/avoid loop skips it.
+                bool was_agent = false;
+                if (play_mode.sim_world->get<psynder::scene::Agent>(hit.entity)) {
+                    for (std::size_t i = 0; i < play_mode.crowd.size(); ++i) {
+                        if (play_mode.crowd[i] != hit.entity) continue;
+                        play_mode.crowd[i] = play_mode.crowd.back();
+                        play_mode.crowd.pop_back();
+                        break;
+                    }
+                    play_mode.sim_world->destroy(hit.entity);
+                    was_agent = true;
+                }
+                if (was_agent) { play_mode.replay_fire_request = false; }
+                else {
                 // A dynamic rigid body? Knock it back with an impulse along the
                 // shot (ADR-019 class 2) instead of destroying it.
                 bool knocked = false;
@@ -4822,6 +4984,7 @@ int main(int argc, char** argv) {
                         break;
                     }
                 }
+                }  // end else (non-agent hit)
             }
             play_mode.replay_fire_request = false;
         }
