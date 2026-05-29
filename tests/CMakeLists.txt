@@ -3,3 +3,4 @@
 add_subdirectory(unit)
 add_subdirectory(golden)
 add_subdirectory(bench)
+add_subdirectory(lint)

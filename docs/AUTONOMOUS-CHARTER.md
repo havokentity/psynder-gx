@@ -41,6 +41,34 @@ idle waiting.
    moving on. Watch CI from push #1 (libc++/MSVC-STL + platform-define gaps only
    surface on CI).
 
+## 1b. Performance & DOTS guardrails (ENFORCED — never regress)
+
+This is a high-performance, DOTS-first engine. Every system obeys:
+- **DOTS-first / SoA.** Data in contiguous columns, iterated in chunks. No AoS
+  object graphs in sim/render/net hot paths. Components are POD.
+- **Crazy parallel.** Use `psynder::jobs` (`parallel_for` / job graph) for any
+  per-entity / per-chunk / per-tile work; design for many cores. Read phase →
+  parallel compute → write phase to stay order-independent **and** deterministic.
+- **Zero per-frame heap allocation in hot paths.** Allocate scratch once
+  (reserve/reuse); never `new`/`malloc`/vector-grow inside a tick/update/encode.
+- **SIMD kernels** where they pay (math, culling, broadphase, mixing,
+  agent/particle batches) via `engine/simd`; keep a deterministic scalar
+  fallback.
+- **No exceptions / RTTI / `std::shared_ptr`** in renderer/scene/physics/net/
+  audio-mixer hot paths (`shared_ptr` only in `engine/gpu` handles).
+- **Scale targets:** thousands of agents, many networked players, large maps —
+  add a scale/bench test for anything that must scale.
+- **GPU compute** for embarrassingly-parallel *cosmetic / non-authoritative*
+  work (particles/VFX) — but NEVER on the authoritative lockstep path
+  (cross-vendor GPU FP is non-deterministic).
+
+**Enforcement:** the `perf_guardrails` ctest (`scripts/perf_guardrails.sh`) fails
+on hot-path `shared_ptr`/RTTI/exceptions + any lockstep lane missing determinism
+flags — it runs every iteration + on CI. Beyond the mechanical lint, **self-audit
+every increment against this list before committing**, and add a bench/scale
+test for anything performance-critical. The full ctest + determinism matrix +
+golden suite are the standing nets.
+
 ## 2. Scope & ordering (what to build, in what order)
 
 **Raster first. Netcode + gameplay + editor in the middle. Ray tracing LAST**
@@ -76,8 +104,11 @@ Milestone themes (detailed, ordered backlog lives in `AUTONOMOUS-ROADMAP.md`):
 
 ## 3. The per-iteration loop (do this every wake)
 
-1. **Orient.** `cd` to the repo. `git status`; ensure on `nextgen/new-release`,
-   clean. Read this charter + `AUTONOMOUS-ROADMAP.md` (state + journal).
+1. **Orient.** Acquire the single-runner lock (§9): `mkdir
+   /tmp/psynder_gx_autoloop.lockdir` — if held, another iteration is mid-flight,
+   so just reschedule and end. `cd` to the repo; `git status`; ensure on
+   `nextgen/new-release`, clean. Verify the **previous push's CI** is green and
+   fix it before new work. Read this charter + `AUTONOMOUS-ROADMAP.md`.
 2. **Pick** the highest-priority **unblocked** roadmap item. One coherent
    increment per iteration (a feature, a lane, a demo, a fix).
 3. **Research** before non-trivial work: use `WebSearch`/`WebFetch` for
@@ -180,3 +211,28 @@ A **deterministic, networked, DOTS FPS prototype** that:
 
 When Done: write a final summary ADR + a `main` promotion PR (do not merge it),
 and stop the loop. Until then: keep building.
+
+## 9. Resilience & resume (survive the ~5-hour usage limit / session death)
+
+The run may hit the usage window or lose the session mid-flight. The loop is
+built to survive and auto-resume with zero input:
+- **State is durable, in the repo.** `AUTONOMOUS-ROADMAP.md` (backlog +
+  checkboxes + journal) and the git history ARE the resume state. Any fresh
+  invocation reconstructs full context by reading the charter + roadmap — so
+  keep the roadmap honest every iteration; resume must be lossless.
+- **Durable cron driver = the "am I back yet?" check.** A recurring local cron
+  re-enters this loop on an interval. While the usage window is exhausted, fires
+  fail harmlessly; the **first fire after the window resets resumes
+  automatically**. (As long as the machine/harness is running — it must be, the
+  builds are local Metal.)
+- **Single-runner lock.** Each iteration first `mkdir
+  /tmp/psynder_gx_autoloop.lockdir` (release on exit). If held, skip this fire.
+  This stops the cron and any in-session ScheduleWakeup from double-running on
+  the repo. The lock is best-effort; the roadmap-state + git are the real
+  serializer (each iteration picks the next *unblocked* item, so a double-fire
+  at worst does the next item, never corrupts).
+- **Always leave the tree GREEN + PUSHED.** Never end an iteration with a broken
+  build or unpushed work — a resume must start from a known-good state. Commit
+  small, push often.
+- **Never destructive.** `nextgen/new-release` only; no force-push; no `main`
+  promotion until Done.
