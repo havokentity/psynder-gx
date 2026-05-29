@@ -4480,9 +4480,13 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
                         mesh.index_count == 0) {
                         return;
                     }
-                    const ScenePushConstants pc = compose_scene_push_ecs(
+                    ScenePushConstants pc = compose_scene_push_ecs(
                         model, dm, render_camera, boot.environment,
                         boot.render_debug_mode, aspect, kDbgAlpha);
+                    // Force the UNLIT shader mode (params.w <= 1.5): the lit path
+                    // hardcodes alpha = 1, which would defeat the blend. Unlit
+                    // honours material.a so the shell reads as a translucent tint.
+                    pc.params[3] = 1.0f;
                     g::push_constants(cmd, &pc,
                                       static_cast<std::uint32_t>(sizeof(pc)),
                                       g::ShaderStage::AllGfx);
