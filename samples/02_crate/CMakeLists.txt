@@ -5,6 +5,15 @@
 # integration target for ECS + camera + input + physics + render extraction,
 # without growing a zoo of half-overlapping demos.
 
+# main.cpp uses the editor's scene-authoring + IPC (LooseSceneDocument parsing,
+# runtime console / web IPC), so this sample requires the editor. It is built
+# under PSYNDER_GX_BUILD_SAMPLES regardless of the editor flag, so skip it when
+# the editor is off (e.g. CI's engine+tests matrix) rather than link-erroring.
+if(NOT TARGET psynder_editor)
+    message(STATUS "sample_02_crate: skipped (requires PSYNDER_GX_EDITOR=ON for scene authoring + IPC)")
+    return()
+endif()
+
 add_executable(sample_02_crate main.cpp)
 target_compile_definitions(sample_02_crate PRIVATE
     "PSYNDER_GX_UI_IMM_SHADER_PATH=\"${CMAKE_SOURCE_DIR}/engine/ui/imm/shaders/imm_overlay.slang\""
