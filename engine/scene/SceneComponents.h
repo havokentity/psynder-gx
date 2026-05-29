@@ -20,11 +20,14 @@
 namespace psynder::scene {
 
 // Primitive shape shared by render (which builtin mesh) and physics (collider).
-enum class ShapeKind : u32 { Box = 0, Sphere = 1, Plane = 2 };
+// Capsule: a vertical capsule — half_extents.x is the radius, half_extents.y is
+// the half-height (total capsule height including the two hemispheres / 2), and
+// half_extents.z mirrors the radius. Used by mass agents (humanoid movers).
+enum class ShapeKind : u32 { Box = 0, Sphere = 1, Plane = 2, Capsule = 3 };
 
 PSYNDER_COMPONENT(Collider) {
     ShapeKind           kind;
-    psynder::math::Vec3 half_extents;  // Sphere: radius in half_extents.x
+    psynder::math::Vec3 half_extents;  // Sphere: radius in .x; Capsule: radius .x, half-height .y
 };
 
 PSYNDER_COMPONENT(RenderMaterial) {

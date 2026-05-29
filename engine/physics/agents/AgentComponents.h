@@ -38,8 +38,9 @@ PSYNDER_COMPONENT(Agent) {
     f32 max_force;
     f32 radius_m;
     f32 arrive_radius_m;
+    f32 height_m;          ///< total capsule height (incl. hemispheres); 0 => treat as a sphere of radius_m
 };
-static_assert(sizeof(Agent) == 16, "Agent layout frozen at 16 bytes");
+static_assert(sizeof(Agent) == 20, "Agent layout frozen at 20 bytes");
 
 // Current linear velocity (m/s, world space). Read AND written each tick.
 PSYNDER_COMPONENT(AgentVelocity) {

@@ -358,6 +358,7 @@ inline void spawn_play_crowd(PlayModeState& play, const psynder::math::Vec3& spa
     if (!play.sim_world) return;
     constexpr int kCrowd = 24;
     constexpr float kRadius = 0.4f;
+    constexpr float kHeight = 1.8f;  // humanoid capsule (total, incl. hemispheres)
     const float fx = std::sin(spawn_yaw_rad);
     const float fz = std::cos(spawn_yaw_rad);
     // Ring centred a few metres ahead of the player, behind the crate stack.
@@ -369,17 +370,19 @@ inline void spawn_play_crowd(PlayModeState& play, const psynder::math::Vec3& spa
         const float ang = (static_cast<float>(i) / static_cast<float>(kCrowd)) *
                           6.2831853f;
         const float ring = 3.0f + static_cast<float>(i % 3) * 0.8f;
-        const psynder::math::Vec3 pos{cx + std::cos(ang) * ring, kRadius,
+        // Centre the capsule at half its height so its feet sit on the ground.
+        const psynder::math::Vec3 pos{cx + std::cos(ang) * ring, kHeight * 0.5f,
                                       cz + std::sin(ang) * ring};
         s::Agent a{};
         a.max_speed_mps = 3.0f;   // ~jog
         a.max_force = 9.0f;       // m/s^2
         a.radius_m = kRadius;     // capsule radius
         a.arrive_radius_m = 1.5f;
+        a.height_m = kHeight;     // humanoid capsule => planar clamp grounds it
         const psynder::Entity e = s::spawn_agent(*play.sim_world, a, pos, spawn);
-        // Render + raycast as a teal sphere matching the agent radius.
-        play.sim_world->add(e, s::Collider{s::ShapeKind::Sphere,
-                                           {kRadius, kRadius, kRadius}});
+        // Render + raycast as a teal capsule (radius .x, half-height .y).
+        play.sim_world->add(e, s::Collider{s::ShapeKind::Capsule,
+                                           {kRadius, kHeight * 0.5f, kRadius}});
         play.sim_world->add(e, s::RenderMaterial{{0.10f, 0.70f, 0.66f}, 0.55f, 0.0f,
                                                  {0.02f, 0.18f, 0.17f}, 0.6f});
         play.crowd.push_back(e);
@@ -428,6 +431,7 @@ struct PrimitiveRenderResources {
     PrimitiveMeshGpu cube;
     PrimitiveMeshGpu arrow;
     PrimitiveMeshGpu sphere;
+    PrimitiveMeshGpu capsule;
     PrimitiveMeshGpu plane;
     PrimitiveMeshGpu grid;
     PrimitiveMeshGpu sky;
@@ -3633,6 +3637,35 @@ std::vector<std::uint16_t> build_sphere_indices(std::uint32_t rings,
     return indices;
 }
 
+// A capsule = a sphere of `radius` split at the equator and pulled apart by
+// `cyl_height`, so two hemispheres cap a cylindrical middle. Total height is
+// 2*radius + cyl_height, centred at the origin. Topology matches the sphere, so
+// build_sphere_indices(rings, segments) indexes it unchanged.
+std::vector<PrimitiveVertex> build_capsule_vertices(std::uint32_t rings,
+                                                    std::uint32_t segments,
+                                                    float radius, float cyl_height) {
+    std::vector<PrimitiveVertex> vertices;
+    vertices.reserve((rings + 1u) * (segments + 1u));
+    const float half_cyl = cyl_height * 0.5f;
+    for (std::uint32_t r = 0; r <= rings; ++r) {
+        const float v = static_cast<float>(r) / static_cast<float>(rings);
+        const float phi = v * psynder::math::kPi;
+        const float sy = std::cos(phi) * radius;  // sphere-space y (hemisphere)
+        const float rr = std::sin(phi) * radius;
+        const float yoff = (sy >= 0.0f) ? half_cyl : -half_cyl;
+        for (std::uint32_t s = 0; s <= segments; ++s) {
+            const float u = static_cast<float>(s) / static_cast<float>(segments);
+            const float theta = u * psynder::math::kTwoPi;
+            const float x = std::cos(theta) * rr;
+            const float z = std::sin(theta) * rr;
+            const psynder::math::Vec3 n = psynder::math::normalize({x, sy, z});
+            vertices.push_back(make_vertex(x, sy + yoff, z, n.x, n.y, n.z, u, v,
+                                           0.45f, 0.78f, 1.0f));
+        }
+    }
+    return vertices;
+}
+
 bool init_primitive_renderer(psynder::gpu::Device* dev,
                              PrimitiveRenderResources& out,
                              bool quiet) {
@@ -3728,6 +3761,17 @@ bool init_primitive_renderer(psynder::gpu::Device* dev,
         return false;
     }
 
+    // Humanoid agent capsule: radius 0.4 m, total height 1.8 m (cylinder 1.0 m
+    // + two 0.4 m hemispheres). Fixed size — all mass agents share it.
+    const std::vector<PrimitiveVertex> capsule_vertices =
+        build_capsule_vertices(12, 24, 0.4f, 1.0f);
+    if (!upload_mesh(dev, out.capsule,
+                     capsule_vertices.data(), capsule_vertices.size(),
+                     sphere_indices.data(), sphere_indices.size(),
+                     "arcade_capsule_mesh")) {
+        return false;
+    }
+
     auto make_pipeline_desc = [](bool depth_test, bool depth_write) {
         sh::GraphicsPipelineDesc gp{};
 #if defined(PSYNDER_GX_PRIMITIVE_SHADER_PATH)
@@ -3783,6 +3827,7 @@ void shutdown_primitive_renderer(PrimitiveRenderResources& r) {
     r.cube = {};
     r.arrow = {};
     r.sphere = {};
+    r.capsule = {};
     r.plane = {};
     r.grid = {};
     r.sky = {};
@@ -3805,9 +3850,10 @@ const PrimitiveMeshGpu& mesh_for_primitive(const PrimitiveRenderResources& resou
 const PrimitiveMeshGpu& mesh_for_collider(const PrimitiveRenderResources& resources,
                                           psynder::scene::ShapeKind kind) noexcept {
     switch (kind) {
-        case psynder::scene::ShapeKind::Sphere: return resources.sphere;
-        case psynder::scene::ShapeKind::Plane:  return resources.plane;
-        case psynder::scene::ShapeKind::Box:    return resources.cube;
+        case psynder::scene::ShapeKind::Sphere:  return resources.sphere;
+        case psynder::scene::ShapeKind::Capsule: return resources.capsule;
+        case psynder::scene::ShapeKind::Plane:   return resources.plane;
+        case psynder::scene::ShapeKind::Box:     return resources.cube;
     }
     return resources.cube;
 }
@@ -3978,7 +4024,8 @@ ScenePushConstants compose_scene_push_ecs(const psynder::math::Mat4& model,
                                           const SceneCamera& camera,
                                           const SceneEnvironment& environment,
                                           RenderDebugMode debug_mode,
-                                          float aspect) noexcept {
+                                          float aspect,
+                                          float alpha = 1.0f) noexcept {
     namespace m = psynder::math;
     const m::Vec3 pitch_yaw{
         camera.rotation_euler_deg.x * m::kDegToRad,
@@ -4021,7 +4068,7 @@ ScenePushConstants compose_scene_push_ecs(const psynder::math::Mat4& model,
     pc.material[0] += material.emissive.x * material.emissive_intensity;
     pc.material[1] += material.emissive.y * material.emissive_intensity;
     pc.material[2] += material.emissive.z * material.emissive_intensity;
-    pc.material[3] = 1.0f;
+    pc.material[3] = alpha;  // 1 = opaque; debug overlays pass < 1 for blending
     pc.params[0] = material.roughness;
     pc.params[1] = material.metallic;
     pc.params[2] = 0.0f;
@@ -4420,6 +4467,11 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
             // ── Debug-draw overlays (console `debugdraw colliders|flow`) ──────
             if (g_debug_draw_colliders || g_debug_draw_flow) {
                 namespace m = psynder::math;
+                // Depth-test but DON'T write depth, and blend: the debug shells
+                // read as a translucent tint over the real mesh instead of an
+                // opaque z-fighting shell.
+                g::bind_pipeline(cmd, primitive_resources.overlay_depth_pipeline);
+                constexpr float kDbgAlpha = 0.35f;
                 // Draw a primitive mesh under `model` with a debug material.
                 const auto draw_dbg = [&](const PrimitiveMeshGpu& mesh,
                                           const m::Mat4& model,
@@ -4430,7 +4482,7 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
                     }
                     const ScenePushConstants pc = compose_scene_push_ecs(
                         model, dm, render_camera, boot.environment,
-                        boot.render_debug_mode, aspect);
+                        boot.render_debug_mode, aspect, kDbgAlpha);
                     g::push_constants(cmd, &pc,
                                       static_cast<std::uint32_t>(sizeof(pc)),
                                       g::ShaderStage::AllGfx);

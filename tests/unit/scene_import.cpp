@@ -59,9 +59,10 @@ TEST_CASE("scene/import: parsed primitives become canonical ECS prop entities",
             for (std::size_t i = 0; i < n; ++i) {
                 ++props;
                 switch (col[i].kind) {
-                    case ShapeKind::Box:    ++boxes; break;
-                    case ShapeKind::Sphere: ++spheres; break;
-                    case ShapeKind::Plane:  ++planes; break;
+                    case ShapeKind::Box:     ++boxes; break;
+                    case ShapeKind::Sphere:  ++spheres; break;
+                    case ShapeKind::Plane:   ++planes; break;
+                    case ShapeKind::Capsule: break;  // not produced by scene import
                 }
                 if (xf[i].mtw.m[12] == 2.0f) {  // CrateA, authored at x=+2
                     found_crate_a = true;

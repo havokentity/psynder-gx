@@ -244,7 +244,9 @@ void update_agents(scene::World& ecs, const StaticColliders& statics,
                 if (tuning.planar) v.y = 0.0f;
                 if (!is_finite(v)) v = Vec3{0.0f, 0.0f, 0.0f};
                 Vec3 np = math::add(p, math::mul(v, dt_seconds));
-                if (tuning.planar) np.y = tuning.ground_y + a.radius_m;
+                if (tuning.planar)
+                    np.y = tuning.ground_y +
+                           (a.height_m > 0.0f ? 0.5f * a.height_m : a.radius_m);
                 if (!is_finite(np)) np = p;
 
                 // HARD non-penetration vs the recorded static colliders: push the
@@ -289,7 +291,9 @@ void update_agents(scene::World& ecs, const StaticColliders& statics,
                         if (vv[best] * best_sign < 0.0f) vv[best] = 0.0f;  // stop into-wall
                         v = Vec3{vv[0], vv[1], vv[2]};
                     }
-                    if (tuning.planar) np.y = tuning.ground_y + a.radius_m;
+                    if (tuning.planar)
+                    np.y = tuning.ground_y +
+                           (a.height_m > 0.0f ? 0.5f * a.height_m : a.radius_m);
                 }
 
                 scratch.vel_ptr[slot]->velocity = v;

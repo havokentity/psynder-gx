@@ -30,6 +30,10 @@ const BuiltinMesh& mesh_for(const Pipeline* p, scene::ShapeKind kind) {
     switch (kind) {
         case scene::ShapeKind::Sphere: return p->builtin_meshes.sphere;
         case scene::ShapeKind::Plane:  return p->builtin_meshes.plane;
+        // BuiltinMeshes has no capsule yet (lane 09 follow-up); stand in with the
+        // sphere so the extract path stays exhaustive. The 02_crate sample draws
+        // its own capsule mesh for agents.
+        case scene::ShapeKind::Capsule: return p->builtin_meshes.sphere;
         case scene::ShapeKind::Box:    break;
     }
     return p->builtin_meshes.box;
