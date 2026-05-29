@@ -128,6 +128,15 @@ using ScenePlayerController = psynder::sample02::ScenePlayerController;
 namespace phys = psynder::physics;
 namespace character_spine = psynder::physics::character_spine;
 
+// Debug-draw toggles, flipped by the `debugdraw` console command and read by the
+// play-mode render pass. The sample is single-instance, so file-scope state is
+// fine. `colliders` overlays each collision volume as a bright per-type shell;
+// `flow` shows each agent's heading (along its velocity) + its steering target.
+namespace {
+bool g_debug_draw_colliders = false;
+bool g_debug_draw_flow = false;
+}  // namespace
+
 struct EditorPickRay {
     psynder::math::Vec3 origin{};
     psynder::math::Vec3 dir{0.0f, 0.0f, -1.0f};
@@ -2100,6 +2109,32 @@ void register_sample_editor_commands(PlayerBootState& boot,
                 const RenderDebugMode mode = render_debug_from_token(args[0]);
                 (void)sync_editor_render_debug(boot, mode);
                 out.FormatLine("render_debug: {}", render_debug_token(boot.render_debug_mode));
+            });
+    }
+    if (con.FindCommand("debugdraw") == nullptr) {
+        con.RegisterCommand(
+            "debugdraw",
+            "Toggle play-mode debug draw: 'colliders' (collision volumes), "
+            "'flow' (agent heading + target), or 'off'.",
+            [](std::span<const std::string_view> args,
+               psynder::console::Output& out) {
+                if (!args.empty()) {
+                    const std::string_view a = args[0];
+                    if (a == "colliders") {
+                        g_debug_draw_colliders = !g_debug_draw_colliders;
+                    } else if (a == "flow") {
+                        g_debug_draw_flow = !g_debug_draw_flow;
+                    } else if (a == "off") {
+                        g_debug_draw_colliders = false;
+                        g_debug_draw_flow = false;
+                    } else {
+                        out.FormatLine(
+                            "debugdraw: unknown '{}' (use colliders|flow|off)", a);
+                        return;
+                    }
+                }
+                out.FormatLine("debugdraw: colliders={} flow={}",
+                               g_debug_draw_colliders, g_debug_draw_flow);
             });
     }
     if (con.FindCommand("depth_view") == nullptr) {
@@ -4381,6 +4416,92 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
                         g::draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
                     }
                 });
+
+            // ── Debug-draw overlays (console `debugdraw colliders|flow`) ──────
+            if (g_debug_draw_colliders || g_debug_draw_flow) {
+                namespace m = psynder::math;
+                // Draw a primitive mesh under `model` with a debug material.
+                const auto draw_dbg = [&](const PrimitiveMeshGpu& mesh,
+                                          const m::Mat4& model,
+                                          const s::RenderMaterial& dm) {
+                    if (!mesh.vertex_buffer || !mesh.index_buffer ||
+                        mesh.index_count == 0) {
+                        return;
+                    }
+                    const ScenePushConstants pc = compose_scene_push_ecs(
+                        model, dm, render_camera, boot.environment,
+                        boot.render_debug_mode, aspect);
+                    g::push_constants(cmd, &pc,
+                                      static_cast<std::uint32_t>(sizeof(pc)),
+                                      g::ShaderStage::AllGfx);
+                    g::bind_vertex_buffer(cmd, 0, mesh.vertex_buffer.get(), 0);
+                    g::bind_index_buffer(cmd, mesh.index_buffer.get(),
+                                         g::IndexType::U16, 0);
+                    g::draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+                };
+                // Uniform-scale a TRS matrix about its own centre (scales the 3x3
+                // basis, leaves the translation column).
+                const auto scaled = [](const m::Mat4& src, float s) {
+                    m::Mat4 r = src;
+                    for (int c = 0; c < 3; ++c)
+                        for (int row = 0; row < 3; ++row) r.m[c * 4 + row] *= s;
+                    return r;
+                };
+
+                if (g_debug_draw_colliders) {
+                    // A bright per-type shell around every collision volume:
+                    // agent = cyan, dynamic body = orange, static = green.
+                    play.sim_world->for_each_chunk_with_entities<s::TransformWS,
+                                                                 s::Collider>(
+                        [&](std::size_t n, const psynder::Entity* ents,
+                            s::TransformWS* xf, s::Collider* col) {
+                            for (std::size_t i = 0; i < n; ++i) {
+                                m::Vec3 c{0.10f, 0.85f, 0.25f};  // static green
+                                if (play.sim_world->get<s::Agent>(ents[i])) {
+                                    c = {0.10f, 0.85f, 0.95f};   // agent cyan
+                                } else if (play.sim_world->get<s::DynamicBody>(
+                                               ents[i])) {
+                                    c = {0.95f, 0.55f, 0.10f};   // dynamic orange
+                                }
+                                const s::RenderMaterial dm{c, 0.5f, 0.0f, c, 1.3f};
+                                draw_dbg(mesh_for_collider(primitive_resources,
+                                                           col[i].kind),
+                                         scaled(xf[i].mtw, 1.04f), dm);
+                            }
+                        });
+                }
+
+                if (g_debug_draw_flow) {
+                    // Per agent: a hot heading marker offset along its velocity,
+                    // plus a yellow marker at its steering target.
+                    play.sim_world->for_each_chunk<s::TransformWS, s::AgentVelocity,
+                                                   s::AgentTarget>(
+                        [&](std::size_t n, s::TransformWS* xf,
+                            s::AgentVelocity* vel, s::AgentTarget* tgt) {
+                            for (std::size_t i = 0; i < n; ++i) {
+                                const m::Vec3 p{xf[i].mtw.m[12], xf[i].mtw.m[13],
+                                                xf[i].mtw.m[14]};
+                                const m::Vec3 v = vel[i].velocity;
+                                const float sp = m::length(v);
+                                if (sp > 1e-3f) {
+                                    const m::Vec3 np = m::add(
+                                        p, m::mul(m::mul(v, 1.0f / sp), 0.6f));
+                                    const m::Vec3 hot{
+                                        1.0f, std::min(0.2f + 0.2f * sp, 0.9f), 0.05f};
+                                    const s::RenderMaterial dm{hot, 0.4f, 0.0f, hot,
+                                                               1.6f};
+                                    draw_dbg(primitive_resources.cube,
+                                             scaled(m::translate(np), 0.16f), dm);
+                                }
+                                const s::RenderMaterial tm{{0.95f, 0.9f, 0.2f}, 0.4f,
+                                                           0.0f, {0.5f, 0.45f, 0.1f},
+                                                           1.0f};
+                                draw_dbg(primitive_resources.cube,
+                                         scaled(m::translate(tgt[i].goal), 0.2f), tm);
+                            }
+                        });
+                }
+            }
         } else {
             for (const ScenePrimitive& primitive : boot.primitives) {
                 const PrimitiveMeshGpu& mesh = mesh_for_primitive(primitive_resources, primitive.kind);
