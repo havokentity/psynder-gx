@@ -291,6 +291,7 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
     entry.depth_format = desc.depth_format;
     entry.enable_depth_write = desc.enable_depth_write;
     entry.enable_blend = desc.enable_blend;
+    entry.fill_wireframe = (desc.fill_mode == FillMode::Wireframe);
 
     std::string log_vs, log_fs;
     bool vs_ok = compile_stage_for_active_backend(
@@ -323,7 +324,7 @@ PipelineHandle create_graphics(const GraphicsPipelineDesc& desc)
     const bool pso_ok = impl::create_and_register_graphics_pso(
         entry.id, entry.spirv_vs, entry.spirv_fs, vs_ep, fs_ep,
         desc.vertex_input, desc.color_format_count, desc.depth_format,
-        desc.enable_depth_write, desc.enable_blend);
+        desc.enable_depth_write, desc.enable_blend, entry.fill_wireframe);
     entry.pso_registered = pso_ok;
     if (!pso_ok) {
         // The handle id is still valid; lane 07's bind_pipeline path will
@@ -462,6 +463,7 @@ void hot_reload_changed()
             std::uint8_t    depth_format;
             bool            enable_depth_write;
             bool            enable_blend;
+            bool            fill_wireframe;
         };
         std::vector<PipeSnap> targets;
         {
@@ -476,7 +478,8 @@ void hot_reload_changed()
                                    cached.color_format_count,
                                    cached.depth_format,
                                    cached.enable_depth_write,
-                                   cached.enable_blend});
+                                   cached.enable_blend,
+                                   cached.fill_wireframe});
             }
         }
 
@@ -521,7 +524,7 @@ void hot_reload_changed()
                     t.id, new_vs, new_fs,
                     t.entry_vs.c_str(), t.entry_fs.c_str(),
                     t.vertex_input, t.color_format_count, t.depth_format,
-                    t.enable_depth_write, t.enable_blend);
+                    t.enable_depth_write, t.enable_blend, t.fill_wireframe);
             }
             if (!t.entry_cs.empty() && !new_cs.empty()) {
                 impl::create_and_register_compute_pso(

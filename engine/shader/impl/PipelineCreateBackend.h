@@ -90,7 +90,8 @@ bool create_and_register_graphics_pso(
     std::uint32_t                     color_format_count,
     std::uint8_t                      depth_format,
     bool                              enable_depth_write,
-    bool                              enable_blend);
+    bool                              enable_blend,
+    bool                              fill_wireframe);
 
 bool create_and_register_compute_pso(
     std::uint32_t                     handle_id,

@@ -44,7 +44,7 @@
 // ─── Lane-07 registration shims (extern "C" symbols defined in
 //     engine/gpu/mtl/MetalBackend.mm) ───────────────────────────────────
 extern "C" void psynder_gx_mtl_register_render_pso(
-    std::uint32_t handle_id, void* mtl_pso);
+    std::uint32_t handle_id, void* mtl_pso, bool fill_wireframe);
 
 extern "C" void psynder_gx_mtl_register_compute_pso(
     std::uint32_t handle_id, void* mtl_pso,
@@ -230,7 +230,8 @@ bool create_and_register_graphics_pso(
     std::uint32_t                     color_format_count,
     std::uint8_t                      depth_format,
     bool                              enable_depth_write,
-    bool                              enable_blend)
+    bool                              enable_blend,
+    bool                              fill_wireframe)
 {
     (void)enable_depth_write; // Metal compare/write state is encoder-side.
     if (!ensure_device()) return false;
@@ -356,7 +357,10 @@ bool create_and_register_graphics_pso(
         // bridge-casts to id<MTLRenderPipelineState> on its side
         // (also -fno-objc-arc).  The lane-07 shim is itself mutex-guarded
         // (see psynder_gx_mtl_register_render_pso in MetalBackend.mm).
-        psynder_gx_mtl_register_render_pso(handle_id, (__bridge void*)pso);
+        // Triangle fill mode is render-command-encoder state in Metal (NOT
+        // part of the MTLRenderPipelineState), so the wireframe flag travels
+        // alongside the PSO into lane 07's shim and is applied at bind time.
+        psynder_gx_mtl_register_render_pso(handle_id, (__bridge void*)pso, fill_wireframe);
         return true;
     }
 }

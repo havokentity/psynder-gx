@@ -428,6 +428,9 @@ struct PrimitiveRenderResources {
     psynder::shader::PipelineHandle scene_pipeline{};
     psynder::shader::PipelineHandle overlay_pipeline{};
     psynder::shader::PipelineHandle overlay_depth_pipeline{};
+    // Translucent WIREFRAME outline pipeline for `debugdraw colliders`
+    // (depth-test on, depth-write off, blend on, FillMode::Wireframe).
+    psynder::shader::PipelineHandle wireframe_pipeline{};
     PrimitiveMeshGpu cube;
     PrimitiveMeshGpu arrow;
     PrimitiveMeshGpu sphere;
@@ -3772,7 +3775,8 @@ bool init_primitive_renderer(psynder::gpu::Device* dev,
         return false;
     }
 
-    auto make_pipeline_desc = [](bool depth_test, bool depth_write) {
+    auto make_pipeline_desc = [](bool depth_test, bool depth_write,
+                                 sh::FillMode fill = sh::FillMode::Solid) {
         sh::GraphicsPipelineDesc gp{};
 #if defined(PSYNDER_GX_PRIMITIVE_SHADER_PATH)
         gp.slang_path = PSYNDER_GX_PRIMITIVE_SHADER_PATH;
@@ -3788,6 +3792,7 @@ bool init_primitive_renderer(psynder::gpu::Device* dev,
             : 0u;
         gp.enable_depth_write = depth_write;
         gp.enable_blend = true;
+        gp.fill_mode = fill;
         sh::VertexInputDesc& vi = gp.vertex_input;
         vi.binding_count = 1;
         vi.bindings[0].stride = static_cast<std::uint16_t>(sizeof(PrimitiveVertex));
@@ -3802,9 +3807,15 @@ bool init_primitive_renderer(psynder::gpu::Device* dev,
     out.scene_pipeline = sh::create_graphics(make_pipeline_desc(true, true));
     out.overlay_pipeline = sh::create_graphics(make_pipeline_desc(false, false));
     out.overlay_depth_pipeline = sh::create_graphics(make_pipeline_desc(true, false));
+    // Translucent wireframe outlines for collider debug draws: depth-test
+    // on (so outlines occlude correctly), depth-write off (overlay), blend
+    // on (keep the existing translucent alpha), FillMode::Wireframe.
+    out.wireframe_pipeline = sh::create_graphics(
+        make_pipeline_desc(true, false, sh::FillMode::Wireframe));
     out.ready = out.scene_pipeline.valid() &&
         out.overlay_pipeline.valid() &&
-        out.overlay_depth_pipeline.valid();
+        out.overlay_depth_pipeline.valid() &&
+        out.wireframe_pipeline.valid();
     if (!out.ready && !quiet) {
         std::fputs("[PsyArcadeGX] primitive render pipeline unavailable\n", stderr);
     }
@@ -3819,6 +3830,10 @@ void shutdown_primitive_renderer(PrimitiveRenderResources& r) {
     if (r.overlay_pipeline.valid()) {
         psynder::shader::destroy_pipeline(r.overlay_pipeline);
         r.overlay_pipeline = {};
+    }
+    if (r.wireframe_pipeline.valid()) {
+        psynder::shader::destroy_pipeline(r.wireframe_pipeline);
+        r.wireframe_pipeline = {};
     }
     if (r.overlay_depth_pipeline.valid()) {
         psynder::shader::destroy_pipeline(r.overlay_depth_pipeline);
@@ -4469,8 +4484,20 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
                 namespace m = psynder::math;
                 // Depth-test but DON'T write depth, and blend: the debug shells
                 // read as a translucent tint over the real mesh instead of an
-                // opaque z-fighting shell.
-                g::bind_pipeline(cmd, primitive_resources.overlay_depth_pipeline);
+                // opaque z-fighting shell. Colliders bind the WIREFRAME pipeline
+                // below so their volumes render as translucent outlines; flow
+                // markers keep the filled overlay pipeline.
+                const auto bind_filled_dbg = [&]() {
+                    g::bind_pipeline(cmd, primitive_resources.overlay_depth_pipeline);
+                };
+                const auto bind_wire_dbg = [&]() {
+                    if (primitive_resources.wireframe_pipeline.valid()) {
+                        g::bind_pipeline(cmd, primitive_resources.wireframe_pipeline);
+                    } else {
+                        bind_filled_dbg();
+                    }
+                };
+                bind_filled_dbg();
                 constexpr float kDbgAlpha = 0.35f;
                 // Draw a primitive mesh under `model` with a debug material.
                 const auto draw_dbg = [&](const PrimitiveMeshGpu& mesh,
@@ -4505,8 +4532,9 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
                 };
 
                 if (g_debug_draw_colliders) {
-                    // A bright per-type shell around every collision volume:
-                    // agent = cyan, dynamic body = orange, static = green.
+                    // A bright per-type wireframe shell around every collision
+                    // volume: agent = cyan, dynamic body = orange, static = green.
+                    bind_wire_dbg();
                     play.sim_world->for_each_chunk_with_entities<s::TransformWS,
                                                                  s::Collider>(
                         [&](std::size_t n, const psynder::Entity* ents,
@@ -4529,7 +4557,9 @@ bool encode_player_scene_pass(psynder::gpu::CmdBuffer* cmd,
 
                 if (g_debug_draw_flow) {
                     // Per agent: a hot heading marker offset along its velocity,
-                    // plus a yellow marker at its steering target.
+                    // plus a yellow marker at its steering target. Flow markers
+                    // stay filled (rebind in case colliders left wireframe bound).
+                    bind_filled_dbg();
                     play.sim_world->for_each_chunk<s::TransformWS, s::AgentVelocity,
                                                    s::AgentTarget>(
                         [&](std::size_t n, s::TransformWS* xf,

@@ -56,6 +56,9 @@ struct CachedPipeline {
     std::uint8_t         depth_format = 0;
     bool                 enable_depth_write = true;
     bool                 enable_blend = false;
+    // Wireframe polygon fill (GraphicsPipelineDesc::fill_mode == Wireframe).
+    // Cached so hot-reload rebuilds the PSO with the same rasterization mode.
+    bool                 fill_wireframe = false;
 };
 
 // ─── Registry (global singleton for this translation unit) ────────────────

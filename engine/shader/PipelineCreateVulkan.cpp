@@ -100,6 +100,10 @@ struct DeferredGfx {
     std::uint8_t               depth_format = 0;
     bool                       enable_depth_write = true;
     bool                       enable_blend = false;
+    // Wireframe polygon fill (GraphicsPipelineDesc::fill_mode == Wireframe).
+    // Maps to VK_POLYGON_MODE_LINE when fillModeNonSolid is supported, else
+    // falls back to VK_POLYGON_MODE_FILL (logged once).
+    bool                       fill_wireframe = false;
     // Vertex input layout (lane 09 / sample01-003).  attr_count == 0
     // signals "use DefaultVertexLayout".  Stored by value because
     // VertexInputDesc is POD with fixed-size arrays (no heap).
@@ -340,7 +344,30 @@ bool build_gfx_now(const DeferredGfx& d) {
     rs.polygonMode  = VK_POLYGON_MODE_FILL;
     rs.cullMode     = VK_CULL_MODE_NONE;  // M1: no culling, deferred to M2
     rs.frontFace    = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // lineWidth stays 1.0 — wider strokes need the wideLines feature which
+    // we deliberately do not require. VK_POLYGON_MODE_LINE only needs the
+    // fillModeNonSolid feature, which VulkanBackend.cpp enables when the
+    // GPU advertises it. We query the SAME physical-device feature here so
+    // the polygon mode matches what the device was actually created with;
+    // when unsupported we fall back to FILL (logged once, no crash).
     rs.lineWidth    = 1.0f;
+    if (d.fill_wireframe) {
+        VkPhysicalDeviceFeatures feats{};
+        if (g_ctx.phys != VK_NULL_HANDLE) {
+            vkGetPhysicalDeviceFeatures(g_ctx.phys, &feats);
+        }
+        if (feats.fillModeNonSolid) {
+            rs.polygonMode = VK_POLYGON_MODE_LINE;
+        } else {
+            static bool s_warned = false;
+            if (!s_warned) {
+                std::fprintf(stderr,
+                    "[psy::shader::vk] fillModeNonSolid unsupported — wireframe "
+                    "pipeline (id=%u) falls back to solid fill\n", d.id);
+                s_warned = true;
+            }
+        }
+    }
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -514,7 +541,8 @@ bool create_and_register_graphics_pso(
     std::uint32_t                     color_format_count,
     std::uint8_t                      depth_format,
     bool                              enable_depth_write,
-    bool                              enable_blend)
+    bool                              enable_blend,
+    bool                              fill_wireframe)
 {
     if (vs_blob.empty() || fs_blob.empty()) return false;
     std::lock_guard<std::mutex> lock(g_ctx_mu);
@@ -531,6 +559,7 @@ bool create_and_register_graphics_pso(
         d.depth_format = depth_format;
         d.enable_depth_write = enable_depth_write;
         d.enable_blend = enable_blend;
+        d.fill_wireframe = fill_wireframe;
         d.vi       = vertex_input;
         g_deferred_gfx.push_back(std::move(d));
         return true; // not failed — just pending
@@ -546,6 +575,7 @@ bool create_and_register_graphics_pso(
     d.depth_format = depth_format;
     d.enable_depth_write = enable_depth_write;
     d.enable_blend = enable_blend;
+    d.fill_wireframe = fill_wireframe;
     d.vi       = vertex_input;
     return build_gfx_now(d);
 }

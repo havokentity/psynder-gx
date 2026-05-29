@@ -756,6 +756,21 @@ bool VulkanBackend::create_logical_device_(Device* dev) {
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
 
+    // Enable fillModeNonSolid when the GPU advertises it. This is the
+    // prerequisite for VK_POLYGON_MODE_LINE (wireframe debug draws). The
+    // pipeline lane (PipelineCreateVulkan.cpp) makes the identical query
+    // against the same VkPhysicalDevice and only emits LINE polygon mode
+    // when this feature is present, so the two stay in lockstep. We do NOT
+    // request wideLines — wireframe stays at lineWidth 1.0.
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(phys_, &supported);
+    VkPhysicalDeviceFeatures enabled{};
+    enabled.fillModeNonSolid = supported.fillModeNonSolid;
+    if (!supported.fillModeNonSolid) {
+        std::fputs("[psy::gpu::vk] fillModeNonSolid unsupported; wireframe fill "
+                   "mode will fall back to solid\n", stderr);
+    }
+
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.pNext                   = &f13;
@@ -763,6 +778,7 @@ bool VulkanBackend::create_logical_device_(Device* dev) {
     dci.pQueueCreateInfos       = &qci;
     dci.enabledExtensionCount   = static_cast<std::uint32_t>(dexts.size());
     dci.ppEnabledExtensionNames = dexts.data();
+    dci.pEnabledFeatures        = &enabled;
 
     VK_CHECK(vkCreateDevice(phys_, &dci, nullptr, &device_));
     volkLoadDevice(device_);
