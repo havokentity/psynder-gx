@@ -101,8 +101,11 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       (iter 19): engine/script/behavior/BehaviorIR — a register-machine IR +
       deterministic interpreter over SoA streams (the middle layer between the
       VisualGraphCompiler front-end and the BehaviorSpine SIMD execution).
-      Front-end lowering (graph JSON → IR) + the MathLogicKernel SIMD back-end
-      for the IR = follow-ups.**
+      Front-end lowering DONE (iter 20): VisualGraphCompiler::lower_graph_to_ir
+      compiles a node graph (input/const/output + add/sub/mul/div/neg/min/max/
+      cmp*/select) straight to a BehaviorProgram — a graph drives a real ECS
+      behavior, no Lua. The MathLogicKernel SIMD back-end for the IR + binding
+      streams to live ECS component columns = follow-ups.**
 
 ### D — Demos (test harness while editor matures)
 - [ ] `samples/arena` (Quake3), crowd-combat, destruction sandbox, vehicle test,
@@ -121,6 +124,32 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 20) **PsyGraph → Behavior IR lowering — a graph drives a real DOTS
+  behavior (item S / ADR-018).** Connected iter-19's executable IR to the graph
+  front-end. New `VisualGraphCompiler::lower_graph_to_ir(graph_json)` (reuses the
+  lane's existing JSON parser + node model) compiles a node graph straight into a
+  `behavior::BehaviorProgram`: each node → one IR register (inputs reference
+  earlier nodes, document order), with ops `input` (LoadStream), `const`,
+  `output` (StoreStream), `add/sub/mul/div`, `neg` (× −1), `min/max`,
+  `cmple/cmplt/cmpge/cmpgt`, and `select`; the result carries a `streams[]`
+  name→slot map so the caller binds ECS component columns to the program's
+  stream slots. This is the user's "PsyGraph → native DOTS, away from Lua" path:
+  the SAME graph that `compile_visual_graph` lowers to Lua TEXT now lowers to an
+  executable deterministic IR instead. Tests (5): an arithmetic graph computes
+  v*2+1 over a chunk, a threshold+select rule heals low health (the iter-19
+  hand-built behavior, now authored as a graph and producing identical results),
+  a multi-stream graph reads two columns + writes a third, malformed graphs fail
+  with diagnostics (bad JSON / no nodes / unknown op / missing inputs), and
+  lowering is deterministic. Local: mac-debug ctest **649/649** (+5), mac-release
+  determinism+graph+behavior 51/51 (golden pin intact), server+crate smokes exit
+  0. Decision: added the lowering INTO VisualGraphCompiler.cpp (same psynder_script
+  lane as BehaviorIR) to reuse its JsonParser/node helpers — zero new parser, no
+  cross-lane dep. Follow-ups: bind the program's streams to live ECS chunks (run
+  a graph as an actual gameplay system over for_each_chunk), the MathLogicKernel
+  SIMD back-end, effect ops (spawn/destroy) in the IR, hot reload. Next: the IR
+  SIMD back-end, run-a-graph-over-the-ECS binding, the UDP transport, or
+  terrain-aware match spawns.
 
 - (iter 19) **Executable Behavior IR — the DOTS middle of PsyGraph (item S /
   ADR-018).** The two ends existed but were disconnected: VisualGraphCompiler

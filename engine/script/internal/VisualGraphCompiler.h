@@ -9,8 +9,11 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/Types.h"
+
+#include "script/behavior/BehaviorIR.h"
 
 namespace psynder::script::detail {
 
@@ -58,5 +61,29 @@ VisualCompileResult compile_visual_graph(std::string_view graph_json);
 bool is_visual_graph_name(std::string_view name) noexcept;
 bool has_visual_graph_marker(std::string_view source) noexcept;
 std::string_view strip_visual_graph_marker(std::string_view source) noexcept;
+
+// ── PsyGraph → executable Behavior IR (ADR-018) ─────────────────────────────
+// Lowers a graph document directly into a deterministic behavior::BehaviorProgram
+// (engine/script/behavior/BehaviorIR) that runs over SoA component columns — the
+// native-DOTS path, distinct from the Lua text `compile_visual_graph` emits.
+//
+// Node wire shape (each node -> one IR register; inputs reference EARLIER nodes):
+//   {"id":"hp",   "op":"input",  "stream":"health"}
+//   {"id":"thr",  "op":"const",  "value":25}
+//   {"id":"low",  "op":"cmple",  "inputs":["hp","thr"]}
+//   {"id":"heal", "op":"const",  "value":50}
+//   {"id":"hp2",  "op":"add",    "inputs":["hp","heal"]}
+//   {"id":"sel",  "op":"select", "inputs":["low","hp2","hp"]}
+//   {"id":"w",    "op":"output", "stream":"health", "input":"sel"}
+// Ops: input, const, output, add, sub, mul, div, neg, min, max,
+//      cmple, cmplt, cmpge, cmpgt, select. `streams[i]` names stream id i so the
+// caller can bind ECS component columns to the program's stream slots.
+struct GraphIrResult {
+    bool                       ok = false;
+    behavior::BehaviorProgram  program;
+    std::vector<std::string>   streams;  // index = stream id, value = its name
+    std::string                diagnostic;
+};
+GraphIrResult lower_graph_to_ir(std::string_view graph_json);
 
 }  // namespace psynder::script::detail

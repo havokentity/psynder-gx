@@ -1034,4 +1034,125 @@ std::string_view strip_visual_graph_marker(std::string_view source) noexcept {
     return source.substr(eol + 1);
 }
 
+// ── PsyGraph → Behavior IR lowering (ADR-018) ───────────────────────────────
+GraphIrResult lower_graph_to_ir(std::string_view graph_json) {
+    GraphIrResult res;
+    JsonValue root;
+    JsonParser parser(graph_json);
+    if (!parser.parse(root)) {
+        res.diagnostic = parser.error();
+        return res;
+    }
+    const JsonValue* nodes = root.field("nodes");
+    if (!is_array(nodes)) {
+        res.diagnostic = "graph root must contain a nodes array";
+        return res;
+    }
+
+    behavior::BehaviorProgram prog;
+    std::unordered_map<std::string, u16> node_reg;    // node id -> register
+    std::unordered_map<std::string, u16> stream_idx;  // stream name -> slot
+
+    const auto stream_for = [&](const std::string& name) -> u16 {
+        const auto it = stream_idx.find(name);
+        if (it != stream_idx.end()) return it->second;
+        const u16 id = static_cast<u16>(stream_idx.size());
+        stream_idx.emplace(name, id);
+        res.streams.push_back(name);
+        return id;
+    };
+    const auto input_id = [](const JsonValue& node, usize k) -> std::string {
+        if (const JsonValue* in = node.field("inputs");
+            in != nullptr && in->kind == JsonValue::Kind::Array && k < in->array.size() &&
+            in->array[k].kind == JsonValue::Kind::String) {
+            return in->array[k].text;
+        }
+        if (k == 0) return node_string_or(node, "input", "");
+        return {};
+    };
+
+    const auto emit = [&](behavior::Op op, u16 a, u16 b = 0, u16 c = 0, u16 d = 0) {
+        behavior::Instr ins{};
+        ins.op = op; ins.a = a; ins.b = b; ins.c = c; ins.d = d;
+        prog.code.push_back(ins);
+    };
+
+    struct BinOp { const char* name; behavior::Op op; };
+    static const BinOp kBin[] = {
+        {"add", behavior::Op::Add},   {"sub", behavior::Op::Sub},
+        {"mul", behavior::Op::Mul},   {"div", behavior::Op::Div},
+        {"min", behavior::Op::Min},   {"max", behavior::Op::Max},
+        {"cmple", behavior::Op::CmpLE}, {"cmplt", behavior::Op::CmpLT},
+        {"cmpge", behavior::Op::CmpGE}, {"cmpgt", behavior::Op::CmpGT},
+    };
+
+    for (usize i = 0; i < nodes->array.size(); ++i) {
+        const JsonValue& node = nodes->array[i];
+        const std::string id = node_string_or(node, "id", "");
+        const std::string op = node_string_or(node, "op", "");
+        if (id.empty()) { res.diagnostic = "node missing id"; return res; }
+
+        const auto reg_of = [&](const std::string& nid, u16& out) -> bool {
+            const auto it = node_reg.find(nid);
+            if (it == node_reg.end()) return false;
+            out = it->second;
+            return true;
+        };
+
+        if (op == "output") {
+            // No value of its own: store the input node's register to a stream.
+            const std::string s = node_string_or(node, "stream", "");
+            u16 ri = 0;
+            if (s.empty() || !reg_of(input_id(node, 0), ri)) {
+                res.diagnostic = "output node '" + id + "' needs stream + input";
+                return res;
+            }
+            emit(behavior::Op::StoreStream, ri, stream_for(s));
+            continue;  // output produces no register
+        }
+
+        const u16 dst = prog.num_registers++;
+        if (op == "const") {
+            f64 v = 0.0;
+            json_number(node.field("value"), v);
+            behavior::Instr ins{};
+            ins.op = behavior::Op::LoadConst; ins.a = dst; ins.imm = static_cast<f32>(v);
+            prog.code.push_back(ins);
+        } else if (op == "input") {
+            const std::string s = node_string_or(node, "stream", "");
+            if (s.empty()) { res.diagnostic = "input node '" + id + "' needs a stream"; return res; }
+            emit(behavior::Op::LoadStream, dst, stream_for(s));
+        } else if (op == "neg") {
+            u16 ri = 0;
+            if (!reg_of(input_id(node, 0), ri)) { res.diagnostic = "neg '" + id + "' bad input"; return res; }
+            const u16 tmp = prog.num_registers++;
+            behavior::Instr c{}; c.op = behavior::Op::LoadConst; c.a = tmp; c.imm = -1.0f;
+            prog.code.push_back(c);
+            emit(behavior::Op::Mul, dst, ri, tmp);
+        } else if (op == "select") {
+            u16 rc = 0, rt = 0, rf = 0;
+            if (!reg_of(input_id(node, 0), rc) || !reg_of(input_id(node, 1), rt) ||
+                !reg_of(input_id(node, 2), rf)) {
+                res.diagnostic = "select '" + id + "' needs 3 inputs"; return res;
+            }
+            emit(behavior::Op::Select, dst, rc, rt, rf);
+        } else {
+            const behavior::Op* found = nullptr;
+            for (const BinOp& bo : kBin) if (op == bo.name) { found = &bo.op; break; }
+            if (found == nullptr) { res.diagnostic = "unknown op: " + op; return res; }
+            u16 ra = 0, rb = 0;
+            if (!reg_of(input_id(node, 0), ra) || !reg_of(input_id(node, 1), rb)) {
+                res.diagnostic = op + " '" + id + "' needs 2 inputs"; return res;
+            }
+            emit(*found, dst, ra, rb);
+        }
+        node_reg[id] = dst;
+    }
+
+    prog.num_streams = static_cast<u16>(stream_idx.size());
+    res.program = std::move(prog);
+    res.ok = true;
+    return res;
+}
+
 }  // namespace psynder::script::detail
