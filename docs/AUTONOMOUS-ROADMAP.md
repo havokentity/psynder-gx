@@ -130,6 +130,38 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 44) **6-LANE WAVE #9 (interleaved with integration #4) — six more additive
+  features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
+  golden code.** Shipped:
+  1. **gameplay/Heal** — healing: apply_heal (capped, overheal-aware, no revive of
+     the dead) + a HealOverTime buff component + grant_hot/tick_heals.
+  2. **ai/WaypointGraph** — sparse nav graph: add_node/add_edge, nearest_node,
+     graph A* (Euclidean edge costs, straight-line heuristic, lowest-index ties).
+  3. **net/PlayoutClock** — the client interpolation clock that trails the snapshot
+     stream by a fixed delay (feeds SnapshotInterp); advances by dt + re-syncs on
+     drift.
+  4. **world/outdoor/Splatmap** — continuous terrain material BLEND weights
+     (grass/rock/snow/sand, sum to 1) by slope+height via smoothstep; the soft
+     render complement to TerrainMaterial's hard pick.
+  5. **camera/Orbit** — third-person orbit/chase camera (eye on a sphere around a
+     target by yaw/pitch/distance) + rotate/zoom.
+  6. **audio/Echo** — feedback-delay (echo) tap schedule: delay samples + geometric
+     tap gains + audible-tap count.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files;
+  registered 1378. THREE fixes (one real impl bug, two test bugs): (a) Orbit had
+  forward.y = +sin(pitch) so a positive pitch LOWERED the eye (eye = target -
+  forward*d) — its own comment said "raises" — negated to -sin(pitch) so positive
+  pitch elevates the chase cam (impl fix); (b) the WaypointGraph nearest-node tie
+  test queried (5,0,3) calling it a 0-vs-1 tie, but node 2 at (5,0,0) is actually
+  closest — re-pointed the query to a genuine 0-vs-2 tie (test fix; impl right);
+  (c) the PlayoutClock dt-advance test used delay 0 with a fresher snapshot, so the
+  clock legitimately re-synced toward it — rewrote with a real 0.5 s delay +
+  lockstep so render advances cleanly in the healthy band (test fix; impl right).
+  Local: mac-debug ctest **1378/1378** (+51), mac-release determinism 107/107
+  (golden pin intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes
+  exit 0. Agents again pre-empted the bracket/cmath/MSVC-macro traps. Total now:
+  **94 features + 4 integrations.**
+
 - (iter 43) **SOLO INTEGRATION #4 — adopt CombatResolve INSIDE fire_hitscan (the
   determinism-critical wiring). The combat modifiers now affect REAL combat.**
   Backward-compatible edit to engine/gameplay/Weapons.cpp: fire_hitscan now calls
