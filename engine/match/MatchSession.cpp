@@ -13,6 +13,7 @@
 #include "scene/World.h"
 
 #include "world/outdoor/HeightfieldQuery.h"
+#include "world/outdoor/SpawnValidation.h"  // filter_walkable_spawns (slope gate)
 
 #include "math/Math.h"
 
@@ -71,10 +72,11 @@ void MatchSession::configure_match(const gameplay::MatchConfig& cfg,
     spawn_points_.assign(spawn_points.begin(), spawn_points.end());
 }
 
-void MatchSession::configure_terrain(
-    const world::outdoor::HeightmapDesc& h) noexcept {
+void MatchSession::configure_terrain(const world::outdoor::HeightmapDesc& h,
+                                     f32 min_walkable_updot) noexcept {
     terrain_ = h;          // non-owning copy; caller keeps h.heights alive
     has_terrain_ = true;
+    min_walkable_updot_ = min_walkable_updot;  // 0 = gate off (pre-feature path)
 }
 
 void MatchSession::advance(std::span<const net::Input> inputs) {
@@ -120,10 +122,33 @@ void MatchSession::advance(std::span<const net::Input> inputs) {
         // spawn point farthest from any living enemy (anti-spawn-camp). Written
         // into its Respawnable so update_respawns moves it there on respawn.
         if (killed && !spawn_points_.empty()) {
-            const usize idx = gameplay::select_spawn(
-                *world_, std::span<const math::Vec3>(spawn_points_), victim);
+            // Candidate set for the farthest-from-enemies heuristic. By default
+            // (no walkable gate) this is the full spawn_points_ span and the
+            // path is byte-identical to before. When the opt-in slope gate is
+            // active (has_terrain_ && min_walkable_updot_ > 0) restrict it to
+            // the WALKABLE subset so a frag never drops the victim onto a cliff;
+            // the survivors keep their ascending order, so select_spawn's tie
+            // rule (lowest index wins) is preserved within the subset. SAFETY:
+            // if NOTHING is walkable, fall back to the full set (never leave a
+            // player without a spawn).
+            std::span<const math::Vec3> candidates(spawn_points_);
+            if (has_terrain_ && min_walkable_updot_ > 0.0f) {
+                world::outdoor::filter_walkable_spawns(
+                    terrain_, std::span<const math::Vec3>(spawn_points_),
+                    min_walkable_updot_, walkable_scratch_);
+                if (!walkable_scratch_.empty()) {
+                    walkable_points_.clear();
+                    walkable_points_.reserve(walkable_scratch_.size());
+                    for (const usize wi : walkable_scratch_) {
+                        walkable_points_.push_back(spawn_points_[wi]);
+                    }
+                    candidates = std::span<const math::Vec3>(walkable_points_);
+                }
+                // else: empty walkable set -> keep the full-set fallback above.
+            }
+            const usize idx = gameplay::select_spawn(*world_, candidates, victim);
             if (gameplay::Respawnable* r = world_->get<gameplay::Respawnable>(victim)) {
-                math::Vec3 point = spawn_points_[idx];
+                math::Vec3 point = candidates[idx];
                 // Terrain-aware (opt-in): snap the chosen spawn's Y onto the
                 // terrain surface so the victim respawns on the ground. When no
                 // terrain is configured the raw spawn point is used (as before).

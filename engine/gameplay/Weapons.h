@@ -19,6 +19,11 @@
 
 namespace psynder::gameplay {
 
+// Forward decl only: fire_hitscan takes a `const FalloffProfile*`, so the header
+// needs the name but not the layout. The full type + resolve_ranged_damage live
+// in gameplay/RangedDamage.h, which Weapons.cpp includes (keeps this header light).
+struct FalloffProfile;
+
 inline constexpr f32 kProjectileHitRadius = 0.5f;  // proximity damage radius (m)
 
 // No-team sentinel for fire_hitscan's friendly_team parameter (free-for-all).
@@ -43,9 +48,18 @@ inline constexpr i64 kNoTeam = -1;
 // `spread_seed` should come from gameplay::spread_seed(tick, shooter_id,
 // shot_index) so the same authoritative shot scatters identically on every peer.
 // Both trail `friendly_team`, so every existing caller is unaffected.
+//
+// `falloff` opts into distance-based damage scaling (RangedDamage). nullptr (the
+// default) applies the flat `wp->damage` exactly as before — the combat-bot
+// determinism path passes no falloff, so it stays bit-identical. When non-null,
+// the credited damage is resolve_ranged_damage(wp->damage, hit_distance_m,
+// Hitbox::Body, *falloff): full damage inside falloff_start_m, ramping to
+// min_fraction by falloff_end_m. Trails `spread_seed`, so existing callers are
+// unaffected.
 Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
                     math::Vec3 dir, i64 friendly_team = kNoTeam,
-                    f32 spread_tan = 0.0f, u64 spread_seed = 0) noexcept;
+                    f32 spread_tan = 0.0f, u64 spread_seed = 0,
+                    const FalloffProfile* falloff = nullptr) noexcept;
 
 // Spawn a projectile from `shooter`'s Weapon (must be ready; spends a round +
 // sets the cooldown). The projectile flies at `speed_mps` along `dir`, carries

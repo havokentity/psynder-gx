@@ -130,6 +130,66 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 27) **4-AGENT BATCH #5 — the WIRING batch: land iter-26's building blocks
+  into call sites, two backward-compatible wirings + two new streaming layers,
+  four DISTINCT lanes.** Since three of the four iter-26 follow-ups target the
+  gameplay lane (one lane = one parallel agent), I spread the work across four
+  distinct lane dirs and mixed 2 backward-compatible opt-in wirings (gameplay,
+  match) with 2 additive new-file lanes (net, ai). Agents forbidden from building/
+  git/touching shared or other-lane files; I serially integrated. Shipped:
+  1. **RangedDamage -> fire_hitscan** (gameplay, backward-compatible): appended a
+     trailing `const FalloffProfile* falloff = nullptr` to fire_hitscan. nullptr
+     (the default — every existing caller incl. the combat bots) credits the flat
+     `wp->damage` EXACTLY as before, bypassing all distance arithmetic, so the
+     determinism path is bit-identical; a non-null profile scales by
+     `resolve_ranged_damage(wp->damage, best_t, Hitbox::Body, *falloff)` where
+     best_t is the hit distance along the normalized ray. Closes "Ballistics ->
+     fire_hitscan".
+  2. **SpawnValidation -> MatchSession** (match, backward-compatible): appended an
+     optional `f32 min_walkable_updot = 0.0f` to configure_terrain. When the gate
+     is active (has_terrain && min_walkable_updot > 0) the kill/respawn selection
+     filters the spawn ring to the WALKABLE subset (filter_walkable_spawns) before
+     the farthest-from-enemies pick, so a frag never drops a victim onto a cliff;
+     empty-walkable-set falls back to the full ring (never spawn-less). Default 0
+     => byte-identical to before. Closes "terrain_walkable -> spawn validation".
+  3. **net/SnapshotStream** (additive): the stateful baseline-tracking layer over
+     iter-26's stateless SnapshotPackDelta. SnapshotStreamSender::encode packs a
+     delta vs its baseline then advances the baseline to the DEQUANTIZED round-trip
+     of curr (dequantize(quantize(curr))) — so sender and receiver track the
+     IDENTICAL evolving baseline and an entity that moved < one quant step (omitted
+     from the delta) can never desync the two sides. Receiver applies + adopts the
+     reconstructed set; validate-before-mutate on truncation. The real
+     send-a-delta-each-tick wire path. Closes "SnapshotPack -> wire path".
+  4. **ai/NavAgent** (additive): the per-agent "navigate to a world point"
+     controller a CombatBot embeds, over iter-26's PathFollow: a NavAgent owns a
+     goal + a PathFollower; set_goal arms + forces a replan; update() lazily
+     replans (world_to_cell start -> plan_world_path) and returns the unit XZ
+     steer (zero when arrived / no path). Adds the world_to_cell inverse (clamps
+     off-grid positions to the nearest edge cell). Closes "PathSimplify/A* ->
+     a bot".
+  Integration: tree had EXACTLY the 4 wiring-lane edits (Weapons.{h,cpp},
+  MatchSession.{h,cpp} — distinct dirs, no shared-file edits) + 8 new files;
+  compiled clean on the first build. Two NEW-lane tests over-asserted and I fixed
+  them (the only integration work): the NavAgent test required `follower.current
+  == 0` after an update, but the agent starts AT waypoint[0] (the start cell) so
+  follow_steer correctly consumes it -> relaxed to "actively walking a fresh,
+  not-yet-exhausted route"; the SnapshotStream sub-step-jitter test assumed a
+  2-3mm nudge never crosses a 1cm quant step, but positions near a cell boundary
+  do -> snap t0 onto the lattice centre (x=q*res) first, giving the full ±5mm
+  margin the test claims. Both fixes are test-only; the implementations were
+  correct (no impl change, no golden movement). Local: mac-debug ctest **767/767**
+  (+21), mac-release determinism 53/53 (golden flock digest #751 intact),
+  perf_guardrails OK, PsyServerGX --ticks=128 (real 2-frag match) + crate smokes
+  clean. Five 4-agent batches now: **20 features across 5 CI cycles.** The two
+  backward-compatible wirings (opt-in trailing param, default bit-identical) prove
+  the parallel cadence works for wiring, not just pure-additive files. Follow-ups:
+  drive a CombatBot off NavAgent (path to a point + shoot); thread SnapshotStream
+  into ReplicationSession's per-peer send (a determinism-critical SOLO edit);
+  PsyServerGX outdoor match using configure_terrain(h, min_updot); a per-shot
+  falloff profile on the Weapon component so bots/servers pass it into fire_hitscan.
+  Next: the CombatBot+NavAgent wiring (gameplay, SOLO or batched), or the
+  determinism-critical IR SIMD back-end / UDP transport done SOLO.
+
 - (iter 26) **4-AGENT BATCH #4 — four additive helpers across four distinct
   lanes (the safest shape again: all NEW files, ZERO edits to existing/hot/golden
   code, zero CMake edits — every lane GLOBs + is already linked into the unit

@@ -91,9 +91,21 @@ public:
     // world::outdoor::clamp_to_ground. Without this call respawns use the raw
     // spawn-point Y, exactly as before.
     //
+    // `min_walkable_updot` is an OPTIONAL walkable-slope gate, cos(max walkable
+    // angle) — e.g. cos(45deg) ~ 0.707; larger = stricter. When > 0 it restricts
+    // the deterministic spawn selection to the WALKABLE subset of spawn_points_
+    // (world::outdoor::filter_walkable_spawns: the lockstep-safe slope gate), so
+    // a frag never drops the victim onto an un-walkable cliff. The SAME
+    // farthest-from-enemies heuristic is applied within that subset, then the
+    // pick is clamped onto the surface. If NO spawn point is walkable the full
+    // spawn_points_ set is used as a safety fallback (a player is never left
+    // without a spawn). The default 0.0f keeps the selection path byte-identical
+    // to the no-gate behaviour: every spawn point is eligible, exactly as before.
+    //
     // The caller MUST keep the heightmap's `heights` data alive for the whole
     // lifetime of this session — only the (non-owning) HeightmapDesc is copied.
-    void configure_terrain(const world::outdoor::HeightmapDesc& h) noexcept;
+    void configure_terrain(const world::outdoor::HeightmapDesc& h,
+                           f32 min_walkable_updot = 0.0f) noexcept;
 
     // Advance one authoritative tick. `inputs` is one net::Input per client.
     void advance(std::span<const net::Input> inputs);
@@ -122,6 +134,10 @@ public:
     // True once configure_terrain has been called (terrain-aware respawns on).
     bool has_terrain() const noexcept { return has_terrain_; }
 
+    // The configured walkable-slope gate (cos of max walkable angle); 0 = off
+    // (every spawn point eligible, the pre-feature default). See configure_terrain.
+    f32 min_walkable_updot() const noexcept { return min_walkable_updot_; }
+
     // Underlying subsystems (for tests / higher layers).
     const net::ReplicationSession& net() const noexcept { return repl_; }
     scene::World& world() noexcept { return *world_; }
@@ -146,6 +162,13 @@ private:
     // the caller keeps its `heights` data alive (see configure_terrain).
     world::outdoor::HeightmapDesc terrain_{};
     bool                          has_terrain_ = false;
+
+    // Opt-in walkable-slope gate (cos max-angle); 0 = off (pre-feature default).
+    f32                min_walkable_updot_ = 0.0f;
+    // Reused walkable-filter output + the walkable candidate subset, so the
+    // gate allocates nothing per kill (the lane's no-per-tick-heap discipline).
+    std::vector<usize>      walkable_scratch_;   // ascending walkable indices
+    std::vector<math::Vec3> walkable_points_;    // gathered walkable candidates
 };
 
 }  // namespace psynder::match

@@ -6,6 +6,7 @@
 
 #include "gameplay/Damage.h"
 #include "gameplay/GameplayComponents.h"
+#include "gameplay/RangedDamage.h"  // FalloffProfile, resolve_ranged_damage, Hitbox
 #include "gameplay/Spread.h"
 #include "scene/GxComponents.h"  // TransformWS
 
@@ -28,7 +29,7 @@ bool ready_and_spend(Weapon& wp) noexcept {
 
 Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
                     math::Vec3 dir, i64 friendly_team, f32 spread_tan,
-                    u64 spread_seed) noexcept {
+                    u64 spread_seed, const FalloffProfile* falloff) noexcept {
     Weapon* wp = w.get<Weapon>(shooter);
     if (wp == nullptr || !ready_and_spend(*wp)) return Entity{};
 
@@ -73,7 +74,18 @@ Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
             }
         });
 
-    if (best.valid()) damage_credited(w, shooter, best, wp->damage);
+    if (best.valid()) {
+        // Default (no falloff): credit the flat weapon damage exactly as before,
+        // bypassing all distance arithmetic so the combat-bot determinism path
+        // stays bit-identical. Opt-in falloff scales by hit distance: best_t is
+        // the parametric distance along the *normalized* fire direction `d`
+        // (divided by `dl` above), so it is the hit distance in metres.
+        const f32 dmg = (falloff == nullptr)
+                            ? wp->damage
+                            : resolve_ranged_damage(wp->damage, best_t,
+                                                    Hitbox::Body, *falloff);
+        damage_credited(w, shooter, best, dmg);
+    }
     return best;
 }
 
