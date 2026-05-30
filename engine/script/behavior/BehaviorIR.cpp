@@ -10,8 +10,9 @@ void BehaviorChunk::configure(u16 num_streams, usize n) {
     count = n;
 }
 
-void execute(const BehaviorProgram& prog, BehaviorChunk& chunk) noexcept {
-    if (chunk.count == 0 || prog.num_registers == 0) return;
+void execute(const BehaviorProgram& prog, std::span<const StreamColumn> cols,
+             usize count) noexcept {
+    if (count == 0 || prog.num_registers == 0) return;
 
     // One up-front register-scratch allocation, reused for every entity row.
     std::vector<f32> r(prog.num_registers, 0.0f);
@@ -21,16 +22,21 @@ void execute(const BehaviorProgram& prog, BehaviorChunk& chunk) noexcept {
     const usize n_code = prog.code.size();
     const f32* uni = prog.uniforms.empty() ? nullptr : prog.uniforms.data();
     const usize n_uni = prog.uniforms.size();
+    const StreamColumn* col = cols.data();
+    const usize n_col = cols.size();
 
-    for (usize i = 0; i < chunk.count; ++i) {
+    for (usize i = 0; i < count; ++i) {
         for (usize pc = 0; pc < n_code; ++pc) {
             const Instr& in = code[pc];
             switch (in.op) {
                 case Op::LoadStream:
-                    reg[in.a] = chunk.streams[in.b][i];
+                    reg[in.a] = (in.b < n_col && col[in.b].base != nullptr)
+                                    ? col[in.b].base[i * col[in.b].stride]
+                                    : 0.0f;
                     break;
                 case Op::StoreStream:
-                    chunk.streams[in.b][i] = reg[in.a];
+                    if (in.b < n_col && col[in.b].base != nullptr)
+                        col[in.b].base[i * col[in.b].stride] = reg[in.a];
                     break;
                 case Op::LoadConst:
                     reg[in.a] = in.imm;
@@ -80,6 +86,18 @@ void execute(const BehaviorProgram& prog, BehaviorChunk& chunk) noexcept {
             }
         }
     }
+}
+
+void execute(const BehaviorProgram& prog, BehaviorChunk& chunk) noexcept {
+    if (chunk.count == 0) return;
+    // View each contiguous stream vector as a stride-1 column and reuse the core.
+    std::vector<StreamColumn> cols(chunk.streams.size());
+    for (usize s = 0; s < chunk.streams.size(); ++s) {
+        cols[s].base = chunk.streams[s].empty() ? nullptr : chunk.streams[s].data();
+        cols[s].stride = 1;
+    }
+    execute(prog, std::span<const StreamColumn>(cols.data(), cols.size()),
+            chunk.count);
 }
 
 }  // namespace psynder::script::behavior

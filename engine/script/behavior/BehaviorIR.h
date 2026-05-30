@@ -20,6 +20,7 @@
 
 #include "core/Types.h"
 
+#include <span>
 #include <vector>
 
 namespace psynder::script::behavior {
@@ -73,6 +74,22 @@ struct BehaviorChunk {
 // Run `prog` once per entity over `chunk`. Deterministic, strict-FP, with a
 // single up-front register-scratch allocation (no per-entity heap).
 void execute(const BehaviorProgram& prog, BehaviorChunk& chunk) noexcept;
+
+// A strided view onto a stream column: element i lives at base[i * stride].
+// This lets a behavior run IN PLACE over ECS archetype-chunk storage — point a
+// column at a component field (stride = sizeof(Component)/sizeof(f32)) and no
+// gather/scatter copy is needed. `cols[slot]` must be valid for every stream the
+// program reads/writes.
+struct StreamColumn {
+    f32*  base = nullptr;
+    usize stride = 1;  // in floats
+};
+
+// Run `prog` over `count` entities whose streams are the given strided columns.
+// In-place, deterministic, single up-front register alloc. This is how a
+// graph-authored behavior runs as a system over a for_each_chunk column set.
+void execute(const BehaviorProgram& prog, std::span<const StreamColumn> cols,
+             usize count) noexcept;
 
 // ── Ergonomic builder ───────────────────────────────────────────────────────
 // Allocates registers/uniforms and appends instructions; keeps authored

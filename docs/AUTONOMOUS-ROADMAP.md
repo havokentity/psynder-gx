@@ -104,8 +104,10 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       Front-end lowering DONE (iter 20): VisualGraphCompiler::lower_graph_to_ir
       compiles a node graph (input/const/output + add/sub/mul/div/neg/min/max/
       cmp*/select) straight to a BehaviorProgram — a graph drives a real ECS
-      behavior, no Lua. The MathLogicKernel SIMD back-end for the IR + binding
-      streams to live ECS component columns = follow-ups.**
+      behavior, no Lua. Live-ECS binding DONE (iter 21): a strided in-place
+      execute runs a lowered program over for_each_chunk component columns (a
+      graph heals real gameplay::Health entities). The MathLogicKernel SIMD
+      back-end for the IR = follow-up.**
 
 ### D — Demos (test harness while editor matures)
 - [ ] `samples/arena` (Quake3), crowd-combat, destruction sandbox, vehicle test,
@@ -124,6 +126,30 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 21) **A graph behavior runs as a system over the live ECS (item S /
+  ADR-018 — closes "drive a gameplay behavior from a graph").** Connected iters
+  19–20 to real component storage. Added a STRIDED in-place execute to BehaviorIR:
+  `execute(prog, span<StreamColumn>, count)` where a StreamColumn is `{f32* base,
+  usize stride}` — point it at a component field (stride = sizeof(Component)/
+  sizeof(f32)) and the program reads/writes that column IN PLACE, no gather/
+  scatter copy. Refactored the existing BehaviorChunk execute to delegate to it
+  (stride-1 views), so there's one core interpreter. Test `behavior_system.cpp`:
+  the iter-20 heal graph (now `hp<=25 ? min(hp+50, max_hp) : hp`) lowers to IR and
+  runs over REAL `gameplay::Health` entities via `for_each_chunk<Health>` — hp at
+  stride 2, max_hp the untouched odd lane — healing low entities (capped at
+  max_hp: a 5/40 entity heals to 40, not 55), proven idempotent once healed, and
+  bit-deterministic across worlds over 200 entities × 3 passes. This is the full
+  ADR-018 loop end to end: PsyGraph JSON → Behavior IR → deterministic execution
+  over the authoritative ECS, no Lua anywhere. Local: mac-debug ctest **652/652**
+  (+3), mac-release determinism+behavior+graph 57/57 (golden pin intact),
+  server+crate smokes exit 0. Decision: strided columns over ECS storage (zero
+  copy, §1b-friendly) rather than gather/scatter; the per-chunk StreamColumn
+  vector in the test would be hoisted to a reused scratch in a production system
+  wrapper. Follow-ups: a reusable BehaviorSystem wrapper (program + stream→
+  component binding, hoisted scratch), the MathLogicKernel SIMD back-end for the
+  IR, effect ops (spawn/destroy). Next: the IR SIMD back-end, a BehaviorSystem
+  wrapper, the UDP transport, or terrain-aware match spawns.
 
 - (iter 20) **PsyGraph → Behavior IR lowering — a graph drives a real DOTS
   behavior (item S / ADR-018).** Connected iter-19's executable IR to the graph
