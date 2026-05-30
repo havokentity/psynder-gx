@@ -130,6 +130,44 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 35) **6-LANE WAVE #4 (user-driven max-throughput) — six more additive
+  features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
+  golden code.** Shipped:
+  1. **gameplay/Stamina** — sprint resource: Stamina component (24 B) +
+     tick_stamina (drain while sprinting, regen after a delay, sprint resets the
+     regen cooldown) + can_sprint/stamina_fraction/tick_staminas.
+  2. **ai/ThreatMemory** — decaying last-seen-enemy memory: record/tick(forget)/
+     find/freshest (smallest age, lowest-id tie)/active_count, fixed-capacity with
+     oldest-eviction. Bots search a stale position after losing LoS.
+  3. **net/RttEstimator** — Jacobson/Karels EWMA (RFC 6298): add_sample, srtt,
+     rttvar (jitter), rto = clamp(srtt+4*rttvar), interp_delay_s. Drops bad
+     samples; feeds the adaptive interpolation delay + retransmit timeout.
+  4. **world/outdoor/TerrainMaterial** — surface classification by steepness +
+     elevation (Grass/Rock/Snow/Sand, steepness-first) + material_friction. Drives
+     footstep sounds + surface friction; lockstep-safe (updot gate, no acos).
+  5. **camera/LookSmoothing** — exponential mouse-look low-pass: look_smooth
+     (alpha = 1-smoothing; smoothing 0 = raw passthrough), NaN-guarded. Strict-FP.
+  6. **audio/Footsteps** — distance-driven step cadence: footstep_advance (a step
+     per stride travelled, multi-stride on a big move) + footstep_progress. The
+     "faster movement = faster footsteps" timing.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files. THREE
+  fixes: (a) the terrain_material TEST called terrain_height/terrain_slope_updot
+  for sanity asserts without including their headers (added 2 includes);
+  (b) **IMPORTANT LESSON** — the audio_footsteps TEST_CASE NAME contained `[0,1)`,
+  whose `[...]` catch_discover_tests parses as a Catch TAG, which CORRUPTED test
+  registration and silently collapsed the WHOLE suite from 1029 to 148 registered
+  tests (and produced spurious failures). Renamed the case ("0 to 1"); registration
+  jumped back to 1082. **Rule: NEVER put square brackets in a TEST_CASE NAME — only
+  in the tag string.** (c) the ai_threat_memory freshest test mis-expected id 3
+  while enemy 2 was also still at age 0 (no tick between records) -> added a tick
+  so 5/3 are the sole freshest; the impl's lowest-id tie-break was correct. Local:
+  mac-debug ctest **1082/1082** (+53), mac-release determinism 81/81 (golden pin
+  intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes exit 0.
+  Total now: **57 features** (four 6-lane waves this session). NOTE: cron still
+  DELETED. Follow-ups: Stamina gating sprint speed; ThreatMemory feeding
+  TacticalBot search; RttEstimator sizing SnapshotInterp's delay; TerrainMaterial
+  -> Footsteps surface sound selection; LookSmoothing into the 02_crate input path.
+
 - (iter 34) **6-LANE WAVE #3 (user-driven max-throughput) — six more additive
   features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
   golden code.** Clean run, no agent stalls. Shipped:
