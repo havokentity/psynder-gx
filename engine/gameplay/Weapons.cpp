@@ -4,6 +4,7 @@
 
 #include "gameplay/Weapons.h"
 
+#include "gameplay/CombatResolve.h"  // begin_shot: ammo gate + suppression + quad
 #include "gameplay/Damage.h"
 #include "gameplay/GameplayComponents.h"
 #include "gameplay/RangedDamage.h"  // FalloffProfile, resolve_ranged_damage, Hitbox
@@ -33,13 +34,21 @@ Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
     Weapon* wp = w.get<Weapon>(shooter);
     if (wp == nullptr || !ready_and_spend(*wp)) return Entity{};
 
+    // Resolve the shooter's combat modifiers (CombatResolve): a Magazine ammo
+    // gate (blocks an empty/reloading shooter and spends a round), Suppression
+    // (widens the cone), and Powerups (Quad scales damage). A shooter with none
+    // of those components gets the neutral default — fired, base spread, 1x
+    // damage — so existing callers (e.g. the combat bots) stay bit-identical.
+    const ShotResult shot = begin_shot(w, shooter, spread_tan);
+    if (!shot.fired) return Entity{};
+
     const f32 dl = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (dl <= 0.0f) return Entity{};
     math::Vec3 d{dir.x / dl, dir.y / dl, dir.z / dl};
-    // Apply deterministic cone spread to the unit direction before ray-casting,
-    // so the perturbed direction is what gets tested. spread_tan <= 0 (default)
+    // Apply deterministic cone spread (suppression-scaled) to the unit direction
+    // before ray-casting. shot.spread_tan <= 0 (no base spread, no suppression)
     // leaves the aim untouched, keeping existing callers bit-identical.
-    if (spread_tan > 0.0f) d = spread_direction(d, spread_tan, spread_seed);
+    if (shot.spread_tan > 0.0f) d = spread_direction(d, shot.spread_tan, spread_seed);
     const f32 radius = wp->hit_radius;
 
     Entity best{};
@@ -80,11 +89,12 @@ Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
         // stays bit-identical. Opt-in falloff scales by hit distance: best_t is
         // the parametric distance along the *normalized* fire direction `d`
         // (divided by `dl` above), so it is the hit distance in metres.
-        const f32 dmg = (falloff == nullptr)
-                            ? wp->damage
-                            : resolve_ranged_damage(wp->damage, best_t,
-                                                    Hitbox::Body, *falloff);
-        damage_credited(w, shooter, best, dmg);
+        const f32 base = (falloff == nullptr)
+                             ? wp->damage
+                             : resolve_ranged_damage(wp->damage, best_t,
+                                                     Hitbox::Body, *falloff);
+        // Powerups (Quad) scale the outgoing damage; 1x for an un-powered shooter.
+        damage_credited(w, shooter, best, base * shot.damage_scale);
     }
     return best;
 }

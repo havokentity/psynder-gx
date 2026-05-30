@@ -130,6 +130,30 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 43) **SOLO INTEGRATION #4 — adopt CombatResolve INSIDE fire_hitscan (the
+  determinism-critical wiring). The combat modifiers now affect REAL combat.**
+  Backward-compatible edit to engine/gameplay/Weapons.cpp: fire_hitscan now calls
+  `begin_shot(w, shooter, spread_tan)` after the weapon cooldown gate, so the
+  Magazine ammo gate (an empty/reloading shooter is blocked, a round spent),
+  Suppression (the cone widens via the returned spread_tan), and Powerups (Quad
+  scales the credited damage by shot.damage_scale) all flow through the actual
+  hitscan path. CRITICAL backward-compat: a shooter with NONE of those components
+  gets the neutral default from begin_shot (fired=true, spread_tan unchanged,
+  damage_scale=1), so every existing caller — the combat bots, the arena/skirmish
+  loops, the weapons tests — is BIT-IDENTICAL. Verified: the 64v64 "combat bots
+  deterministic at scale" test passes unchanged, the golden agent-flock digest
+  still MATCHES the committed value (the flock doesn't use fire_hitscan), and all
+  combat/arena tests stay green. New `gameplay_fire_modifiers.cpp` proves the
+  wiring is live: a 1-round Magazine fires once then blocks (no further damage),
+  Quad makes fire_hitscan deal 4x (target loses 80 not 20), and a bare shooter is
+  unaffected. Local: mac-debug ctest **1327/1327** (+3), mac-release determinism
+  117/117 (golden pin intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate
+  smokes exit 0. The combat SHOT primitives (iters 33/35/38) are now ON the real
+  fire path, not just composable in isolation — the deepest integration yet.
+  Follow-ups: feed Suppression from incoming near-misses; spend the Weapon's own
+  ammo only when begin_shot fires (the magazine-on-cooldown nuance); BattleSuit
+  incoming reduction on damage_credited. Total now: **88 features + 4 integrations.**
+
 - (iter 42) **6-LANE WAVE #8 (interleaved with integration per the user) — six
   more additive features across six DISTINCT lanes, all NEW files, ZERO edits to
   existing/hot/golden code.** Shipped:
