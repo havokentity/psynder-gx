@@ -130,6 +130,30 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 41) **SOLO INTEGRATION #3 — tactical-AI skirmish (items A + D). Composes
+  the unwired AI primitives into one deterministic bot loop.** New
+  `tests/unit/tactical_ai_skirmish.cpp` extends the iter-30 skirmish pattern with
+  the session's AI helpers: ai::TargetSelect (pick the best enemy by composite
+  score) + ai::ThreatMemory (remember a last-seen enemy and SEARCH it after losing
+  LoS) + ai::CoverScore over ai::CoverPoints (when hurt, pick the safest wall-
+  adjacent cover) + ai::line_of_sight (acquisition gate) + ai::NavAgent (A* nav) +
+  gameplay::TacticalBot (Patrol/Engage/Retreat FSM) + WeaponLoadout/fire_hitscan/
+  Damage. Two 4-bot teams fight across a walled chokepoint: each bot builds enemy
+  candidates, select_target picks one, records a sighting in ThreatMemory if
+  visible, the FSM decides engage/retreat, a Retreating bot navigates to a
+  CoverScore-chosen cover cell, and a Patrolling bot with no visible enemy
+  searches its freshest remembered position. Asserts the loop fights, target
+  acquisition + threat memory fire (any_sighting), the Retreat+CoverScore branch
+  fires (any_retreat), AND the whole thing is bit-reproducible. Pure composition
+  (no new engine code), compiled + passed on the FIRST run. Local: mac-debug ctest
+  **1265/1265** (+2), mac-release determinism+tactical 108/108 (golden pin intact),
+  perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes exit 0. Three
+  integrations now (netcode send iter 39, combat shot iter 40, tactical AI this) —
+  the iter-26..38 building blocks are increasingly composed into working systems.
+  Follow-ups: lift the skirmish into a visual samples/ binary (in-window);
+  ThreatMemory-driven flanking; squad coordination via SquadCommand. (Continuing
+  the user's "more integration + more additive waves" directive.)
+
 - (iter 40) **SOLO INTEGRATION #2 — combat shot resolution (item G). Composes the
   per-shooter combat modifiers into one shot pipeline.** New
   `engine/gameplay/CombatResolve.{h,cpp}` gives the fire path a single
