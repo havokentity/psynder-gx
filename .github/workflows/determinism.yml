@@ -53,14 +53,16 @@ jobs:
           -R "$PSY_DETERMINISM_TESTS"
           --output-on-failure
 
-  # ── Cross-platform divergence check. Stubbed continue-on-error during the
-  #    bootstrap: x86_64 Linux exercises the SSE/AVX2 Jolt path against the
-  #    arm64 NEON path above. Promote to required once the matrix is stable. ──
+  # ── Cross-platform divergence check — NOW REQUIRED. x86_64 Linux exercises
+  #    the SSE/AVX2 Jolt path + libstdc++ against the arm64 NEON / libc++ macOS
+  #    job above. Promoted off continue-on-error once the sim path (math + scene
+  #    broadphase, on top of physics/agents/ai/gameplay) was fully strict-FP and
+  #    this job had held green across consecutive pushes (ROADMAP item P). A
+  #    cross-platform divergence now fails the branch instead of being masked. ──
   linux:
     name: Linux · Vulkan · x86_64 · determinism
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,6 +109,27 @@ jobs:
           arch: x64
       - name: Install Ninja
         run: choco install ninja -y
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          # The determinism build configures the full engine (incl. the gpu
+          # lane, which does find_package(Vulkan REQUIRED)), so the SDK must be
+          # present even though no determinism test touches the GPU. Mirror the
+          # silent LunarG install ci.yml uses — pin the same SDK version as the
+          # Linux apt source + DESIGN §2.2. Without this the Windows job failed
+          # at configure ("Could NOT find Vulkan") and was masked by
+          # continue-on-error; this unblocks it so the MSVC-STL divergence check
+          # can actually run.
+          $version = "1.3.296.0"
+          $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+          Invoke-WebRequest -Uri $url -OutFile vulkan-sdk.exe -UseBasicParsing
+          Start-Process -Wait -FilePath vulkan-sdk.exe -ArgumentList @(
+            "--accept-licenses",
+            "--default-answer",
+            "--confirm-command", "install"
+          )
+          "VULKAN_SDK=C:\VulkanSDK\$version"     | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "C:\VulkanSDK\$version\Bin"             | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - name: Configure (pinned Jolt SHA)
         shell: cmd
         run: cmake --preset win-release %PSY_CMAKE_FLAGS%

@@ -79,15 +79,46 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       net-play headless demo — one per milestone as needed.
 
 ### P — Perf & determinism
-- [ ] Cross-platform golden parity: strict-FP the sim path (scene/math used by
+- [~] Cross-platform golden parity: strict-FP the sim path (scene/math used by
       agents+physics) so Linux/Windows match macOS; flip determinism.yml off
-      continue-on-error where it holds.
+      continue-on-error where it holds. **math + scene strict-FP DONE (iter 10);
+      Linux determinism promoted to REQUIRED; Windows determinism unblocked
+      (Vulkan SDK install) — promote it once observed green.**
 - [ ] Alloc audits (no per-frame heap in hot paths); SIMD/job scaling; profiling.
 
 ## Journal
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 10) **Cross-platform FP parity — strict-FP the foundational sim lanes
+  (item P).** The lockstep-critical hole: `engine/math` (Math.cpp matrix /
+  transform kernels, Bounds, MathLogicKernel, VectorStack) and `engine/scene`
+  (Bvh / Sap / SpatialIndex / UniformGrid broadphase + World.cpp transforms) —
+  the base the whole sim (agents/physics/gameplay/ai) builds on — compiled their
+  non-inline TUs with DEFAULT FP, i.e. fused-multiply-add contraction +
+  reassociation allowed. That diverges between arm64 NEON and x86_64 SSE/AVX2
+  FMA — exactly the cross-platform lockstep risk. Fix: `psynder_determinism_fp()`
+  (cmake/HotLane.cmake: `-fno-fast-math -ffp-contract=off` / MSVC `/fp:strict`)
+  on both lanes, matching physics/agents/ai/gameplay which already opt in.
+  CRITICAL CHECK: rebuilt **mac-release** + ran the golden/determinism subset
+  before pushing — the pinned macOS/arm64 golden flock digest (#599/#613) still
+  MATCHES, so the change tightened Linux/Windows parity WITHOUT moving the
+  authoritative value (the flock sim already ran strict at the agent-lane call
+  sites; only the shared .cpp TUs change, and they weren't on the golden path).
+  CI hardening: the determinism workflow's **Windows** job was silently failing
+  at configure (`Could NOT find Vulkan`) — it never installed the SDK — masked
+  by continue-on-error; added the silent LunarG SDK install (mirrors ci.yml) so
+  it can actually build + run the MSVC-STL divergence check. **Linux** determinism
+  (green across consecutive pushes) **promoted off continue-on-error → now
+  REQUIRED**: a real arm64-vs-x86_64 divergence now fails the branch instead of
+  hiding. Local: mac-release determinism 36/36 (golden pin intact), mac-debug
+  full ctest 615/615 (incl perf_guardrails), headless crate smoke clean.
+  Follow-ups: watch the Windows determinism job go green on this push, then
+  promote it off continue-on-error too (next iter); then item P's remaining
+  alloc-audit / SIMD-scaling half. Next: **G — FPS controller polish (air
+  control, crouch/jump on the Jolt capsule)** or **N — client/server split in
+  the player path** (the netcode loop's last headless-verifiable piece).
 
 - (init) Charter + roadmap created; entering autonomous mode at 583 green tests,
   CI green. First item: **N — lag-comp hitbox rewind into the session.**
