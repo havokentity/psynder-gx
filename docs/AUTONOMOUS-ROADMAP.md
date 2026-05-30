@@ -130,6 +130,44 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 23) **4-AGENT PARALLEL BATCH — four disjoint additive features in one CI
+  cycle.** At the user's request, switched the loop to fan-out: spawned 4 agents
+  concurrently, each authoring ONE additive feature in a DISTINCT lane (new files
+  only — existing lanes auto-GLOB, so ZERO shared-file edits, which is what
+  eliminates the conflict that broke past parallel runs per Charter §5). Agents
+  were forbidden from building / running git / touching shared or other-lane
+  files; I serially integrated (one configure + build + full ctest + determinism
+  + smoke + commit + push + CI watch — amortized across all four). Verified the
+  working tree had exactly 11 new untracked files and ZERO modified tracked files
+  before building. Shipped:
+  1. **engine/script/behavior/BehaviorSystem.h** — type-safe `BehaviorSystem<Comp>`
+     wrapper: binds IR stream slots to `f32 Comp::*` member fields + hoisted
+     zero-alloc scratch, runs a graph program over `for_each_chunk<Comp>` (the
+     reusable form of iter-21's manual demo; tested over real gameplay::Health).
+  2. **engine/world/outdoor/TerrainSpawn.{h,cpp}** — `select_farthest_spawn`
+     (farthest-from-enemy XZ pick, id-tie) + `pick_terrain_spawn` (clamps the
+     choice onto the heightfield) — terrain-aware match spawns.
+  3. **engine/net/Quantize.{h,cpp}** — deterministic fixed-point position
+     quantize/dequantize (floor(x/res+0.5) in double; round-trip ≤ res/2) for
+     bandwidth-efficient cross-platform-bitwise snapshots.
+  4. **engine/gameplay/Spread.{h,cpp}** — the deferred (iter-5) lockstep-safe
+     weapon spread: a splitmix64 `Rng` + `spread_seed(tick,entity,shot)` +
+     `spread_direction` that perturbs within a cone using ONLY cross-product
+     basis math + one sqrt (NO runtime trig, since libm sin/cos aren't
+     cross-platform-identical) — provably `dot(base,result) >= cos(half_angle)`.
+  All four compiled on the FIRST integration build (clean agent code). Local:
+  mac-debug ctest **675/675** (+22), mac-release determinism+new 58/58 (golden
+  pin intact), perf_guardrails OK (new RNG/quantize have no forbidden
+  constructs), server+crate smokes exit 0. Decision: agents author disjoint
+  files only (no build/git) + I own the serial integration — captures the
+  parallel-implementation speedup AND the §5 isolation safety, without the
+  cold-build/worktree-merge cost. This is the new default loop cadence when ≥3
+  disjoint headless items exist. Follow-ups: wire Spread into fire_hitscan, the
+  quantizer into the snapshot delta codec, TerrainSpawn into MatchSession's
+  outdoor spawns, BehaviorSystem into a real gameplay system. Next: integrate
+  these four into their call sites (a follow-up batch), or the IR SIMD back-end /
+  UDP transport.
+
 - (iter 22) **Outdoor skirmish — the Battlefield-light combat loop integrated
   headless (items D + M).** The outdoor analog of arena_combat (iter 9),
   composing everything the terrain track built: new `outdoor_skirmish.cpp` spawns
