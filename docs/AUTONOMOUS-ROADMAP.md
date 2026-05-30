@@ -130,6 +130,57 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 26) **4-AGENT BATCH #4 — four additive helpers across four distinct
+  lanes (the safest shape again: all NEW files, ZERO edits to existing/hot/golden
+  code, zero CMake edits — every lane GLOBs + is already linked into the unit
+  test target).** Spawned 4 general-purpose agents concurrently, each forbidden
+  from building / running git / touching shared or other-lane files; I serially
+  integrated (one configure + build + full ctest + determinism + smoke + commit +
+  push + CI watch). Shipped:
+  1. **ai/PathFollow** — the per-agent "A* -> string-pull -> steer" execution
+     layer over GridAStar + simplify_path: `GridLayout` + `cell_to_world` (cell
+     index -> world XZ centre), `plan_world_path` (find_path -> simplify_path ->
+     world waypoints), and a `PathFollower` with `follow_steer` (unit XZ dir to
+     the current waypoint, squared-distance arrival advance, zero vector at the
+     end). One guarded sqrt; no trig/RNG. Closes the iter-25 "PathSimplify into an
+     A* bot" follow-up.
+  2. **net/SnapshotPackDelta** — the quantized snapshot DELTA codec SnapshotPack's
+     header defers to: `pack_quantized_delta(prev, curr, res, out)` emits a
+     removed-id list + only the changed/added 20-byte records (quantized-field
+     compare, ascending-id order so the bytes are input-order-independent),
+     `apply_quantized_delta` reconstructs curr from baseline + delta (validates
+     fully before mutating `out`, false on truncation), `delta_size`. Mirrors
+     SnapshotPack.cpp's exact LE byte helpers (no struct memcpy). The bandwidth
+     bit-packer over iter-24/25's quantized snapshot form.
+  3. **world/outdoor/SpawnValidation** — walkable-spawn filtering on the
+     heightfield: `filter_walkable_spawns` (ascending indices passing the
+     lockstep-safe `terrain_walkable` cos-threshold gate), `clamp_walkable_spawns`
+     (survivors snapped to surface + foot offset via `clamp_to_ground`),
+     `any_walkable_spawn`/`first_walkable_index`. Closes "terrain_walkable into
+     spawn validation". No acos (uses the updot gate), pure algebra.
+  4. **gameplay/RangedDamage** — composable per-weapon falloff + hit-region
+     classifier over Ballistics: a POD `FalloffProfile` + canonical metric
+     profiles (kNoFalloff identity, kRifleFalloff {35,90,0.60}, kPistolFalloff
+     {12,35,0.45}, kShotgunFalloff {6,18,0.15}), `resolve_ranged_damage` (one call
+     -> Ballistics::ranged_damage), and `classify_hitbox(hit_y, foot_y, height)`
+     (top>=0.85 -> Head, bottom<=0.30 -> Limb, else Body, height<=0 guard) — the
+     building block fire_hitscan needs to know WHICH hitbox a ray struck. Additive
+     (no component/Weapons edits).
+  Integration: verified the tree had exactly 12 new untracked files and ZERO
+  modified tracked files before building; **compiled clean on the FIRST build with
+  zero fixes needed** (the cleanest batch yet — past batches each needed one
+  trivial Approx/RNG fix). Local: mac-debug ctest **746/746** (+31), mac-release
+  determinism+new 53/53 (golden flock digest #730 intact), perf_guardrails OK
+  (the new RNG-free algebra has no forbidden constructs), PsyServerGX --ticks=128
+  (real 2-frag match) + crate smokes exit 0. Four clean 4-agent batches now: **16
+  features across 4 CI cycles.** Follow-ups (now genuine wiring of these building
+  blocks): PathFollow into a CombatBot that paths to a point; SnapshotPackDelta
+  into the ReplicationSession wire path; SpawnValidation into MatchRules/
+  MatchSession spawn selection; RangedDamage (falloff + classify_hitbox) into
+  fire_hitscan. Next: a wiring batch landing those into call sites (backward-
+  compatible opt-in), or the determinism-critical IR SIMD back-end / UDP transport
+  done SOLO.
+
 - (iter 25) **4-AGENT BATCH #3 — four additive helpers, four distinct lanes.**
   The safest batch shape (all NEW files, zero edits to existing/hot/golden code):
   1. **net/SnapshotPack** — portable little-endian pack/unpack of a quantized
