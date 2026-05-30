@@ -67,4 +67,26 @@ PSYNDER_COMPONENT(Projectile) {
 // 32 bytes: the u64 Entity forces 8-byte alignment (20 data bytes -> padded).
 static_assert(sizeof(Projectile) == 32, "Projectile layout frozen");
 
+// Per-player scoreboard. Frags credited to the killer, deaths to the victim.
+PSYNDER_COMPONENT(Score) {
+    u32 frags;
+    u32 deaths;
+};
+static_assert(sizeof(Score) == 8, "Score layout frozen");
+
+// What a pickup grants.
+enum class PickupKind : u32 { Health = 0, Ammo = 1, Weapon = 2 };
+
+// A floor pickup. While cooldown_s <= 0 it is active: a player (Health entity)
+// within radius_m grants `amount` of the kind, then the pickup goes inactive for
+// respawn_delay_s. POD; kind stored as u32 (PickupKind).
+PSYNDER_COMPONENT(Pickup) {
+    u32 kind;
+    f32 amount;
+    f32 radius_m;
+    f32 respawn_delay_s;
+    f32 cooldown_s;
+};
+static_assert(sizeof(Pickup) == 20, "Pickup layout frozen");
+
 }  // namespace psynder::gameplay

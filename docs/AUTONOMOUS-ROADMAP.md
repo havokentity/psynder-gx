@@ -40,7 +40,8 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       server lag-comp path = follow-ups with the client/server split.)
 - [x] Health/armor/damage/death/respawn components + systems (deterministic).
       **DONE (iter 4) — new `engine/gameplay` lane.**
-- [ ] Rounds/scoring/spawn points; pickups (health/ammo/weapon).
+- [~] Rounds/scoring/spawn points; pickups (health/ammo/weapon). **Scoring +
+      pickups DONE (iter 6); rounds/spawn-point selection = follow-up.**
 - [ ] FPS controller polish (air control, crouch/jump tuning) on the Jolt capsule.
 
 ### A — DOTS agents / AI
@@ -152,3 +153,15 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   stays lockstep-safe; wiring the net session's lag-comp HitEvents to apply_damage
   (net-id <-> Entity map) lands with the client/server split. Next: **G —
   rounds/scoring/spawn points + pickups (health/ammo/weapon).**
+- (iter 6) **Scoring + pickups in `engine/gameplay`.** Score{frags,deaths} +
+  `damage_credited(attacker,victim,amount)` (frag to killer unless self-kill,
+  death to victim); weapons (hitscan + projectile) now credit the shooter/owner.
+  Pickup{kind,amount,radius,respawn_delay,cooldown} + `spawn_pickup` +
+  `tick_pickups`: an active pickup grants to the first overlapping player (Health
+  entity, lowest id) — Health heals capped at max_hp, Ammo/Weapon refill the
+  Weapon — then goes inactive for respawn_delay; deterministic (players in id
+  order, additive grants). Tests: frag/death crediting, self-kill, health heal +
+  cap + respawn, ammo refill, out-of-range no-take, cross-world determinism.
+  607/607 green. Deferred: round timer/phases + spawn-point selection (match
+  orchestration) — lighter follow-up. Next: **A — DOTS combat AI: flow-field /
+  navmesh pathing on the spatial broadphase (research first).**

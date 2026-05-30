@@ -28,6 +28,12 @@ inline constexpr f32 kDefaultRespawnDelay = 3.0f;
 // Deterministic; returns true iff this damage killed the entity.
 bool apply_damage(scene::World& w, Entity e, f32 amount) noexcept;
 
+// As apply_damage, but credits the scoreboard on a kill: the attacker's Score
+// gains a frag (unless it's a self-kill) and the victim's Score gains a death.
+// Returns true iff this damage killed the victim.
+bool damage_credited(scene::World& w, Entity attacker, Entity victim,
+                     f32 amount) noexcept;
+
 // Advance every Dead entity's respawn timer by dt; on expiry restore full
 // health, move it to its Respawnable spawn (if it has a TransformWS), and clear
 // Dead. Deterministic: timers tick in place; respawns are applied in ascending

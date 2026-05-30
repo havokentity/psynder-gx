@@ -59,7 +59,7 @@ Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
             }
         });
 
-    if (best.valid()) apply_damage(w, best, wp->damage);
+    if (best.valid()) damage_credited(w, shooter, best, wp->damage);
     return best;
 }
 
@@ -102,8 +102,8 @@ void tick_projectiles(scene::World& w, f32 dt_seconds, std::vector<Entity>& scra
                 targets.push_back({ents[i], translation_of(xf[i])});
         });
 
-    // Integrate projectiles in place; collect (victim, damage) hits + despawns.
-    struct Hit { Entity victim; f32 damage; };
+    // Integrate projectiles in place; collect (owner, victim, damage) hits + despawns.
+    struct Hit { Entity owner; Entity victim; f32 damage; };
     std::vector<Hit> hits;
     scratch.clear();
     const f32 r2 = kProjectileHitRadius * kProjectileHitRadius;
@@ -126,7 +126,7 @@ void tick_projectiles(scene::World& w, f32 dt_seconds, std::vector<Entity>& scra
                     }
                 }
                 if (victim.valid()) {
-                    hits.push_back({victim, pr[i].damage});
+                    hits.push_back({pr[i].owner, victim, pr[i].damage});
                     scratch.push_back(ents[i]);  // despawn on hit
                 } else if (pr[i].ttl_s <= 0.0f) {
                     scratch.push_back(ents[i]);  // despawn on ttl
@@ -137,7 +137,7 @@ void tick_projectiles(scene::World& w, f32 dt_seconds, std::vector<Entity>& scra
     // Apply damage + despawn in ascending entity-id order (determinism).
     std::sort(hits.begin(), hits.end(),
               [](const Hit& a, const Hit& b) { return a.victim.raw < b.victim.raw; });
-    for (const Hit& h : hits) apply_damage(w, h.victim, h.damage);
+    for (const Hit& h : hits) damage_credited(w, h.owner, h.victim, h.damage);
     std::sort(scratch.begin(), scratch.end(),
               [](Entity a, Entity b) { return a.raw < b.raw; });
     for (const Entity p : scratch) w.destroy(p);

@@ -35,6 +35,18 @@ bool apply_damage(scene::World& w, Entity e, f32 amount) noexcept {
     return false;
 }
 
+bool damage_credited(scene::World& w, Entity attacker, Entity victim,
+                     f32 amount) noexcept {
+    const bool killed = apply_damage(w, victim, amount);
+    if (killed) {
+        if (attacker.raw != victim.raw) {  // no self-frag
+            if (Score* sa = w.get<Score>(attacker)) ++sa->frags;
+        }
+        if (Score* sv = w.get<Score>(victim)) ++sv->deaths;
+    }
+    return killed;
+}
+
 void update_respawns(scene::World& w, f32 dt_seconds, std::vector<Entity>& scratch) {
     // Tick timers in place (order-independent), gathering the entities that have
     // come due. Structural changes (respawn) happen AFTER the walk.
