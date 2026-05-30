@@ -130,6 +130,47 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 32) **6-LANE WAVE (user-driven max-throughput) — six additive features
+  across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/golden
+  code.** The user stopped the cron (a fire had stalled) and asked to "do as much
+  as possible now", so I drove a wider fan-out (6 concurrent agents) directly.
+  Shipped:
+  1. **gameplay/WeaponInventory** — POD multi-weapon inventory (owned bitmask +
+     per-class reserve ammo + active slot, 28 B) over WeaponLoadout: give_weapon
+     (no refill on re-pickup), switch_to, cycle_next/prev (skips unowned, wraps),
+     equip_active (projects the active archetype's WeaponSpec + restores reserve
+     ammo into the entity's Weapon). FPS weapon switching.
+  2. **ai/Influence** — a deterministic XZ influence/threat map: add_source
+     (linear Euclidean falloff cone, accumulates, negative = friendly control),
+     value(), down_gradient (flee) / up_gradient (seek) with lowest-index ties.
+     The tactical-positioning complement to FlowField.
+  3. **net/DeltaBitCodec** — the BIT-level quantized snapshot delta (BitPacker +
+     SnapshotQuantized): per-field [6b width][zigzag(curr-prev)] so unchanged
+     fields cost 6 bits and small moves a handful — strictly smaller than the
+     20-byte/record SnapshotPackDelta (asserted). The real bandwidth win.
+  4. **match/TeamScore** — TDM scoring: team_frags/deaths (sum Score by Team via
+     for_each_chunk<Score,Team>), leading_team (lowest-index tie), and
+     team_frag_limit_reached. The team analog of MatchRules' FFA frag_leader.
+  5. **camera/ViewBob** — cosmetic walk view-bob: distance-driven phase, figure-8
+     (vertical = sin(2*phase), lateral/roll = sin(phase)), guarded. Freezes when
+     stopped. Same-platform strict-FP (sin OK — cosmetic, documented).
+  6. **audio/VoiceCull** — deterministic voice limiting: voice_score (priority *
+     inverse-distance attenuation), select_voices (top-K by score, inaudible
+     dropped even with spare budget, lowest-id ties, descending order). The
+     finite-voice-budget selector.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files;
+  compiled clean on the first build. ONE trivial fix: the Influence test
+  mis-expected an overlap sum (10 vs the correct 12 — the second radius-5 source
+  DOES reach the first's centre at dist 4); the implementation was right, fixed
+  the test. Local: mac-debug ctest **927/927** (+51), mac-release determinism
+  67/67 (golden flock digest #911 intact), perf_guardrails OK, PsyServerGX
+  --ticks=128 + crate smokes exit 0. Total now: **39 features.** NOTE: the cron
+  driver (job 62384f44) was DELETED this turn — the loop no longer auto-fires;
+  recreate it (SETUP PROMPT in docs/RESUME-AUTONOMOUS.md) to resume autonomous
+  cadence. Follow-ups: bots using Influence to pick safe positions; the
+  DeltaBitCodec in the replication wire path; WeaponInventory + cycle wired to
+  input; TeamScore driving a TDM PsyServerGX; ViewBob/VoiceCull in-window.
+
 - (iter 31) **4-AGENT BATCH #8 — explosions + netcode compression + audio/feel,
   broadening into the audio lane: four additive features across four distinct
   lanes (G + N + audio + camera), all NEW files, ZERO edits to existing/hot/golden
