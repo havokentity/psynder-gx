@@ -63,6 +63,12 @@ MatchSession::MatchSession(const net::TickConfig& cfg, u32 client_count,
 
 MatchSession::~MatchSession() { delete world_; }
 
+void MatchSession::configure_match(const gameplay::MatchConfig& cfg,
+                                   std::span<const math::Vec3> spawn_points) {
+    match_cfg_ = cfg;
+    spawn_points_.assign(spawn_points.begin(), spawn_points.end());
+}
+
 void MatchSession::advance(std::span<const net::Input> inputs) {
     // (1) Net tick: client prediction + server-authoritative movement + lag-comp
     //     hit DETECTION (HitEvents appended to repl_.hit_events()).
@@ -81,9 +87,13 @@ void MatchSession::advance(std::span<const net::Input> inputs) {
     }
 
     // (3) Apply newly-registered lag-comp hits through the REAL gameplay damage
-    //     path. Drain only the events appended since last advance.
+    //     path. Drain only the events appended since last advance. Damage only
+    //     lands while the match is live (Warmup / Intermission are no-damage):
+    //     hits detected in those phases are drained but not applied.
+    const bool live = (match_state_.phase == gameplay::MatchPhase::Active);
     const std::vector<net::HitEvent>& hits = repl_.hit_events();
     for (usize i = drained_hits_; i < hits.size(); ++i) {
+        if (!live) continue;  // drain past non-live hits without applying them
         const net::HitEvent& h = hits[i];
         if (h.victim == 0u) continue;  // miss
         const u32 a = h.attacker - 1u;
@@ -96,13 +106,27 @@ void MatchSession::advance(std::span<const net::Input> inputs) {
         if (world_->get<Dead>(victim) != nullptr) continue;
         f32 dmg = 25.0f;
         if (const Weapon* wp = world_->get<Weapon>(attacker)) dmg = wp->damage;
-        gameplay::damage_credited(*world_, attacker, victim, dmg);
+        const bool killed = gameplay::damage_credited(*world_, attacker, victim, dmg);
         ++hits_applied_;
+        // On a kill, pick the victim's next respawn deterministically — the
+        // spawn point farthest from any living enemy (anti-spawn-camp). Written
+        // into its Respawnable so update_respawns moves it there on respawn.
+        if (killed && !spawn_points_.empty()) {
+            const usize idx = gameplay::select_spawn(
+                *world_, std::span<const math::Vec3>(spawn_points_), victim);
+            if (gameplay::Respawnable* r = world_->get<gameplay::Respawnable>(victim)) {
+                r->spawn_pos = spawn_points_[idx];
+            }
+        }
     }
     drained_hits_ = hits.size();
 
     // (4) Respawn timers (id-ordered, reused scratch).
     gameplay::update_respawns(*world_, dt_, respawn_scratch_);
+
+    // (5) Match orchestration: rounds + win conditions (no-op limits => never
+    //     ends; just advances the phase clock).
+    gameplay::tick_match(match_state_, *world_, match_cfg_, dt_);
 }
 
 f32 MatchSession::health(u32 client) const noexcept {

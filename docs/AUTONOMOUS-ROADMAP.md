@@ -36,8 +36,10 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       `engine/match` MatchSession drives the real gameplay ECS off the netcode.
       Headless dedicated-server binary `PsyServerGX` DONE (iter 12): runs
       MatchSession server-authoritative + deterministic, builds in the dedicated
-      config. Remaining follow-up: bind the real UDP transport (net::Server +
-      UdpSocket) + wire into the in-window 02_crate player.**
+      config. Match orchestration wired in DONE (iter 15): PsyServerGX now runs a
+      REAL match — warmup→active→intermission, frag limit, deterministic spawn
+      selection on death. Remaining follow-up: bind the real UDP transport
+      (net::Server + UdpSocket) + wire into the in-window 02_crate player.**
 
 ### G — Gameplay slice (FPS)
 - [x] Weapons: hitscan + projectile, fire rate, ammo; damage application; tests.
@@ -104,6 +106,32 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 15) **Match orchestration wired into the server — a real deterministic
+  match end-to-end.** Composed the systems built over iters 11–14: `MatchSession`
+  gained `configure_match(MatchConfig, spawn_points)` and now (a) ticks
+  `gameplay::MatchRules` each advance (Warmup→Active→Intermission phase machine,
+  frag/time win conditions, winner), (b) gates damage on the Active phase
+  (Warmup/Intermission are no-damage — net hits are drained but not applied), and
+  (c) on each kill picks the victim's next respawn deterministically via
+  `select_spawn` (farthest ring point from living enemies), writing it into the
+  victim's Respawnable. `PsyServerGX` configures a warmup + frag limit + a
+  4-point spawn ring and prints phase transitions + the winner: the headless run
+  now shows `warmup → active(round 1) → MATCH OVER winner … → intermission →
+  warmup → active(round 2)`, a genuine match flow. Tests: extended
+  match_session.cpp — a configured session reaches Active, ends at the frag limit
+  with the shooter as winner, the victim respawns onto a spawn-ring point (not
+  its origin), and both the outcome AND the run are bit-deterministic. Local:
+  mac-debug ctest **631/631** (+2), mac-release determinism+match 86/86 (golden
+  pin intact), PsyServerGX real-match + crate smokes exit 0. Backward-compatible:
+  no configure_match call => default no-limit rules, behaviour unchanged (the
+  existing MatchSession tests stay green). Decisions: scores persist across
+  matches (so round 2 can end instantly if a prior leader is already past the
+  limit) — a per-match score reset is a caller policy / small follow-up; warmup
+  gates damage but not movement. Follow-ups: reset scores on a new match; team
+  modes; bind the UDP transport for a networked PsyServerGX. Next: **M — visual
+  BSP arena** (in-window) or the UDP transport binding, or per-match score reset
+  + a fuller PsyServerGX match (bots via CombatBot driving inputs).
 
 - (iter 14) **Match orchestration — rounds + win conditions + spawn selection
   (item G, closing the gameplay slice).** The deferred iter-6 follow-up. New

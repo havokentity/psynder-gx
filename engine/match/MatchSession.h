@@ -34,6 +34,7 @@
 #pragma once
 
 #include "gameplay/GameplayComponents.h"
+#include "gameplay/MatchRules.h"
 #include "net/Prediction.h"
 #include "net/ReplicationSession.h"
 #include "net/TickConfig.h"
@@ -73,11 +74,26 @@ public:
     MatchSession(const MatchSession&) = delete;
     MatchSession& operator=(const MatchSession&) = delete;
 
+    // Opt into match orchestration: rounds + win conditions (gameplay::MatchRules
+    // ticked each advance) and deterministic spawn-point selection (on a kill the
+    // victim's next respawn is set to the spawn farthest from living enemies). A
+    // non-empty `spawn_points` enables the spawn heuristic; an empty span leaves
+    // each player respawning at its fixed Respawnable spawn. Without this call the
+    // session runs with default (no-limit) rules — behaviour is unchanged.
+    void configure_match(const gameplay::MatchConfig& cfg,
+                         std::span<const math::Vec3> spawn_points = {});
+
     // Advance one authoritative tick. `inputs` is one net::Input per client.
     void advance(std::span<const net::Input> inputs);
 
     u32 client_count() const noexcept { return repl_.client_count(); }
     u32 tick() const noexcept { return repl_.tick(); }
+
+    // Match orchestration reads.
+    const gameplay::MatchState& match() const noexcept { return match_state_; }
+    gameplay::MatchPhase match_phase() const noexcept { return match_state_.phase; }
+    Entity match_winner() const noexcept { return match_state_.winner; }
+    u32 match_round() const noexcept { return match_state_.round; }
 
     // The ECS player entity for a client (the id<->Entity map; index = client).
     Entity player(u32 client) const noexcept { return players_[client]; }
@@ -106,6 +122,10 @@ private:
     usize               drained_hits_ = 0; // index into repl_.hit_events()
     usize               hits_applied_ = 0;
     f32                 dt_ = 0.0f;
+
+    gameplay::MatchConfig   match_cfg_{};
+    gameplay::MatchState    match_state_{};
+    std::vector<math::Vec3> spawn_points_;  // deterministic respawn candidates
 };
 
 }  // namespace psynder::match
