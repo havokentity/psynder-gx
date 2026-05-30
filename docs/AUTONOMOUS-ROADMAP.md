@@ -130,6 +130,37 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 42) **6-LANE WAVE #8 (interleaved with integration per the user) — six
+  more additive features across six DISTINCT lanes, all NEW files, ZERO edits to
+  existing/hot/golden code.** Shipped:
+  1. **gameplay/Knockback** — radial impulse (velocity push) from hits/explosions:
+     knockback_impulse (away from source, distance falloff) + a Knockback
+     component (velocity + damping) + apply_radial_knockback. The velocity analog
+     of Splash.
+  2. **ai/Steering** — Reynolds steering primitives as pure XZ functions: seek,
+     flee, arrive (slow-radius ramp), clamp_speed, blend.
+  3. **net/PacketHeader** — the Gaffer rUDP header (sequence + ack + 32-bit
+     ack_bits) LE codec + build_ack_bits/ack_bit_set/header_acks over the iter-35
+     seq utils. Complements Reliability.h.
+  4. **world/outdoor/Wind** — deterministic cosmetic wind vector field (steady
+     base + perpendicular gust over position/time) for foliage/particle drift;
+     documented NOT-authoritative.
+  5. **camera/ScreenFade** — fade in/hold/out alpha envelope (death/respawn/
+     flashbang) with remainder carry across phases.
+  6. **audio/Attenuation** — the selectable rolloff family (Linear/Inverse/
+     InverseSquare/Exponential) + attenuation_db, complementing SpatialCue's
+     single curve.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files;
+  registered count healthy at 1324. ONE fix: the Attenuation degenerate-range case
+  (max <= ref) returned 0 AT ref because the max-cutoff check shadowed the "full
+  gain at/under ref" rule — reordered the checks so ref wins (impl fix; the agent's
+  own comment had already documented the intended behaviour, just unreachable).
+  Local: mac-debug ctest **1324/1324** (+59), mac-release determinism 103/103
+  (golden pin intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes
+  exit 0. Agents proactively handled the MSVC near/far macro + the <cmath> +
+  bracket rules this wave. Total now: **87 features + 3 integrations.** Continuing
+  the user's "more integration + more additive waves" directive.
+
 - (iter 41) **SOLO INTEGRATION #3 — tactical-AI skirmish (items A + D). Composes
   the unwired AI primitives into one deterministic bot loop.** New
   `tests/unit/tactical_ai_skirmish.cpp` extends the iter-30 skirmish pattern with
