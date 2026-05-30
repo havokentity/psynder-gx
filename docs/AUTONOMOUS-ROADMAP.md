@@ -130,6 +130,30 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 46) **CAPSTONE — a REPLICATED NETWORKED BOT MATCH, end to end (DoD core
+  loop).** New `tests/unit/networked_bot_match.cpp` composes the two biggest
+  iter-45 systems into the Definition-of-Done's central loop: a bot-vs-bot match
+  plays server-authoritatively (BotMatch over MatchSession + the combat/gameplay
+  systems), and EVERY tick its authoritative net world (ReplicationSession::
+  authoritative() EntityStates) is replicated to a client through the full
+  bandwidth-managed pipeline — ReplicationServer (priority accumulate + bandwidth
+  budget + quantize + pack + fragment) -> ReplicationClient (reassemble + unpack +
+  playout-clock + interpolation) -> client.view(). Asserts the match reached
+  Active + bots fought (hits/frags/deaths > 0), the client RECONSTRUCTED all 4
+  replicated players with sane positions, and the WHOLE replicated loop is
+  bit-deterministic across two runs (identical client view + match outcome).
+  Compiled + passed on the FIRST run. Local: mac-debug ctest **1422/1422** (+2),
+  mac-release determinism+capstone 115/115 (golden pin intact), perf_guardrails
+  OK, PsyServerGX --ticks=128 + crate smokes exit 0. This is "the net loop driving
+  REAL gameplay, bots playing it, replicated to a peer, deterministically" — the
+  headless heart of the DoD, demonstrated end to end. RUNNABLE ARTIFACTS for a
+  human test pass: `ctest -R "networked bot match"` (this), `PsyServerGX
+  --ticks=N` (the dedicated server), `sample_02_crate` (the in-window FPS),
+  `ctest -R "tactical|arena|skirmish"` (the AI combat loops). Total now: **102
+  features + 6 integrations.** Remaining for a full playable: the VISUAL half
+  (render::pipeline adoption + the editor) which needs in-window human sign-off,
+  and binding the real UDP transport for a 2-process demo.
+
 - (iter 45) **8-WORKSTREAM PARALLEL PUSH (user "all 8, go") — eight BIG subsystem
   builds/integrations across eight DISTINCT lanes in one batch, all NEW files,
   ZERO edits to existing/hot/golden code. Compiled CLEAN on the first build; all
