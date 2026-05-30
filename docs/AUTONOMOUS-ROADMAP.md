@@ -96,8 +96,13 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 - [ ] PsyGraph node editor; live IPC to the running player.
 
 ### S — Scripting (PsyGraph)
-- [ ] Behavior IR → DOTS compiler growth (ADR-018); more nodes; hot reload;
-      drive a gameplay behavior from a graph.
+- [~] Behavior IR → DOTS compiler growth (ADR-018); more nodes; hot reload;
+      drive a gameplay behavior from a graph. **Executable Behavior IR DONE
+      (iter 19): engine/script/behavior/BehaviorIR — a register-machine IR +
+      deterministic interpreter over SoA streams (the middle layer between the
+      VisualGraphCompiler front-end and the BehaviorSpine SIMD execution).
+      Front-end lowering (graph JSON → IR) + the MathLogicKernel SIMD back-end
+      for the IR = follow-ups.**
 
 ### D — Demos (test harness while editor matures)
 - [ ] `samples/arena` (Quake3), crowd-combat, destruction sandbox, vehicle test,
@@ -116,6 +121,34 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 19) **Executable Behavior IR — the DOTS middle of PsyGraph (item S /
+  ADR-018).** The two ends existed but were disconnected: VisualGraphCompiler
+  (graph JSON → Lua/C++ TEXT) is the front-end, BehaviorSpine is a HAND-LOWERED
+  proof of the SIMD execution model — nothing in between actually ran an authored
+  graph as DOTS. New `engine/script/behavior/BehaviorIR.{h,cpp}`: a compact
+  register-machine IR (Load/Store-stream, Const, Uniform, Add/Sub/Mul/Div, fused
+  Madd, Min/Max, the four compares, Select) + a deterministic interpreter that
+  runs it entity-major over SoA f32 component columns, with a single up-front
+  register-scratch alloc (no per-entity heap) and a `BehaviorBuilder` DSL for
+  authoring. Every op is pure algebra/compare (no transcendentals/RNG), so under
+  the script lane's NEW strict-FP flag the result is bitwise identical across
+  arm64/x86_64/MSVC — this is the data-driven shape a PsyGraph lowers to, decoupled
+  from Lua (the user's "away from Lua → compile to native DOTS" direction). Tests
+  (3): a projectile semi-implicit-Euler behavior matches a reference integration
+  over 90 ticks, a threshold+select behavior flags & heals low health, and a
+  64-entity/200-tick run is bit-deterministic (memcmp). Added
+  psynder_determinism_fp to the script lane (behavior code is lockstep sim; Lua
+  builds as a separate target, unaffected — no existing VM/spine test regressed).
+  Local: mac-debug ctest **644/644** (+3), mac-release determinism+behavior 46/46
+  (golden pin intact), server+crate smokes exit 0. Decision: a self-contained
+  interpreter (plain strict-FP loops) rather than lowering into MathLogicKernel
+  this pass — zero coupling risk; the SIMD back-end (IR → MathLogicKernelBuilder,
+  which BehaviorSpine already shows by hand) is the natural follow-up. Follow-ups:
+  graph-JSON → IR lowering (wire VisualGraphCompiler's node set to emit IR), the
+  MathLogicKernel SIMD execution path for the IR, hot reload, drive a real ECS
+  gameplay system from a graph. Next: UDP transport binding, terrain-aware match
+  spawns + outdoor PsyServerGX skirmish, or the IR SIMD back-end.
 
 - (iter 18) **Bind ECS movers to the heightfield — agents walk the hills (item
   M).** Made iter-17's terrain query usable by the DOTS ECS. New
