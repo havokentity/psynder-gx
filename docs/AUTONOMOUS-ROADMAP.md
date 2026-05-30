@@ -110,8 +110,11 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       back-end for the IR = follow-up.**
 
 ### D — Demos (test harness while editor matures)
-- [ ] `samples/arena` (Quake3), crowd-combat, destruction sandbox, vehicle test,
-      net-play headless demo — one per milestone as needed.
+- [~] `samples/arena` (Quake3), crowd-combat, destruction sandbox, vehicle test,
+      net-play headless demo — one per milestone as needed. **Headless combat
+      demos DONE: arena_combat (indoor, iter 9), outdoor_skirmish (terrain, iter
+      22), PsyServerGX (networked match, iter 12/15). Visual sample binaries =
+      in-window follow-ups.**
 
 ### P — Perf & determinism
 - [x] Cross-platform golden parity: strict-FP the sim path (scene/math used by
@@ -126,6 +129,28 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 22) **Outdoor skirmish — the Battlefield-light combat loop integrated
+  headless (items D + M).** The outdoor analog of arena_combat (iter 9),
+  composing everything the terrain track built: new `outdoor_skirmish.cpp` spawns
+  two teams of 12 flow-field combat bots on a procedural heightfield
+  (generate_hills), GroundClamp-tags them, and runs a full tick — tick_combat_bots
+  (path + shoot through the broadphase + team friendly-fire) → update_agents (XZ
+  steering) → apply_terrain_clamp (snap Y to the surface) → tick_weapons →
+  update_respawns → tick_match (rounds + frag limit). Asserts the integrated
+  outdoor loop actually fights (frags + deaths > 0), every bot stays EXACTLY on
+  the terrain surface throughout, the match advances into a live round, and the
+  whole thing is bit-reproducible across runs (per-bot hp/frags/x/z signature).
+  This ties engine/world/outdoor (HeightfieldQuery + TerrainAgents, iters 17–18)
+  + engine/ai (FlowField) + engine/physics/agents + engine/gameplay (CombatBot /
+  Weapons / Damage / MatchRules, iters 5–16) into one deterministic Battlefield-
+  light skirmish. Pure integration (no new engine code) — proves the systems
+  compose outdoors. NOTE: this iteration was interrupted mid-gate by a
+  permissions crash that left the smoke lock held; recovered by releasing both
+  locks and re-running. Local: mac-debug ctest **653/653** (+1), mac-release
+  determinism+outdoor 44/44 (golden pin intact), server+crate smokes exit 0.
+  Next: a reusable BehaviorSystem wrapper, the IR SIMD back-end, the UDP
+  transport binding, or terrain-aware match spawns.
 
 - (iter 21) **A graph behavior runs as a system over the live ECS (item S /
   ADR-018 — closes "drive a gameplay behavior from a graph").** Connected iters
