@@ -7,6 +7,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>   // std::isfinite (libstdc++ needs the explicit include)
 #include <limits>
 
 using namespace psynder;
