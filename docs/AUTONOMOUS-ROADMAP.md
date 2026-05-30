@@ -130,6 +130,35 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 47) **4-AGENT BATCH (cron-driven) — four additive features across four
+  DISTINCT lanes, all NEW files, ZERO edits to existing/hot/golden code.** The
+  autonomous cron resumed the loop. Shipped:
+  1. **gameplay/Melee** — short-range cone attack: melee_attack hits the nearest
+     living enemy within range + the cone (dot(facing,toTarget) >= cos_half_angle,
+     no runtime trig), friendly-team filter, damage_credited; melee_cone_cos
+     authoring helper.
+  2. **ai/Avoidance** — local collision-avoidance steering: time_to_collision
+     (quadratic of the expanding-disc closest approach) + avoid_velocity
+     (separation + perpendicular veer weighted by urgency, clamped) over the
+     Steering primitives; XZ, deterministic.
+  3. **net/ClockSync** — NTP-style clock-offset estimate: sample_rtt/sample_offset
+     + a best-(lowest-RTT)-sample filter + server_time(client); complements
+     RttEstimator (min-filter for accuracy vs its EWMA for timeouts).
+  4. **camera/Frustum** — Gribb-Hartmann frustum extraction from a view-proj Mat4
+     + aabb_in_frustum / classify_aabb (Inside/Intersect/Outside) / sphere_in_frustum.
+     The render culling primitive.
+  Integration: tree had EXACTLY 12 new files, ZERO modified tracked files;
+  compiled clean on the first build; registered 1457. ONE fix: the ClockSync
+  asymmetric-bias test mis-signed the NTP bias as (down-up)/2 = +0.03, but the
+  standard offset formula carries (up-down)/2 = -0.03 (est = truth - 0.03, derived
+  from t1=t0+up+theta, t3=t0+up+down) — the impl is the textbook formula and is
+  correct; fixed the test's sign. Local: mac-debug ctest **1457/1457** (+35),
+  mac-release determinism 117/117 (golden pin intact), perf_guardrails OK,
+  PsyServerGX --ticks=128 + crate smokes exit 0. Total now: **106 features +
+  6 integrations.** Follow-ups: melee into a CombatBot/player attack; Avoidance
+  into the agent steering; ClockSync feeding PlayoutClock's server time; Frustum
+  into the render extract cull.
+
 - (iter 46) **CAPSTONE — a REPLICATED NETWORKED BOT MATCH, end to end (DoD core
   loop).** New `tests/unit/networked_bot_match.cpp` composes the two biggest
   iter-45 systems into the Definition-of-Done's central loop: a bot-vs-bot match
