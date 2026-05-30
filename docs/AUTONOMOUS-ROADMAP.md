@@ -130,6 +130,52 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 33) **6-LANE WAVE #2 (resumed after a token-limit stall) — six more
+  additive features across six DISTINCT lanes, all NEW files, ZERO edits to
+  existing/hot/golden code.** The six wave-2 agents hit the session token limit
+  mid-flight: two finished (gameplay/Powerup, world/outdoor/TerrainPathCost),
+  three left only their header (ai/Formation, net/SequenceBuffer, camera/FovKick),
+  one wrote nothing (audio/DistanceDelay). On resume I COMPLETED the partial lanes
+  myself from the agent-authored headers + specs (wrote Formation.cpp+test,
+  FovKick.cpp+test, the SequenceBuffer test, and all of DistanceDelay) rather than
+  re-spawning, to avoid another stall. Shipped:
+  1. **gameplay/Powerup** — Quake powerups: PowerupKind {QuadDamage, Haste,
+     Regeneration, BattleSuit}, a `Powerups` timer component (16 B), grant/has/
+     tick, damage_multiplier (4x quad) / incoming_damage_multiplier (0.5 suit),
+     tick_regeneration (overheal cap). Deterministic, ascending id.
+  2. **ai/Formation** — squad formation slots: formation_slot/formation_slots for
+     Line (abreast), Column (single file), Wedge (V), with the Camera.h
+     right-handed basis (right = cross(forward,+Y)), zero-forward fallback. The
+     cohesion complement to per-agent nav.
+  3. **net/SequenceBuffer** — the Gaffer-on-Games reliable-UDP primitive:
+     seq_greater/seq_diff (16-bit wraparound-safe) + a header-only
+     SequenceBuffer<T> ring (slot = seq % cap, stale-slot invalidation on a newer
+     insert, too-old rejection). The backbone a future ack/jitter/fragment layer
+     shares.
+  4. **world/outdoor/TerrainPathCost** — slope-weighted outdoor traversal cost:
+     terrain_move_cost (1.0 flat, rising to a cap, kImpassableCost past min_updot),
+     terrain_passable, terrain_edge_cost (distance * avg endpoint cost). Lockstep-
+     safe (updot gate, no acos).
+  5. **camera/FovKick** — dynamic FOV: fov_target (ADS > sprint > base priority),
+     fov_update (framerate-independent clamp-blended ease, no overshoot, guarded
+     dt). Strict-FP, no trig. The FOV analog of Recoil/Shake.
+  6. **audio/DistanceDelay** — speed-of-sound propagation: propagation_delay_s
+     (d/343), delay_samples (rounded mixer offset), air_absorption_gain
+     (1/(1+a*d)), distant_arrival bundle. The "flash before the boom" model.
+  Integration: tree had 17 new files, ZERO modified tracked files. TWO trivial
+  fixes: the camera test needed a `<limits>` include (mine), and the agent's
+  TerrainPathCost edge-cost test used the map CORNER (0,0) where terrain_normal's
+  central difference samples off-map and reads as a cliff -> moved it to interior
+  points (impl behaviour is correct boundary handling). Local: mac-debug ctest
+  **972/972** (+45), mac-release determinism 72/72 (golden flock digest #956
+  intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes exit 0.
+  Total now: **45 features** (two 6-lane waves back-to-back). NOTE: the cron driver
+  is still DELETED (deleted iter 32); recreate via the SETUP PROMPT in
+  docs/RESUME-AUTONOMOUS.md to resume autonomous cadence. Follow-ups: Powerup
+  damage_multiplier into fire_hitscan; Formation driving squad steering;
+  SequenceBuffer backing a real ack codec; TerrainPathCost into an outdoor A*;
+  FovKick/DistanceDelay in-window.
+
 - (iter 32) **6-LANE WAVE (user-driven max-throughput) — six additive features
   across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/golden
   code.** The user stopped the cron (a fire had stalled) and asked to "do as much
