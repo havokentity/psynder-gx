@@ -33,10 +33,11 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       **DONE (iter 3).**
 - [~] Client/server split in the player path (server ticks authoritative; client
       predicts) — headless server smoke. **Net→gameplay bridge DONE (iter 11):
-      new `engine/match` lane (`MatchSession`) drives the real gameplay ECS off
-      the netcode — server-auth lag-comp hits apply through the gameplay damage
-      path. Wiring it into the in-window 02_crate player + a dedicated-server
-      binary = follow-up.**
+      `engine/match` MatchSession drives the real gameplay ECS off the netcode.
+      Headless dedicated-server binary `PsyServerGX` DONE (iter 12): runs
+      MatchSession server-authoritative + deterministic, builds in the dedicated
+      config. Remaining follow-up: bind the real UDP transport (net::Server +
+      UdpSocket) + wire into the in-window 02_crate player.**
 
 ### G — Gameplay slice (FPS)
 - [x] Weapons: hitscan + projectile, fire rate, ammo; damage application; tests.
@@ -83,17 +84,48 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       net-play headless demo — one per milestone as needed.
 
 ### P — Perf & determinism
-- [~] Cross-platform golden parity: strict-FP the sim path (scene/math used by
+- [x] Cross-platform golden parity: strict-FP the sim path (scene/math used by
       agents+physics) so Linux/Windows match macOS; flip determinism.yml off
-      continue-on-error where it holds. **math + scene strict-FP DONE (iter 10);
-      Linux determinism promoted to REQUIRED; Windows determinism unblocked
-      (Vulkan SDK install) — promote it once observed green.**
+      continue-on-error where it holds. **DONE: math + scene strict-FP (iter 10);
+      Linux determinism REQUIRED (iter 10); Windows determinism unblocked (Vulkan,
+      iter 10) + promoted to REQUIRED (iter 12) after two green pushes. The full
+      mac+linux+windows determinism matrix is now required — no continue-on-error.**
 - [ ] Alloc audits (no per-frame heap in hot paths); SIMD/job scaling; profiling.
 
 ## Journal
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 12) **Headless dedicated-server binary `PsyServerGX` + item P fully
+  closed.** Two coherent server/determinism deliverables:
+  (1) **PsyServerGX** (`apps/PsyServerGX/`) — the concrete "runs
+  server-authoritative" artifact the DoD calls for and the binary the dedicated
+  build (`PSYNDER_GX_DEDICATED_SERVER=ON`) produces (previously the dedicated
+  build compiled only libs, no executable). It runs `engine/match` MatchSession
+  on a fixed 128 Hz tick with NO graphics/audio/editor, scripted client inputs
+  standing in for connected players until the UDP transport is bound. Links only
+  headless deterministic lanes (match→net+gameplay+scene+math+core), so it builds
+  in BOTH the normal player config and the dedicated config — verified by
+  configuring `-DPSYNDER_GX_DEDICATED_SERVER=ON` (PsyServerGX present,
+  PsyArcadeGX correctly skipped, samples off) AND building+running it there
+  (links from purely headless static libs). CMake: widened the `apps` guard to
+  `BUILD_PLAYER OR DEDICATED_SERVER`; `apps/CMakeLists.txt` gates PsyArcadeGX to
+  non-dedicated and always adds PsyServerGX. Smoke: `PsyServerGX --ticks=N`
+  exits 0, server-auth frags/deaths/respawns play out, and run-to-run output is
+  bit-identical (4-client/300-tick deterministic). Determinism FP on the target.
+  (2) **Item P closed** — promoted the **Windows determinism** job off
+  continue-on-error (green across iters 10–11 once the Vulkan SDK install
+  unblocked configure). The full **mac + linux + windows determinism matrix is
+  now REQUIRED**; no continue-on-error remains in determinism.yml. Local:
+  mac-debug ctest 617/617 (incl perf_guardrails), PsyServerGX + crate smokes
+  exit 0, dedicated-config build+run clean. Decisions: scripted inputs (not a
+  live UDP loop) keep the server-tick smoke deterministic + CI-stable; binding
+  net::Server + UdpSocket is the transport follow-up. Risk noted: with Windows
+  determinism now required, a future MSVC-STL/`/fp:strict` divergence will (
+  correctly) block the branch — fix-forward, don't re-mask. Next: **G — FPS
+  controller polish (air control, crouch/jump on the Jolt capsule)** or bind the
+  UDP transport into PsyServerGX (true networked dedicated server).
 
 - (iter 11) **The net loop drives REAL gameplay — new `engine/match` lane (item
   N / DoD §8 bullet 1).** The netcode (ReplicationSession) and the gameplay ECS

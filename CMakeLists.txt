@@ -217,7 +217,10 @@ if(PSYNDER_GX_EDITOR)
 endif()
 
 # ─── Tools / samples / tests ──────────────────────────────────────────────
-if(PSYNDER_GX_BUILD_PLAYER AND NOT PSYNDER_GX_DEDICATED_SERVER)
+# apps/ holds both the GPU player (PsyArcadeGX, normal builds) and the headless
+# dedicated server (PsyServerGX, normal + dedicated builds); apps/CMakeLists.txt
+# gates each. Add it whenever we build runnable artifacts in either mode.
+if(PSYNDER_GX_BUILD_PLAYER OR PSYNDER_GX_DEDICATED_SERVER)
     add_subdirectory(apps)
 endif()
 if(PSYNDER_GX_BUILD_TOOLS)
