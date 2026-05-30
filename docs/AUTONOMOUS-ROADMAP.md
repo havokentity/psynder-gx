@@ -130,6 +130,36 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 36) **6-LANE WAVE #5 (user-driven max-throughput) — six more additive
+  features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
+  golden code.** Every agent prompt now carries the "no brackets in TEST_CASE
+  names" rule (iter-35 lesson) — clean run, registration healthy, no fixes needed.
+  Shipped:
+  1. **gameplay/Crouch** — crouch FSM: Crouch component (20 B) + crouch_update
+     (ease height, can't stand under a ceiling via blocked_above) + crouch_fraction
+     + crouch_speed_mult.
+  2. **ai/SquadCommand** — squad orders (Advance to a rally / Hold / Regroup) +
+     squad_member_goal (composes Formation Wedge slots) + squad_all_arrived.
+  3. **net/CongestionControl** — Gaffer good/bad-mode send-rate adapter: demote on
+     bad RTT, promote only after a sustained good period AND a min bad dwell
+     (hysteresis). Feeds off RttEstimator.
+  4. **match/Loadout** — class kits (Assault/Scout/Heavy) with primary/secondary
+     WeaponClass + start health + speed mult; apply_loadout equips the pawn.
+  5. **camera/WeaponSway** — viewmodel sway: the gun lags opposite the look
+     velocity then recenters. Strict-FP, no trig.
+  6. **audio/ReverbZone** — reverb wet/decay from room volume (saturating map) +
+     reverb_lerp for crossfading zones + dry gain.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files;
+  compiled clean AND passed the full ctest on the FIRST run; registered test count
+  healthy at 1131 (the bracket rule held — no discovery corruption). Local:
+  mac-debug ctest **1131/1131** (+49), mac-release determinism 87/87 (golden pin
+  intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes exit 0.
+  Total now: **63 features** (FIVE 6-lane waves this session, ~30 features in the
+  user-driven burst). NOTE: cron still DELETED. Follow-ups: Crouch height into the
+  Jolt capsule; SquadCommand driving a bot squad; CongestionControl gating the
+  replication send rate; Loadout into MatchSession spawns; WeaponSway/ReverbZone
+  in-window.
+
 - (iter 35) **6-LANE WAVE #4 (user-driven max-throughput) — six more additive
   features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
   golden code.** Shipped:
