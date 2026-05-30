@@ -47,7 +47,12 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       **DONE (iter 4) — new `engine/gameplay` lane.**
 - [~] Rounds/scoring/spawn points; pickups (health/ammo/weapon). **Scoring +
       pickups DONE (iter 6); rounds/spawn-point selection = follow-up.**
-- [ ] FPS controller polish (air control, crouch/jump tuning) on the Jolt capsule.
+- [~] FPS controller polish (air control, crouch/jump tuning) on the Jolt capsule.
+      **Deterministic Quake3 movement kernel DONE (iter 13):
+      engine/physics/core/PlayerMovement (pm_friction/pm_accelerate/pm_move) —
+      ground accel+friction, air-strafe, jump, crouch; unit-tested. Wiring it
+      into CharacterSpine/the 02_crate pawn (replacing instant-velocity) = the
+      in-window follow-up.**
 
 ### A — DOTS agents / AI
 - [x] Navmesh or flow-field pathing (research first). **DONE (iter 7) —
@@ -96,6 +101,36 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 13) **Deterministic Quake3 movement kernel (item G — the tight arena
+  feel).** The player capsule moved at instant velocity (arcade): the input
+  layer set a desired horizontal velocity and Jolt clamped it — no acceleration,
+  friction, or air control, so no Quake-arena feel and no bunnyhop. New
+  `engine/physics/core/PlayerMovement.{h,cpp}`: a faithful METRIC port of id
+  Software's `bg_pmove.c` — `pm_friction` (PM_Friction: control=max(speed,
+  stop_speed), drop=control·friction·dt, crisp stop below an epsilon),
+  `pm_accelerate` (PM_Accelerate: addspeed = wishspeed − dot(vel,wishdir),
+  add ≤ accel·dt·wishspeed along wishdir — the one routine Quake3 uses for BOTH
+  ground and air), and `pm_move` (friction when grounded, jump that sets vy +
+  clears grounded + SKIPS friction so a hop preserves horizontal speed = the
+  bunnyhop invariant, ground vs air accel constant, real gravity while
+  airborne). Quake3 constants ported to metric (accel 10, air 1, friction 6,
+  duck 0.25; speeds scaled to a 7 m/s run). PURE + strict-FP + no Jolt
+  dependency, so it's headless-unit-testable and feeds the CharacterVirtual each
+  tick (solver still owns collision; this owns feel). Tests (6): friction →
+  crisp stop, ground accel ramps to the cap and NEVER exceeds it, **air-strafing
+  exceeds the ground cap (air control proven)**, jump preserves horizontal speed
+  + sets vy (= jump_speed − g·dt, gravity acts that tick — a real-physics detail
+  the test caught), crouch caps at the duck scale, and the kernel is
+  bit-deterministic over a varied 300-tick schedule. Local: mac-debug ctest
+  **623/623** (+6), mac-release determinism+movement 43/43 (golden pin intact),
+  server+crate smokes exit 0. Source: id-Software/Quake-III-Arena
+  code/game/bg_pmove.c. Decision: kept real gravity (9.81, metric pillar) rather
+  than Quake3's snappier 800 u/s² — tune later for feel if needed. Follow-up
+  (in-window): wire pm_move into CharacterSpine / the 02_crate pawn to replace
+  set_desired_horizontal_velocity, exposing crouch height + air control to the
+  actual player. Next: **M — visual BSP arena geometry** (in-window) or bind the
+  UDP transport into PsyServerGX (networked dedicated server, headless).
 
 - (iter 12) **Headless dedicated-server binary `PsyServerGX` + item P fully
   closed.** Two coherent server/determinism deliverables:
