@@ -130,6 +130,42 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 39) **SOLO INTEGRATION — the bandwidth-managed snapshot SEND pipeline
+  (item N / DoD bandwidth budget). User pivoted the loop from additive waves to
+  INTEGRATION (composing the ~40 building blocks into real systems).** New
+  `engine/net/SnapshotScheduler.{h,cpp}` answers the real question "what does the
+  server send each peer this tick?" by COMPOSING four net primitives built this
+  session:
+    * PriorityAccumulator (iter 34) — accumulate each entity's send-priority;
+    * BandwidthBudget (iter 38) — a token-bucket byte budget = send-rate * MTU;
+    * pack_quantized / SnapshotQuantized (iters 24/25) — quantize + pack the
+      chosen entities to a compact cross-platform-bitwise payload;
+    * fragment_message / FragmentReassembler (iter 37) — split to the link MTU.
+  Each tick: accumulate priorities -> take the highest-priority entities the
+  budget affords (one record = quantized_wire_bytes()) -> select() resets the
+  winners so the losers climb (no starvation) -> pack -> fragment. A peer
+  reassembles + unpacks to recover exactly the scheduled records. The test
+  (`net_snapshot_scheduler.cpp`) proves the END-TO-END loop: top-priority within
+  budget, a peer round-trips the fragments back to the sent states (positions
+  within the quant step), out-of-order fragments still reassemble, a tiny budget
+  throttles to 1 record/tick, NO entity is starved over 60 ticks, an empty budget
+  sends nothing, and the whole pipeline is bit-deterministic. ONE bug fixed during
+  integration (a real composition lesson): the scheduler computed affordable
+  records via budget.available_bytes()/20, but a float refill of "60 bytes" lands
+  at 59.9997 -> floor 59 -> 2 records not 3 (and a 1-record budget gave 0 -> an
+  OOB crash ASan caught); fixed by computing affordable with a sub-byte epsilon
+  tolerance (same class of fix as iter-38's budget). Local: mac-debug ctest
+  **1256/1256** (+7), mac-release determinism+scheduler 106/106 (golden pin
+  intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes exit 0.
+  This is the first of the consolidation passes — the netcode send path now
+  composes priority + budget + quantize + fragment into one deterministic
+  pipeline. Follow-ups: wire SnapshotScheduler into ReplicationSession's per-peer
+  send (the determinism-critical step); a delta variant (DeltaBitCodec vs a
+  per-peer baseline) instead of full quantized pack; AoI feeding the priority
+  bases. Next integration candidates: tactical-bot AI depth (ThreatMemory +
+  TargetSelect + CoverScore + SquadCommand + Blackboard into the skirmish), or
+  combat depth (Reload + Suppression + Powerups + falloff into fire_hitscan).
+
 - (iter 38) **6-LANE WAVE #7 (user-driven max-throughput) — six more additive
   features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
   golden code.** Shipped:
