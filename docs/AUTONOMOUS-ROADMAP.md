@@ -130,6 +130,37 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 38) **6-LANE WAVE #7 (user-driven max-throughput) — six more additive
+  features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
+  golden code.** Shipped:
+  1. **gameplay/Suppression** — incoming-fire suppression meter (12 B): add/tick-
+     decay + spread_multiplier (suppressed = less accurate) + is_suppressed.
+  2. **ai/Blackboard** — fixed-slot integer-keyed AI scratch (float/int/vec3/bool
+     with a type-tag rule: a wrong-type get returns false). For behavior trees/FSMs.
+  3. **net/BandwidthBudget** — token-bucket send byte budget: configure(rate,
+     burst) + refill/can_spend/try_spend. The cap companion to PriorityAccumulator.
+  4. **world/outdoor/TerrainCollision** — sphere-vs-terrain resolve: penetration +
+     push-out along the normal + reflect_velocity bounce. Lockstep-safe.
+  5. **camera/Spring** — critically-damped SmoothDamp spring (no trig, polynomial
+     reciprocal) for smooth camera follows / value chases.
+  6. **audio/Crossfade** — equal-power crossfade (cos/sin, constant power) + a
+     timed Fader for music/ambience transitions.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files;
+  registered count healthy at 1249. ONE fix (4 failing assertions, one root
+  cause): BandwidthBudget compared the f64 fill with EXACT `>=`, but a float
+  refill of "100 bytes" (e.g. 10000*0.01) lands a hair under/over 100, so a
+  nominal-N bucket couldn't spend N and "spend everything" left sub-byte residue
+  that fails `Approx(0.0)` (no margin). FIXED IN THE IMPL (the correct fix, not the
+  test): can_spend tolerates a sub-byte epsilon and try_spend snaps a drained-
+  within-epsilon bucket to exactly 0 — robust to the inevitable float refill error.
+  Local: mac-debug ctest **1249/1249** (+56), mac-release determinism 96/96
+  (golden pin intact), perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes
+  exit 0. Total now: **75 features** (SEVEN 6-lane waves this session, 42 in the
+  user burst). NOTE: cron still DELETED. Follow-ups: Suppression into the spread
+  path; Blackboard backing TacticalBot; BandwidthBudget + PriorityAccumulator
+  capping the replication send; TerrainCollision for grenades/rolling props;
+  Spring/Crossfade in-window.
+
 - (iter 37) **6-LANE WAVE #6 (user-driven max-throughput) — six more additive
   features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
   golden code.** Shipped:
