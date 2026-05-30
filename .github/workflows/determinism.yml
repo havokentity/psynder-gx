@@ -91,14 +91,16 @@ jobs:
           -R "$PSY_DETERMINISM_TESTS"
           --output-on-failure
 
-  # ── Windows / MSVC STL divergence check. Stubbed continue-on-error: the
-  #    MSVC STL orders unordered containers differently from libc++, a classic
-  #    source of cross-platform non-determinism worth catching. ───────────────
+  # ── Windows / MSVC STL divergence check — NOW REQUIRED. The MSVC STL orders
+  #    unordered containers differently from libc++ and /fp:strict differs from
+  #    Clang's model, classic cross-platform non-determinism. Promoted off
+  #    continue-on-error once the Vulkan SDK install unblocked configure and the
+  #    job held green across consecutive pushes (ROADMAP item P). An MSVC
+  #    divergence now fails the branch instead of being masked. ────────────────
   windows:
     name: Windows · x86_64 · determinism
     runs-on: windows-2022
     timeout-minutes: 40
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
