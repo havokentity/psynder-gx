@@ -45,8 +45,11 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       server lag-comp path = follow-ups with the client/server split.)
 - [x] Health/armor/damage/death/respawn components + systems (deterministic).
       **DONE (iter 4) — new `engine/gameplay` lane.**
-- [~] Rounds/scoring/spawn points; pickups (health/ammo/weapon). **Scoring +
-      pickups DONE (iter 6); rounds/spawn-point selection = follow-up.**
+- [x] Rounds/scoring/spawn points; pickups (health/ammo/weapon). **Scoring +
+      pickups DONE (iter 6); rounds + spawn-point selection DONE (iter 14):
+      engine/gameplay/MatchRules — Warmup→Active→Intermission phase machine,
+      frag-limit + time-limit win conditions, frag-leader (id-tie), and
+      farthest-from-enemy deterministic spawn selection.**
 - [~] FPS controller polish (air control, crouch/jump tuning) on the Jolt capsule.
       **Deterministic Quake3 movement kernel DONE (iter 13):
       engine/physics/core/PlayerMovement (pm_friction/pm_accelerate/pm_move) —
@@ -101,6 +104,32 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 14) **Match orchestration — rounds + win conditions + spawn selection
+  (item G, closing the gameplay slice).** The deferred iter-6 follow-up. New
+  `engine/gameplay/MatchRules.{h,cpp}`: a deterministic match state machine
+  `Warmup → Active → Intermission → Warmup` (`tick_match`) with Quake3-style win
+  conditions — first to `frag_limit`, or highest score at `time_limit` — driving
+  off the existing Score components; `frag_leader` (highest frags, ties → lowest
+  entity id); and `select_spawn`, the classic anti-spawn-camp heuristic that
+  picks the spawn point whose nearest LIVING enemy (Health.hp>0, excluding self)
+  is farthest away, ties → lowest index. All allocation-free (per-candidate
+  rescans, counts small), strict-FP, id-ordered — no RNG. Ties the Score /
+  Health / TransformWS components into an actual match with a winner. Tests (6):
+  warmup→active+round increment, frag-limit ends with the right winner, time-
+  limit ends for the frag leader, leader id-tie break, spawn picks farthest-from-
+  enemy (and ignores a DEAD enemy on the far point), and a scripted 400-tick
+  match is bit-deterministic across runs. Local: mac-debug ctest **629/629**
+  (+6), mac-release determinism+match 84/84 (golden pin intact), server+crate
+  smokes exit 0, full matrix-bound CI. Decisions: team-agnostic spawn selection
+  (FFA-deathmatch default; a team filter is a small add when team modes land);
+  MatchState is a plain struct (one per session/server), not an ECS component,
+  since it's singleton match state. Intermission cycles back to Warmup for
+  continuous rounds; score reset between matches is the caller's call. Follow-up:
+  drive MatchRules from PsyServerGX + MatchSession (the server runs real rounds);
+  team modes. Next: **M — visual BSP arena** (in-window) or bind the UDP
+  transport into PsyServerGX (networked dedicated server, headless), or wire
+  pm_move/MatchRules into PsyServerGX for a fuller headless match demo.
 
 - (iter 13) **Deterministic Quake3 movement kernel (item G — the tight arena
   feel).** The player capsule moved at instant velocity (arcade): the input
