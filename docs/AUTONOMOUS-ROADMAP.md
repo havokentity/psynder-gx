@@ -130,6 +130,32 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 25) **4-AGENT BATCH #3 — four additive helpers, four distinct lanes.**
+  The safest batch shape (all NEW files, zero edits to existing/hot/golden code):
+  1. **net/SnapshotPack** — portable little-endian pack/unpack of a quantized
+     entity snapshot (explicit LE byte writes, not struct memcpy) + truncation
+     guard; the wire-serialization layer over iter-24's SnapshotQuantized.
+  2. **ai/PathSimplify** — deterministic integer Bresenham `line_of_sight` +
+     greedy string-pull `simplify_path` turning a GridAStar cell path into corner
+     waypoints (no-corner-cut rule preserved).
+  3. **gameplay/Ballistics** — `damage_at_distance` (full→min linear falloff,
+     degenerate-input guards) + `Hitbox` multipliers (Head 2×, Body 1×, Limb
+     0.7×) + `ranged_damage`; pure algebra, lockstep-safe.
+  4. **world/outdoor/TerrainSlope** — `terrain_slope_updot` (normal.y = cos slope)
+     + `terrain_walkable` (cos-threshold gate, the lockstep-safe form) +
+     `terrain_slope_radians` (acos, documented query-only).
+  Integration: 12 new files, ZERO modified tracked files. One agent test had a
+  bare `Approx(` instead of `Catch::Approx(` (net_snapshot_pack.cpp:59) — a
+  one-line fix, the only issue across all four. Local: mac-debug ctest **715/715**
+  (+26), mac-release determinism+new 66/66 (golden pin intact), perf_guardrails
+  OK (Ballistics/SnapshotPack have no forbidden constructs), server+crate smokes
+  exit 0. Three clean 4-agent batches now: **12 features across 3 CI cycles**,
+  each needing at most a single trivial integration fix — the parallel cadence is
+  proven reliable for additive disjoint-lane work. Follow-ups: wire Ballistics
+  into fire_hitscan damage, SnapshotPack into the replication wire path,
+  PathSimplify into an A* bot, terrain_walkable into spawn validation. Next: a
+  wiring batch, or the IR SIMD back-end / UDP transport.
+
 - (iter 24) **4-AGENT BATCH #2 — wire iter-23 primitives into call sites + a new
   AI pather.** Four agents, four disjoint lanes, one CI cycle (the new cadence):
   1. **Spread → fire_hitscan** (gameplay/Weapons): two optional params
