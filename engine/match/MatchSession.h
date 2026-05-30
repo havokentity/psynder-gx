@@ -39,6 +39,8 @@
 #include "net/ReplicationSession.h"
 #include "net/TickConfig.h"
 
+#include "world/outdoor/Terrain.h"  // world::outdoor::HeightmapDesc
+
 #include "math/Math.h"
 
 #include "core/Types.h"
@@ -83,6 +85,16 @@ public:
     void configure_match(const gameplay::MatchConfig& cfg,
                          std::span<const math::Vec3> spawn_points = {});
 
+    // Opt into terrain-aware respawns. When configured, the deterministic spawn
+    // selection clamps the victim's chosen respawn point onto the terrain
+    // surface (its Y is snapped to terrain_height at that XZ) via
+    // world::outdoor::clamp_to_ground. Without this call respawns use the raw
+    // spawn-point Y, exactly as before.
+    //
+    // The caller MUST keep the heightmap's `heights` data alive for the whole
+    // lifetime of this session — only the (non-owning) HeightmapDesc is copied.
+    void configure_terrain(const world::outdoor::HeightmapDesc& h) noexcept;
+
     // Advance one authoritative tick. `inputs` is one net::Input per client.
     void advance(std::span<const net::Input> inputs);
 
@@ -107,6 +119,9 @@ public:
     // Total lag-comp hits applied to the ECS so far (server-side, post-bridge).
     usize hits_applied() const noexcept { return hits_applied_; }
 
+    // True once configure_terrain has been called (terrain-aware respawns on).
+    bool has_terrain() const noexcept { return has_terrain_; }
+
     // Underlying subsystems (for tests / higher layers).
     const net::ReplicationSession& net() const noexcept { return repl_; }
     scene::World& world() noexcept { return *world_; }
@@ -126,6 +141,11 @@ private:
     gameplay::MatchConfig   match_cfg_{};
     gameplay::MatchState    match_state_{};
     std::vector<math::Vec3> spawn_points_;  // deterministic respawn candidates
+
+    // Opt-in terrain-aware respawns. terrain_ is a non-owning HeightmapDesc;
+    // the caller keeps its `heights` data alive (see configure_terrain).
+    world::outdoor::HeightmapDesc terrain_{};
+    bool                          has_terrain_ = false;
 };
 
 }  // namespace psynder::match

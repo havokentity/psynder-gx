@@ -35,8 +35,17 @@ inline constexpr i64 kNoTeam = -1;
 // carrying a Team component equal to it is skipped (a teammate in the line of
 // fire is shot through, not hit). kNoTeam (-1, the default) keeps the classic
 // free-for-all behaviour, so existing callers are unaffected.
+//
+// `spread_tan` is the cone half-angle pre-converted to tan(half_angle): 0 (the
+// default) is perfect accuracy, leaving `dir` untouched; a positive value
+// perturbs the normalized fire direction within that cone BEFORE the ray test,
+// via gameplay::spread_direction (no runtime trigonometry — lockstep-safe).
+// `spread_seed` should come from gameplay::spread_seed(tick, shooter_id,
+// shot_index) so the same authoritative shot scatters identically on every peer.
+// Both trail `friendly_team`, so every existing caller is unaffected.
 Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
-                    math::Vec3 dir, i64 friendly_team = kNoTeam) noexcept;
+                    math::Vec3 dir, i64 friendly_team = kNoTeam,
+                    f32 spread_tan = 0.0f, u64 spread_seed = 0) noexcept;
 
 // Spawn a projectile from `shooter`'s Weapon (must be ready; spends a round +
 // sets the cooldown). The projectile flies at `speed_mps` along `dir`, carries

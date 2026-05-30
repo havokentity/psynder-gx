@@ -12,6 +12,8 @@
 #include "scene/SceneComponents.h"
 #include "scene/World.h"
 
+#include "world/outdoor/HeightfieldQuery.h"
+
 #include "math/Math.h"
 
 namespace psynder::match {
@@ -69,6 +71,12 @@ void MatchSession::configure_match(const gameplay::MatchConfig& cfg,
     spawn_points_.assign(spawn_points.begin(), spawn_points.end());
 }
 
+void MatchSession::configure_terrain(
+    const world::outdoor::HeightmapDesc& h) noexcept {
+    terrain_ = h;          // non-owning copy; caller keeps h.heights alive
+    has_terrain_ = true;
+}
+
 void MatchSession::advance(std::span<const net::Input> inputs) {
     // (1) Net tick: client prediction + server-authoritative movement + lag-comp
     //     hit DETECTION (HitEvents appended to repl_.hit_events()).
@@ -115,7 +123,14 @@ void MatchSession::advance(std::span<const net::Input> inputs) {
             const usize idx = gameplay::select_spawn(
                 *world_, std::span<const math::Vec3>(spawn_points_), victim);
             if (gameplay::Respawnable* r = world_->get<gameplay::Respawnable>(victim)) {
-                r->spawn_pos = spawn_points_[idx];
+                math::Vec3 point = spawn_points_[idx];
+                // Terrain-aware (opt-in): snap the chosen spawn's Y onto the
+                // terrain surface so the victim respawns on the ground. When no
+                // terrain is configured the raw spawn point is used (as before).
+                if (has_terrain_) {
+                    point = world::outdoor::clamp_to_ground(terrain_, point, 0.0f);
+                }
+                r->spawn_pos = point;
             }
         }
     }

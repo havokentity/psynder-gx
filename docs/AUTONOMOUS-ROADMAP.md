@@ -130,6 +130,36 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 24) **4-AGENT BATCH #2 — wire iter-23 primitives into call sites + a new
+  AI pather.** Four agents, four disjoint lanes, one CI cycle (the new cadence):
+  1. **Spread → fire_hitscan** (gameplay/Weapons): two optional params
+     `spread_tan=0, spread_seed=0` appended after friendly_team — when >0 the unit
+     aim is perturbed by `spread_direction` before the ray test; default 0 keeps
+     every existing caller bit-identical.
+  2. **SnapshotQuantized** (net, additive): `quantize_state`/`dequantize_state`
+     (pos via net::quantize, yaw in milli-degrees) + `quantized_wire_bytes` — a
+     bandwidth-efficient cross-platform-bitwise snapshot form.
+  3. **Terrain-aware respawns** (match): opt-in `configure_terrain(HeightmapDesc)`
+     — on a kill the chosen spawn point is clamped onto the surface
+     (clamp_to_ground); match lane now LINKS psynder_world_outdoor. Backward-
+     compatible (no terrain configured => raw spawn Y as before).
+  4. **GridAStar** (ai, additive): deterministic point-to-point grid A* (integer
+     10/14 costs, octile heuristic, explicit (f,index) min-heap tie-break, no
+     corner-cutting) — the per-agent complement to the shared-goal FlowField.
+  Integration: verified the tree had exactly the 4 lanes' edits + 8 new files
+  (no shared-file edits), built clean on the first try. ONE agent test was
+  RNG-geometry-flaky ("a wide cone eventually hits a far off-axis target" — 256
+  seeds isn't enough vs a 0.5 m hitbox 5.4 m away); I replaced it with a robust
+  deterministic check (a wide cone misses an on-axis target on *some* seeds AND
+  hits on some — proving spread affects the ray) — the only fix needed across all
+  four features. Local: mac-debug ctest **689/689** (+14), mac-release
+  determinism+new 62/62 (golden pin intact; modified Weapons/MatchSession stayed
+  deterministic), perf_guardrails OK, server+crate smokes exit 0. Follow-ups:
+  wire spread_seed into the bots'/server's fire calls; use SnapshotQuantized in
+  the wire codec; GridAStar into a bot that paths to a point; PsyServerGX outdoor
+  match using configure_terrain. Next batch: those wirings, or the IR SIMD
+  back-end + UDP transport.
+
 - (iter 23) **4-AGENT PARALLEL BATCH — four disjoint additive features in one CI
   cycle.** At the user's request, switched the loop to fan-out: spawned 4 agents
   concurrently, each authoring ONE additive feature in a DISTINCT lane (new files

@@ -8,5 +8,6 @@
 psynder_add_lane(match
     LINKS
         psynder_core psynder_math psynder_scene psynder_net psynder_gameplay
+        psynder_world_outdoor
 )
 psynder_determinism_fp(psynder_match)

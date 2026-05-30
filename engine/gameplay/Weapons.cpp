@@ -6,6 +6,7 @@
 
 #include "gameplay/Damage.h"
 #include "gameplay/GameplayComponents.h"
+#include "gameplay/Spread.h"
 #include "scene/GxComponents.h"  // TransformWS
 
 #include <algorithm>
@@ -26,13 +27,18 @@ bool ready_and_spend(Weapon& wp) noexcept {
 }  // namespace
 
 Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
-                    math::Vec3 dir, i64 friendly_team) noexcept {
+                    math::Vec3 dir, i64 friendly_team, f32 spread_tan,
+                    u64 spread_seed) noexcept {
     Weapon* wp = w.get<Weapon>(shooter);
     if (wp == nullptr || !ready_and_spend(*wp)) return Entity{};
 
     const f32 dl = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (dl <= 0.0f) return Entity{};
-    const math::Vec3 d{dir.x / dl, dir.y / dl, dir.z / dl};
+    math::Vec3 d{dir.x / dl, dir.y / dl, dir.z / dl};
+    // Apply deterministic cone spread to the unit direction before ray-casting,
+    // so the perturbed direction is what gets tested. spread_tan <= 0 (default)
+    // leaves the aim untouched, keeping existing callers bit-identical.
+    if (spread_tan > 0.0f) d = spread_direction(d, spread_tan, spread_seed);
     const f32 radius = wp->hit_radius;
 
     Entity best{};
