@@ -52,8 +52,11 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       friendly-fire filter = scale follow-ups.)
 
 ### M — Maps / world
-- [ ] Quake3-class arena: BSP/brush geometry + PVS cull wired into render +
-      collision; a `samples/arena` demo.
+- [~] Quake3-class arena: BSP/brush geometry + PVS cull wired into render +
+      collision; a `samples/arena` demo. **Headless combat-loop essence DONE
+      (iter 9): two flow-field bot teams fight deterministically in an arena.
+      Visual BSP geometry + render + a samples/arena binary = follow-up (needs
+      in-window verification).**
 - [ ] BF-light larger outdoor map (heightfield/streaming groundwork).
 
 ### R — Rendering
@@ -196,3 +199,18 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   thousands-scale) + a team-aware friendly-fire filter in the hitscan ray. Next:
   **M — Quake3-class arena: a `samples/arena` demo (BSP/brush + PVS, flow-field
   bots fighting in it).**
+- (iter 9) **Arena combat — the FPS stack integrated as a game (headless).** New
+  test `arena_combat.cpp` wires engine/ai (FlowField) + engine/physics/agents
+  (update_agents steering) + engine/gameplay (CombatBot/Weapons/Damage/Score/
+  Respawn) into one loop: two teams of 16 flow-field bots converge on the arena
+  centre, shoot each other through the weapon/health systems, die + respawn, and
+  score. Asserts the integrated loop actually fights (frags > 0, deaths > 0) AND
+  is bit-reproducible across two runs (per-bot hp/frags/position signature).
+  615/615 green. PIVOT (Charter §4): delivered the milestone's deterministic
+  combat-loop essence headlessly; the visual BSP/brush geometry + render + a
+  samples/arena binary need in-window verification, so they're a follow-up.
+  Next: **G — FPS controller polish (air control, crouch/jump on the Jolt
+  capsule)** OR **P — cross-platform golden parity (strict-FP the sim path)**;
+  pick the cross-platform determinism pass (P) — it hardens the lockstep pillar
+  the whole stack now depends on, and is pure-determinism work well-suited to
+  headless autonomy.
