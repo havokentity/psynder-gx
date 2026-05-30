@@ -130,6 +130,52 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 31) **4-AGENT BATCH #8 — explosions + netcode compression + audio/feel,
+  broadening into the audio lane: four additive features across four distinct
+  lanes (G + N + audio + camera), all NEW files, ZERO edits to existing/hot/golden
+  code.** Thematically coherent (a grenade boom: Splash damage + Shake trauma +
+  the SpatialCue for the sound + BitPacker compressing the netcode). Agents
+  forbidden from build/git/shared-or-other-lane files; I serially integrated.
+  Shipped:
+  1. **gameplay/Grenade** (item G) — a thrown, gravity-arcing, FUSE-timed grenade
+     that detonates via iter-29's apply_splash_damage: `Grenade` component
+     (velocity + fuse + SplashParams + owner/team, 48 B), `throw_grenade`
+     (spawns with normalized velocity), `tick_grenades` (gravity integrate +
+     fuse countdown + detonate-and-despawn, ascending-id gather-then-mutate,
+     reused scratch). Composes Splash into a usable weapon. The agent pre-empted
+     the MSVC `near`/`far` `<windows.h>` macro trap by renaming test locals.
+  2. **net/BitPacker** (item N/P) — the sub-byte bit packer SnapshotPack/Metrics
+     kept deferring to: `BitWriter`/`BitReader` (LSB-first within each byte, fixed
+     by shifts/masks so it is host-endianness-independent), `write_bits`/
+     `read_bits` for any width [0,64], overrun-latching reader, `bits_needed`
+     (ceil log2), and zigzag encode/decode (incl. INT64_MIN) for small signed
+     deltas. Packs eight 5-bit values into 5 bytes — the real compression win.
+  3. **audio/SpatialCue** (audio) — the world-geometry-to-scalars front-end that
+     feeds the existing PositionalMix: `source_distance_m`, `distance_attenuation`
+     (inverse-distance rolloff, clamped), `listener_azimuth` (atan2 of the
+     source projected onto the listener's forward/right basis, rear hemisphere
+     folded to the same-side hard-pan edge — never flips L/R), `doppler_pitch`
+     (c/(c-closing), clamped [0.5,2]), + a `spatialize` bundle. Non-overlapping
+     with PositionalMix (which it documents feeding). Cosmetic, same-platform.
+  4. **camera/Shake** (feel) — trauma-based screen shake, the impact analog of
+     iter-29's Recoil: `ShakeState`(trauma+time+seed) + `shake_add_trauma`/
+     `shake_tick`(decay)/`shake_sample`. Magnitude = trauma^2 (smooth ease-out);
+     each of the 6 axes gets independent splitmix64 VALUE NOISE (lattice hash +
+     smoothstep lerp over time*frequency, NO trig) so it is strict-FP bit-
+     identical. An explosion adds trauma; the camera punch eases out.
+  Integration: tree had EXACTLY 12 new files, ZERO modified tracked files. ONE
+  trivial fix (same kNoTeam-needs-Weapons.h test include as iter-29's Splash; a
+  one-line add). Local: mac-debug ctest **876/876** (+39), mac-release determinism
+  62/62 (golden flock digest #860 intact), perf_guardrails OK, PsyServerGX
+  --ticks=128 + crate smokes exit 0. Eight 4-agent batches + one solo integration
+  now: **33 features.** Follow-ups: TacticalBot/CombatBot lobbing grenades
+  (throw_grenade) at clustered enemies; BitPacker driving a tighter
+  SnapshotPackDelta wire codec; SpatialCue+PositionalMix wired into the audio
+  mixer pull path for real positional gunfire; an explosion adding camera Shake
+  trauma in 02_crate (in-window). Next: the determinism-critical SnapshotStream->
+  ReplicationSession threading / IR SIMD back-end (SOLO), or a BitPacker-backed
+  delta codec.
+
 - (iter 30) **SOLO — tactical-bot integration: prove the iter-26..29 building
   blocks COMPOSE (items A + D + M).** After seven additive batches (28 features,
   many unwired), the disciplined move was to consolidate via integration rather
