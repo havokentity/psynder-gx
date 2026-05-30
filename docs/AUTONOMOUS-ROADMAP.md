@@ -130,6 +130,46 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 30) **SOLO — tactical-bot integration: prove the iter-26..29 building
+  blocks COMPOSE (items A + D + M).** After seven additive batches (28 features,
+  many unwired), the disciplined move was to consolidate via integration rather
+  than pile on more helpers. Did this SOLO (keystone composition, not fan-out).
+  Shipped:
+  1. **engine/gameplay/TacticalBot.{h,cpp}** — a reusable, deterministic tactical
+     FSM: `enum TacticalState {Patrol, Engage, Retreat}`, a POD `TacticalBot`
+     component (state + retreat_health_frac), and a PURE `decide_tactical_state(hp,
+     max_hp, enemy_visible, retreat_frac)` — fight-or-flight (a hurt bot retreats
+     even with a visible enemy; else engage on sight; else patrol). No World/RNG/
+     alloc, so it is trivially testable + lockstep-safe. + a 6-case unit test
+     (priority, visibility gate, threshold edges, clamp + degenerate-health guard,
+     ECS storability, determinism).
+  2. **tests/unit/tactical_skirmish.cpp** — the headless integration harness (the
+     proven arena_combat pattern, extended): two teams of 5 bots fight across a
+     24x24 walled arena with ONE chokepoint, composing — in ONE deterministic loop
+     — ai::NavAgent (A* + string-pull routes through the gap), ai::line_of_sight
+     (target acquisition gate — no shooting through the wall), ai::CoverPoints
+     (a Retreating bot falls back to the nearest wall-adjacent cover cell),
+     gameplay::WeaponLoadout (equips a MachineGun + its RangedDamage falloff into
+     fire_hitscan), the TacticalBot FSM, and the existing Weapons/Damage/respawn
+     systems. Read-phase decide+fire (ascending id) then write-phase navigate+move
+     (the §1b order-independent pattern), pure-kinematic movement (decoupled from
+     the physics/agents hot path). Asserts the composed loop actually fights
+     (frags+deaths>0), the Retreat branch + CoverPoints really fire (any_retreat),
+     AND the whole thing is bit-reproducible across two runs — the real proof that
+     every composed subsystem is lockstep-safe.
+  Integration: 4 new files (2 lane + 2 test), ZERO edits to existing/hot/golden
+  code; one trivial self-fix (a `const World&` helper -> `World&` since
+  World::get is non-const). Everything passed on the FIRST test run. Local:
+  mac-debug ctest **837/837** (+8), mac-release determinism+tactical 67/67 (golden
+  flock digest #821 intact; the skirmish is bit-reproducible), perf_guardrails OK,
+  PsyServerGX --ticks=128 + crate smokes exit 0. This validates the iter-26..29
+  navigation/cover/arsenal/falloff/FSM stack works TOGETHER, not just in isolation
+  — the DoD wants things composed. Follow-ups: in-window visual of the skirmish;
+  give bots strafing/lead while Engaging; a SnapshotStream-replicated skirmish
+  (server runs it, client interpolates via SnapshotInterp). Next: back to a
+  4-agent additive batch, OR the determinism-critical SnapshotStream->
+  ReplicationSession threading / IR SIMD back-end (SOLO).
+
 - (iter 29) **4-AGENT BATCH #7 — combat feel + client smoothing, broadening into
   the camera lane: four additive features across four distinct lanes (G + A + N +
   camera), all NEW files, ZERO edits to existing/hot/golden code.** Deliberately
