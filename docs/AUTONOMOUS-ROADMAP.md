@@ -130,6 +130,41 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 34) **6-LANE WAVE #3 (user-driven max-throughput) — six more additive
+  features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
+  golden code.** Clean run, no agent stalls. Shipped:
+  1. **gameplay/Reload** — weapon magazine/reload FSM: a `Magazine` component
+     (in_mag/reserve/mag_size/reload timers, 20 B) + can_fire/consume_round/
+     start_reload/reloading/tick_reload (reserve-limited top-up)/tick_reloads.
+     Additive, sits alongside any Weapon.
+  2. **ai/TargetSelect** — deterministic best-enemy selection: target_score
+     (visible_bonus - distance_weight*d + low_health_bonus*(1-hp_frac)) +
+     select_target (different-team, in-range, max score, lowest-id tie). Pure
+     structs (no ECS dep — ai links only core+math).
+  3. **net/PriorityAccumulator** — the Glenn-Fiedler snapshot scheduler: each
+     entity's priority accumulates by its base each tick; select(K) sends the
+     top-K and resets them to 0 so a starved entity climbs until it wins
+     (anti-starvation, tested). Reused scratch, no per-call heap.
+  4. **match/Objective** — a capture-point (Domination/KOTH): ControlPoint +
+     tick_control_point (sole occupant drives progress, flips ownership at full;
+     contested/empty/owner decays), sole_occupant/is_contested. Pure state machine.
+  5. **camera/Lean** — peek/lean around cover: LeanState + lean_input (L/R/both/
+     neither) + lean_update (clamp-eased) + lean_sample (lateral slide + roll,
+     right => +lateral/+roll). Strict-FP, no trig.
+  6. **audio/Ducking** — sidechain ducking: DuckEnvelope + duck_update (attack
+     down to floor when triggered, release back to unity), duck_gain/duck_target.
+     The "lower the music when the radio calls" envelope.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files;
+  compiled clean AND passed the full ctest on the FIRST run — NO fixes needed.
+  Local: mac-debug ctest **1029/1029** (+57, crossed 1000 tests), mac-release
+  determinism 78/78 (golden flock digest #1013 intact), perf_guardrails OK,
+  PsyServerGX --ticks=128 + crate smokes exit 0. Total now: **51 features** (three
+  6-lane waves this session). NOTE: cron still DELETED. Follow-ups: Reload wired
+  to fire_hitscan (gate fire on can_fire, auto-reload on empty); TargetSelect
+  feeding CombatBot/TacticalBot; PriorityAccumulator scheduling the replication
+  send under a byte budget; Objective driving a KOTH PsyServerGX; Lean/Ducking
+  in-window.
+
 - (iter 33) **6-LANE WAVE #2 (resumed after a token-limit stall) — six more
   additive features across six DISTINCT lanes, all NEW files, ZERO edits to
   existing/hot/golden code.** The six wave-2 agents hit the session token limit
