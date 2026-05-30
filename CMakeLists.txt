@@ -182,6 +182,7 @@ add_subdirectory(engine/jobs)
 add_subdirectory(engine/asset)
 add_subdirectory(engine/scene)
 add_subdirectory(engine/gameplay)  # FPS gameplay systems (health/damage/respawn, weapons)
+add_subdirectory(engine/ai)        # DOTS combat AI (flow-field pathing, steering)
 # camera depends only on core+math; safe to add this early so dependent
 # lanes (samples, render) can `target_link_libraries(... psynder_camera)`.
 add_subdirectory(engine/camera)

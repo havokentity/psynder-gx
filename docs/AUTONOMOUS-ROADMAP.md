@@ -45,7 +45,8 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 - [ ] FPS controller polish (air control, crouch/jump tuning) on the Jolt capsule.
 
 ### A — DOTS agents / AI
-- [ ] Navmesh or flow-field pathing on the spatial broadphase (research first).
+- [x] Navmesh or flow-field pathing (research first). **DONE (iter 7) —
+      deterministic grid flow-field in the new `engine/ai` lane.**
 - [ ] Combat bots that path + shoot through the gameplay systems; scale test to
       thousands; golden determinism.
 
@@ -165,3 +166,17 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   607/607 green. Deferred: round timer/phases + spawn-point selection (match
   orchestration) — lighter follow-up. Next: **A — DOTS combat AI: flow-field /
   navmesh pathing on the spatial broadphase (research first).**
+- (iter 7) **Deterministic grid flow-field pathing — new `engine/ai` lane.**
+  Chose flow-field over per-agent navmesh A* for the DOTS mass-agent fit: O(1)
+  per-agent lookup, one shared field for thousands of agents (the standard RTS
+  cost-field-from-goal + gradient technique). `FlowField`: resize a 2D XZ grid,
+  block_aabb obstacles (half-open cells so a wall flush to a grid line leaves the
+  next cell free), build = Dijkstra cost field from the goal (integer 10/14 edge
+  costs, min-heap keyed by (cost, index) for deterministic ties, diagonals don't
+  cut blocked corners), then each free cell's flow = toward its lowest-cost
+  neighbour (ties -> lowest index). sample(world) returns the unit XZ steering
+  dir. Tests: open-ground gradient toward goal, full wall -> unreachable, wall
+  with a gap routes around, build determinism (cost+dir grids bit-identical).
+  611/611 green. Determinism flags on the lane; perf_guardrails auto-covers
+  engine/ai. Next: **A — combat bots: agents steer along the flow field + shoot
+  through the gameplay systems; scale test + golden determinism.**
