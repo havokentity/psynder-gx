@@ -47,8 +47,9 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 ### A — DOTS agents / AI
 - [x] Navmesh or flow-field pathing (research first). **DONE (iter 7) —
       deterministic grid flow-field in the new `engine/ai` lane.**
-- [ ] Combat bots that path + shoot through the gameplay systems; scale test to
-      thousands; golden determinism.
+- [x] Combat bots that path + shoot through the gameplay systems; scale +
+      determinism test. **DONE (iter 8).** (Broadphase enemy-search + team-aware
+      friendly-fire filter = scale follow-ups.)
 
 ### M — Maps / world
 - [ ] Quake3-class arena: BSP/brush geometry + PVS cull wired into render +
@@ -180,3 +181,18 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
   611/611 green. Determinism flags on the lane; perf_guardrails auto-covers
   engine/ai. Next: **A — combat bots: agents steer along the flow field + shoot
   through the gameplay systems; scale test + golden determinism.**
+- (iter 8) **Combat bots: path via the flow field + shoot through the weapons.**
+  Ties engine/ai (FlowField) + engine/gameplay (Weapons/Health/Score) + the
+  agents component (scene::AgentTarget). Team + Bot components; `tick_combat_bots`
+  (gameplay, now links psynder_ai): each bot steers along the sampled flow field
+  (writes its AgentTarget a lookahead step along the flow dir toward the goal),
+  and if the nearest live enemy of another team is within fire_range it
+  fire_hitscans (gated on cooldown/ammo, credits the kill). Deterministic: bots
+  processed in ascending id order, nearest-enemy ties by lower id. Tests: bot
+  damages an in-range enemy + retargets along the field, holds fire out of range,
+  and a 64v64 scale run is bit-identical across worlds (with engagement). 614/614
+  green. Reordered CMake so engine/ai is added before engine/gameplay (which now
+  links it). Follow-ups: SpatialIndex broadphase for the enemy search (true
+  thousands-scale) + a team-aware friendly-fire filter in the hitscan ray. Next:
+  **M — Quake3-class arena: a `samples/arena` demo (BSP/brush + PVS, flow-field
+  bots fighting in it).**
