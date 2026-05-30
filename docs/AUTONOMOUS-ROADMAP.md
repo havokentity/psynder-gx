@@ -130,6 +130,64 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 45) **8-WORKSTREAM PARALLEL PUSH (user "all 8, go") — eight BIG subsystem
+  builds/integrations across eight DISTINCT lanes in one batch, all NEW files,
+  ZERO edits to existing/hot/golden code. Compiled CLEAN on the first build; all
+  42 new tests green; golden pin intact.** The next-level work (subsystems +
+  end-to-end compositions toward the Definition of Done), fanned out 8-wide:
+  1. **net/ReplicationPipeline** (DoD bullet 1 capstone) — ReplicationServer +
+     ReplicationClient compose SnapshotScheduler + BandwidthBudget + pack_quantized
+     + Fragment + PlayoutClock + SnapshotInterp into the full "server sends
+     bandwidth-managed snapshots, client reassembles + interpolates" loop; test
+     streams moving entities, client reconstructs the interpolated view within the
+     quant step, starved ticks drop low-priority entities, bit-deterministic.
+  2. **match/BotMatch** — a deterministic AI input generator that drives a
+     MatchSession (bots pick the nearest net enemy, move + aim via atan2 + fire in
+     range) so a real bot-vs-bot networked match plays out (warmup->active, frags
+     accrue), bit-deterministic. Bots now PLAY the netcode loop.
+  3. **physics/core/DynamicBody** (ADR-019 class 2) — the dynamic Jolt rigid-body
+     lifecycle: create_dynamic_box/sphere (mass>0), step the world,
+     dynamic_body_position read-back (to sync TransformWS), apply_impulse, remove.
+     Test: a body falls under gravity + rests on a floor, an impulse lifts it,
+     bit-deterministic trajectory (rides JPH_CROSS_PLATFORM_DETERMINISTIC). The
+     pushable/ragdoll-enemy groundwork.
+  4. **scene/SceneSerialize** (editor foundation) — save/load an ECS scene to a
+     portable little-endian blob (magic+version+per-entity component-mask records,
+     bit_cast floats); round-trips TransformWS + Collider/RenderMaterial/DynamicBody
+     (the scene-lane components; gameplay set is a follow-up — scene doesn't link
+     gameplay), validate-before-mutate on load. Uses ONLY the public World API.
+  5. **world/bsp/RoomGraph** (Quake3 maps) — convex-room arena + portal flood-fill
+     PVS (connectivity upper bound) + room_at point-location + visibility query;
+     test: A-B-C portal chain -> A sees {A,B,C}, sealed room sees only itself.
+  6. **world/outdoor/TerrainStream** (BF-light maps) — terrain tile residency +
+     CDLOD LOD selection + load/evict delta from a viewer position; test: resident
+     set by radius, LOD ramps with distance, moving the viewer streams tiles in/out
+     deterministically.
+  7. **script/behavior/BehaviorSimd** (PsyGraph) — execute_simd runs a BehaviorIR
+     program over SoA columns in 8-wide lane batches, BIT-IDENTICAL to the scalar
+     interpreter (full op coverage; scalar tail for the ragged remainder); test:
+     memcmp-equal to scalar over heal/projectile/multi-op programs incl. non-width
+     counts + strided columns. The determinism-critical IR SIMD back-end.
+  8. **simd/BatchOverlap** (perf §1b) — a SIMD f32x8/f32x4/scalar-tail batch
+     sphere-overlap broadphase kernel (squared distance, no FMA so it stays bitwise
+     == the scalar reference) + a 100k-point scale test; mask/indices forms,
+     zero per-call heap.
+  Integration: tree had EXACTLY 24 new files, ZERO modified tracked files;
+  **compiled clean on the FIRST build across all 8 lanes** (incl. Jolt, the SIMD
+  internals, and the MathLogicKernel-adjacent behavior lane — the agents studied
+  each unfamiliar lane well). The only ctest failure was the pre-existing
+  wall-clock `server 128-tick scheduler fires within 1.1s` timing test, flaky from
+  the machine being busy under the heavy build — passes idle. Local: mac-debug
+  ctest **1420/1420** (+42), mac-release determinism+new-modules 276/276 (golden
+  flock digest #1404 INTACT despite new physics/scene/script/simd code),
+  perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes exit 0. This single
+  push advances SIX DoD milestones at once (N netcode capstone, A bots-play-match,
+  physics dynamic bodies, E editor scene-io, M both map types, S IR SIMD, P perf).
+  Total now: **102 features + 5 integrations.** Follow-ups: wire ReplicationPipeline
+  into a 2-process UDP demo; serialize the gameplay component set (needs the link);
+  RoomGraph/TerrainStream into the visual render path (in-window); DynamicBody into
+  ECS pushable enemies; BehaviorSimd as the default IR executor.
+
 - (iter 44) **6-LANE WAVE #9 (interleaved with integration #4) — six more additive
   features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
   golden code.** Shipped:
