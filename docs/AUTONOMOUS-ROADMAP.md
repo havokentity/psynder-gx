@@ -130,6 +130,37 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 37) **6-LANE WAVE #6 (user-driven max-throughput) — six more additive
+  features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
+  golden code.** Shipped:
+  1. **gameplay/Killfeed** — fixed-capacity recent-kills ring (push/tick-age/
+     newest-first read/evict-oldest) for the HUD.
+  2. **ai/CoverScore** — score cover positions vs threats: cover_score (reward
+     nearest-threat distance with a floor, penalize anchor distance) + best_cover
+     (lowest-index tie). Pure structs (ai core+math).
+  3. **net/Fragment** — packet fragmentation + reassembly: fragment_message (LE
+     6-byte header: id/index/count) + FragmentReassembler (out-of-order tolerant,
+     dup/malformed rejection, new-id reset). The rUDP large-message primitive.
+  4. **match/RoundTimer** — time-driven round clock: Warmup->Active->(Overtime)->
+     Ended with remainder carry across phase boundaries. Complements MatchRules'
+     score-based win conditions.
+  5. **camera/Transition** — death/kill-cam pose blend: smoothstep ease + shortest-
+     arc yaw (no long-way spin across +/-180). Strict-FP.
+  6. **audio/Compressor** — master-bus peak compressor/limiter: target gain
+     (ratio above threshold, hard ceiling) + attack/release envelope.
+  Integration: tree had EXACTLY 18 new files, ZERO modified tracked files;
+  registered count healthy at 1193 (bracket rule held). ONE fix: the CoverScore
+  best_cover test expected the on-anchor candidate to win, but with the safety-
+  dominant kDefaultCoverWeights the safest (over-extended) candidate genuinely
+  scored higher; gave that scenario anchor-dominant weights so the balanced pick
+  wins (impl correct, test intent restored). Local: mac-debug ctest **1193/1193**
+  (+62), mac-release determinism 92/92 (golden pin intact), perf_guardrails OK,
+  PsyServerGX --ticks=128 + crate smokes exit 0. Total now: **69 features** (SIX
+  6-lane waves this session, 36 features in the user burst). NOTE: cron still
+  DELETED. Follow-ups: Killfeed fed from damage_credited kills; CoverScore +
+  CoverPoints picking a bot's retreat spot; Fragment in the rUDP send path;
+  RoundTimer into MatchSession; Transition/Compressor in-window.
+
 - (iter 36) **6-LANE WAVE #5 (user-driven max-throughput) — six more additive
   features across six DISTINCT lanes, all NEW files, ZERO edits to existing/hot/
   golden code.** Every agent prompt now carries the "no brackets in TEST_CASE
