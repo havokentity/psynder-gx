@@ -78,8 +78,11 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       **Deterministic CPU terrain query DONE (iter 17):
       engine/world/outdoor/HeightfieldQuery (terrain_height/normal/raycast/
       clamp_to_ground + offline generate_hills) — the gameplay/physics side of
-      the heightfield, strict-FP. Streaming + GPU CDLOD draw of a real BF-light
-      map = the in-window follow-up.**
+      the heightfield, strict-FP. ECS integration DONE (iter 18):
+      TerrainAgents (GroundClamp component + apply_terrain_clamp) snaps DOTS
+      agents/movers onto the surface — agents walk hills deterministically.
+      Streaming + GPU CDLOD draw of a real BF-light map = the in-window
+      follow-up.**
 
 ### R — Rendering
 - [ ] Adopt `render::pipeline::render()` in the player (retire the bespoke
@@ -113,6 +116,30 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 18) **Bind ECS movers to the heightfield — agents walk the hills (item
+  M).** Made iter-17's terrain query usable by the DOTS ECS. New
+  `engine/world/outdoor/TerrainAgents.{h,cpp}`: a `GroundClamp{foot_offset_m}`
+  tag component + `apply_terrain_clamp(world, heightmap)` — a chunk pass over
+  (TransformWS + GroundClamp) that resamples each entity's Y from the terrain at
+  its XZ (leaving prev_mtw to whoever moved it, so motion interpolation stays
+  correct). Order-independent + deterministic, strict-FP (world_outdoor lane), so
+  it runs on the lockstep tick AFTER update_agents: the agent system steers in
+  XZ, this snaps to the surface. Tests (3): GroundClamp snaps entities to known
+  ramp heights (+ foot offset), a mover dragged across XZ tracks the surface, and
+  — the integration proof — 8 DOTS agents seek a far corner over procedural hills
+  for 120 ticks, each staying EXACTLY on the surface, advancing toward goal, and
+  bit-reproducible across runs (a deterministic headless outdoor skirmish). This
+  composes the agent steering (physics/agents) + the heightfield (world/outdoor)
+  the same way arena_combat composed the indoor FPS loop. Local: mac-debug ctest
+  **641/641** (+3), mac-release determinism+terrain 50/50 (golden pin intact),
+  server+crate smokes exit 0. Decision: a separate clamp PASS rather than
+  threading terrain into update_agents — keeps the agent system terrain-agnostic
+  and the clamp reusable for players/props; the cost is two passes (acceptable,
+  both are tight chunk loops). Follow-ups: slope-aware movement (steering cost
+  uphill), terrain-aware match spawn placement (clamp spawn points), GPU draw of
+  the hills (in-window). Next: **M visual draw** (in-window), the UDP transport
+  binding, or terrain-aware spawns + an outdoor PsyServerGX skirmish (headless).
 
 - (iter 17) **BF-light heightfield: deterministic CPU terrain query (item M).**
   The outdoor lane (engine/world/outdoor) had a GPU-render scaffold (CDLOD /
