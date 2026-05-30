@@ -130,6 +130,36 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 40) **SOLO INTEGRATION #2 — combat shot resolution (item G). Composes the
+  per-shooter combat modifiers into one shot pipeline.** New
+  `engine/gameplay/CombatResolve.{h,cpp}` gives the fire path a single
+  `begin_shot(world, shooter, base_spread_tan) -> ShotResult` +
+  `resolve_damage(...)` that wires together four systems built this session:
+    * Magazine (Reload, iter 35) — the ammo gate: a shooter with a magazine must
+      have a round and not be mid-reload; firing spends one. No magazine => fires
+      freely (infinite-ammo bots).
+    * Suppression (iter 38) — multiplies the spread cone (a suppressed shooter is
+      less accurate).
+    * Powerups (iter 33) — QuadDamage scales outgoing damage 4x.
+    * RangedDamage / Ballistics (iters 25/26) — distance falloff + hitbox shaping.
+  All components are OPTIONAL (a shooter missing one gets that modifier's neutral
+  default), so it is backward-compatible — existing fire paths with none of them
+  are unchanged. The test (`gameplay_combat_resolve.cpp`) proves each gate +
+  modifier and their COMPOSITION: a full mag fires + spends a round, an empty or
+  reloading mag is blocked (no round spent), suppression widens the cone, Quad
+  scales damage 4x, all three compose on one shooter (round spent + 2x spread +
+  4x headshot-falloff damage), and the resolution is deterministic. Compiled clean
+  AND passed on the FIRST run — no fixes. Local: mac-debug ctest **1263/1263**
+  (+7), mac-release determinism+combat 107/107 (golden pin intact),
+  perf_guardrails OK, PsyServerGX --ticks=128 + crate smokes exit 0. Two
+  integrations now consolidate the building blocks: the netcode SEND path
+  (iter 39) and the combat SHOT path (this). Follow-up: adopt begin_shot/
+  resolve_damage inside fire_hitscan (the determinism-critical wiring) so bots/
+  players actually run through the gate; BattleSuit incoming-damage reduction on
+  the victim side. Next integration candidates: tactical-bot AI depth (ThreatMemory
+  + TargetSelect + CoverScore + Blackboard into the skirmish), or the netcode
+  delta-codec variant of the send scheduler.
+
 - (iter 39) **SOLO INTEGRATION — the bandwidth-managed snapshot SEND pipeline
   (item N / DoD bandwidth budget). User pivoted the loop from additive waves to
   INTEGRATION (composing the ~40 building blocks into real systems).** New
