@@ -34,6 +34,7 @@ if(TARGET Catch2::Catch2WithMain)
         psynder_physics_agents
         psynder_gameplay
         psynder_ai
+        psynder_match
     )
     # psynder_editor_core is only built when the editor is enabled.
     if(TARGET psynder_editor_core)

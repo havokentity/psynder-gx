@@ -31,8 +31,12 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 - [x] Over-the-wire integration: drive the session through `Loopback`/`HostImpl`
       transport (Input + snapshot serialization), an end-to-end loopback test.
       **DONE (iter 3).**
-- [ ] Client/server split in the player path (server ticks authoritative; client
-      predicts) — headless server smoke.
+- [~] Client/server split in the player path (server ticks authoritative; client
+      predicts) — headless server smoke. **Net→gameplay bridge DONE (iter 11):
+      new `engine/match` lane (`MatchSession`) drives the real gameplay ECS off
+      the netcode — server-auth lag-comp hits apply through the gameplay damage
+      path. Wiring it into the in-window 02_crate player + a dedicated-server
+      binary = follow-up.**
 
 ### G — Gameplay slice (FPS)
 - [x] Weapons: hitscan + projectile, fire rate, ammo; damage application; tests.
@@ -90,6 +94,41 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 11) **The net loop drives REAL gameplay — new `engine/match` lane (item
+  N / DoD §8 bullet 1).** The netcode (ReplicationSession) and the gameplay ECS
+  (Health/Score/Damage) were both proven but disjoint: the net layer ran
+  lag-comp hit DETECTION on its own `EntityState`, never touching the gameplay
+  Health. `MatchSession` is the keystone bridge — it owns a `ReplicationSession`
+  (server-auth movement + client predict/reconcile + lag-comp ray test over the
+  latency channel) AND a `scene::World` of one player Entity per client
+  (Health/Score/Weapon/Respawnable/TransformWS), with the players_ vector as the
+  net-id↔Entity map (id = client+1). Each advance(): tick the net session →
+  mirror authoritative net positions into the ECS TransformWS → drain the newly
+  registered HitEvents and apply each through the REAL `gameplay::damage_credited`
+  (Health→Dead + Score, attacker's ECS Weapon damage) → `update_respawns`. A hit
+  on an already-Dead (respawning) player is skipped, so no double-frag credit
+  (deterministic on state, not timing). This closes the explicitly-deferred
+  "wire net lag-comp HitEvents to apply_damage (net-id↔Entity)" follow-up from
+  iters 5–6. Headless + deterministic + dedicated-server-safe (links only
+  net+gameplay+scene+core+math, no GPU) — so it also advances the dedicated
+  server. Determinism FP on the lane; perf_guardrails extended to lint
+  engine/match AND to lock the math/scene/gameplay/ai strict-FP from iter 10
+  against regression. Test `match_session.cpp`: 2 clients over a 3-tick latency
+  channel, shooter fragging the victim through several death/respawn cycles —
+  asserts server-auth damage+frags+deaths happened, the shooter (never targeted)
+  stays full-health with no self-frags, AND the whole bridged loop is
+  bit-deterministic across runs. Local: mac-debug full ctest **617/617** (+2),
+  mac-release determinism+match subset 77/77 (golden pin intact), guardrails OK.
+  Decision: net is authoritative for POSITION (respawn's TransformWS write is
+  re-synced from net each tick) — fine for the headless bridge; an in-window
+  client would drive its camera from `predicted()`. Follow-ups: a real
+  dedicated-server binary (`samples/server` / tools) running MatchSession on the
+  Server tick scheduler; wire MatchSession into the 02_crate player path
+  (in-window verification); team-damage filter. Next: **G — FPS controller
+  polish (air control, crouch/jump on the Jolt capsule)** or **M — visual BSP
+  arena geometry** (needs in-window), so likely **G** or a dedicated-server demo
+  binary off this lane.
 
 - (iter 10) **Cross-platform FP parity — strict-FP the foundational sim lanes
   (item P).** The lockstep-critical hole: `engine/math` (Math.cpp matrix /

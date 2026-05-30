@@ -28,7 +28,7 @@ HOT_PATHS=(
   engine/net/TickConfig.h engine/net/InterestManagement.h
 )
 # Auto-cover future DOTS gameplay/AI lanes the moment they exist.
-for d in engine/gameplay engine/ai engine/physics/weapons; do
+for d in engine/gameplay engine/ai engine/physics/weapons engine/match; do
   [ -e "$ROOT/$d" ] && HOT_PATHS+=("$d")
 done
 
@@ -47,7 +47,10 @@ for p in "${HOT_PATHS[@]}"; do
 done
 
 # ── 2. Determinism FP flags on lockstep-sensitive lanes ─────────────────────
-for lane in physics/core physics/agents physics/destruction net; do
+# math + scene are the foundational sim path (matrix/transform kernels +
+# broadphase) every lane builds on — strict-FP there is what makes the lockstep
+# cross-platform-identical (ROADMAP item P); guard against a regression.
+for lane in math scene physics/core physics/agents physics/destruction net gameplay ai match; do
   cm="$ROOT/engine/$lane/CMakeLists.txt"
   [ -f "$cm" ] || continue
   if ! grep -qE 'psynder_determinism_fp|psynder_hot_lane|fno-fast-math|/fp:strict' "$cm"; then

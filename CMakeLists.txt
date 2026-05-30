@@ -203,6 +203,7 @@ if(NOT PSYNDER_GX_DEDICATED_SERVER)
 endif()
 
 add_subdirectory(engine/net)
+add_subdirectory(engine/match)  # server-authoritative match loop — links net + gameplay (after both)
 add_subdirectory(engine/script)
 
 if(NOT PSYNDER_GX_DEDICATED_SERVER)
