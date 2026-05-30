@@ -130,6 +130,52 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 29) **4-AGENT BATCH #7 — combat feel + client smoothing, broadening into
+  the camera lane: four additive features across four distinct lanes (G + A + N +
+  camera), all NEW files, ZERO edits to existing/hot/golden code.** Deliberately
+  spread into a lane I had not touched (camera) to avoid saturating gameplay/ai/
+  net. Agents forbidden from build/git/shared-or-other-lane files; I serially
+  integrated. Shipped:
+  1. **gameplay/Splash** (item G) — radial blast damage for rockets/grenades:
+     `apply_splash_damage(world, center, SplashParams{inner,outer,max}, attacker,
+     friendly_team, scratch)` damages every Health entity within the outer radius,
+     scaled by 3D distance via Ballistics::damage_at_distance (full inside inner,
+     0 at outer), gather-then-apply in ascending entity-id order, credited to the
+     attacker. Self-damage ON (classic rocket-jump); friendly-team filter mirrors
+     fire_hitscan (kNoTeam = FFA). Lockstep-safe (one sqrt/candidate).
+  2. **ai/CoverPoints** (item A) — tactical cover detection on the nav grid:
+     `is_cover_cell` (free cell with >=1 blocked cardinal neighbour; open border is
+     NOT cover), `find_cover_cells` (ascending-index list), `cover_direction`
+     (4-bit wall-side mask: +X/-X/+Z/-Z), `nearest_cover_cell` (closest by squared
+     grid distance, lowest-index tie). Pure integer, deterministic — the positions
+     a bot moves to for cover behind walls.
+  3. **net/SnapshotInterp** (item N) — client-side render-smoothing buffer: a
+     fixed-capacity time-sorted ring of snapshots; `sample(render_time, out)`
+     brackets the time, lerps each shared entity's position + SHORTEST-ARC yaw
+     (lerp_yaw_deg via wrap180, no trig) between the two snapshots, clamps to the
+     endpoints with NO extrapolation, single-side ids pass through. The standard
+     interpolation-delay client smoothing (cosmetic; pure/deterministic).
+  4. **camera/Recoil** (FPS feel) — deterministic weapon recoil/spray for the
+     view: `RecoilState`/`RecoilPattern` + `recoil_fire` (pitch climbs to a cap,
+     horizontal weave from a local splitmix64 hash of (seed, shot_index) -> signed
+     unit in [-1,1], NO trig), `recoil_recover` (decays both offsets toward 0,
+     resets shot_index when fully recovered), `recoil_reset`. Strict-FP camera
+     lane => same-platform bit-identical (replay-safe). Pairs with WeaponLoadout.
+  Integration: tree had EXACTLY 12 new files, ZERO modified tracked files. ONE
+  trivial fix: the Splash test referenced `kNoTeam` (defined in Weapons.h) without
+  including it — a one-line `#include "gameplay/Weapons.h"` in the test, the only
+  issue across all four lanes. Local: mac-debug ctest **829/829** (+33), mac-release
+  determinism 58/58 (golden flock digest #813 intact), perf_guardrails OK,
+  PsyServerGX --ticks=128 (real 2-frag match) + crate smokes exit 0. Seven 4-agent
+  batches now: **28 features across 7 CI cycles.** Follow-ups: fire_projectile/a
+  rocket weapon detonating via apply_splash_damage on impact; bots picking
+  CoverPoints under fire (Patrol -> nearest_cover when threatened); the client
+  driving SnapshotInterp off received snapshots in 02_crate (in-window); the FPS
+  pawn applying camera Recoil per shot (in-window). Next: a SOLO CombatBot
+  tactical integration (Patrol + NavAgent + WeaponLoadout + TerrainVisibility +
+  CoverPoints), or the determinism-critical SnapshotStream->ReplicationSession /
+  IR SIMD back-end (SOLO).
+
 - (iter 28) **4-AGENT BATCH #6 — bot-combat-depth: four additive features across
   four distinct lanes (G + A + M + P), all NEW files, ZERO edits to existing/hot/
   golden code.** A coherent batch deepening the combat loop while staying fully
