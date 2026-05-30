@@ -74,7 +74,12 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
       (iter 9): two flow-field bot teams fight deterministically in an arena.
       Visual BSP geometry + render + a samples/arena binary = follow-up (needs
       in-window verification).**
-- [ ] BF-light larger outdoor map (heightfield/streaming groundwork).
+- [~] BF-light larger outdoor map (heightfield/streaming groundwork).
+      **Deterministic CPU terrain query DONE (iter 17):
+      engine/world/outdoor/HeightfieldQuery (terrain_height/normal/raycast/
+      clamp_to_ground + offline generate_hills) — the gameplay/physics side of
+      the heightfield, strict-FP. Streaming + GPU CDLOD draw of a real BF-light
+      map = the in-window follow-up.**
 
 ### R — Rendering
 - [ ] Adopt `render::pipeline::render()` in the player (retire the bespoke
@@ -108,6 +113,34 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 17) **BF-light heightfield: deterministic CPU terrain query (item M).**
+  The outdoor lane (engine/world/outdoor) had a GPU-render scaffold (CDLOD /
+  raymarch) + an inline bilinear sampler, but NO public gameplay/physics ground
+  query — the doc even anticipated "lane 13 collides against the same data". New
+  `HeightfieldQuery.{h,cpp}` fills it, built on the shared `sample_bilinear` so
+  gameplay collides against exactly the rendered data: `terrain_height`
+  (bilinear), `terrain_normal` (central-difference of the bilinear field),
+  `terrain_raycast` (stepped march + 24-iter bisection refine, with immediate-hit
+  when starting under the surface), `clamp_to_ground` (snap Y + foot offset), and
+  an OFFLINE `generate_hills` (sum-of-sines rolling terrain). Determinism: the
+  runtime queries are pure algebraic + sqrt over the u16 data — cross-platform
+  bitwise under the lane's new strict-FP flag (added psynder_determinism_fp to
+  world_outdoor); generation uses sin() so it's explicitly OFFLINE CONTENT (the
+  u16 map is serialized + shared, NOT regenerated per client, since libm sin
+  isn't cross-platform identical — documented in the header). Tests (6): flat
+  field (const height / up normal / clamp), +X ramp (linear interp + tilted
+  normal), downward ray hits / upward ray misses / under-surface immediate hit,
+  oblique ray lands on the surface, procedural hills reproducible + bounded +
+  queryable, out-of-bounds returns 0. Local: mac-debug ctest **638/638** (+6),
+  mac-release determinism+terrain 47/47 (golden pin intact; the world_outdoor
+  strict-FP flag regressed no existing CDLOD/scatter test), server+crate smokes
+  exit 0. Decision: reused the existing HeightmapDesc + inline sampler rather
+  than a new heightfield type, so render + physics + gameplay share one source of
+  truth. Follow-ups: agent ground-clamp + match spawn-on-terrain using these;
+  GPU CDLOD draw + streaming of a real BF-light map (in-window). Next: **M —
+  visual BSP/terrain draw** (in-window), the UDP transport binding, or wiring
+  HeightfieldQuery into agents/match for an outdoor headless skirmish.
 
 - (iter 16) **Combat-bot scale follow-ups: broadphase enemy search + team-aware
   friendly fire (item A / §1b perf).** The bot enemy search was O(bots·
