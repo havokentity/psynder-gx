@@ -74,6 +74,17 @@ PSYNDER_COMPONENT(Score) {
 };
 static_assert(sizeof(Score) == 8, "Score layout frozen");
 
+// Team affiliation. Bots only target other teams; weapons can filter friendly
+// fire by team. Entities without a Team are free-for-all (always targetable).
+// (Lives here — not in CombatBot.h — because it's a fundamental gameplay
+// component shared by bots, players, and the weapon friendly-fire filter. The
+// PSYNDER_COMPONENT id is the hash of the type signature, so relocating it from
+// CombatBot.h does NOT change its component id.)
+PSYNDER_COMPONENT(Team) {
+    u32 team;
+};
+static_assert(sizeof(Team) == 4, "Team layout frozen");
+
 // What a pickup grants.
 enum class PickupKind : u32 { Health = 0, Ammo = 1, Weapon = 2 };
 

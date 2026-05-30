@@ -136,3 +136,28 @@ TEST_CASE("gameplay: weapons fire is deterministic across worlds",
     };
     REQUIRE(run() == run());
 }
+
+TEST_CASE("gameplay: team-aware hitscan shoots through teammates to the enemy",
+          "[gameplay][weapons]") {
+    World w;
+    const Entity shooter = spawn_shooter(w, 40.0f, 0.5f, -1);
+    w.add(shooter, Team{0u});
+    // A teammate stands closer, directly on the ray; an enemy is farther along it.
+    const Entity mate = spawn_target(w, {3.0f, 0.0f, 0.0f}, 100.0f);
+    w.add(mate, Team{0u});
+    const Entity enemy = spawn_target(w, {6.0f, 0.0f, 0.0f}, 100.0f);
+    w.add(enemy, Team{1u});
+
+    // Free-for-all (no team filter) hits the NEAREST body — the teammate.
+    REQUIRE(fire_hitscan(w, shooter, {0, 0, 0}, {1, 0, 0}) == mate);
+    REQUIRE(w.get<Health>(mate)->hp == Catch::Approx(60.0f));
+    REQUIRE(w.get<Health>(enemy)->hp == Catch::Approx(100.0f));
+
+    // Reset and fire with the shooter's team as the friendly filter: the ray
+    // passes through the teammate and strikes the enemy instead.
+    w.get<Health>(mate)->hp = 100.0f;
+    w.get<Weapon>(shooter)->cooldown_s = 0.0f;
+    REQUIRE(fire_hitscan(w, shooter, {0, 0, 0}, {1, 0, 0}, /*friendly_team=*/0) == enemy);
+    REQUIRE(w.get<Health>(mate)->hp == Catch::Approx(100.0f));  // teammate unharmed
+    REQUIRE(w.get<Health>(enemy)->hp == Catch::Approx(60.0f));
+}

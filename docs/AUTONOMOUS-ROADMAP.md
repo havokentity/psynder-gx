@@ -63,8 +63,10 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 - [x] Navmesh or flow-field pathing (research first). **DONE (iter 7) —
       deterministic grid flow-field in the new `engine/ai` lane.**
 - [x] Combat bots that path + shoot through the gameplay systems; scale +
-      determinism test. **DONE (iter 8).** (Broadphase enemy-search + team-aware
-      friendly-fire filter = scale follow-ups.)
+      determinism test. **DONE (iter 8).** Scale follow-ups DONE (iter 16):
+      UniformGrid broadphase enemy-search (O(bots·neighbours), identical results)
+      + team-aware friendly-fire filter in fire_hitscan (shoots through
+      teammates). Team relocated to GameplayComponents.h.
 
 ### M — Maps / world
 - [~] Quake3-class arena: BSP/brush geometry + PVS cull wired into render +
@@ -106,6 +108,32 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
+
+- (iter 16) **Combat-bot scale follow-ups: broadphase enemy search + team-aware
+  friendly fire (item A / §1b perf).** The bot enemy search was O(bots·
+  combatants) — fine for 64v64, a wall at thousands. Rewrote `tick_combat_bots`
+  to build a `scene::UniformGrid` over point-AABB proxies of the live combatants
+  (cell sized to the max fire range) and `query_sphere(pos, fire_range)` per bot,
+  so the search is O(bots·neighbours). Critically it produces IDENTICAL results:
+  the grid returns a superset, and the SAME in-range + nearest-by-lowest-id
+  predicate runs on it — so the existing 64v64 determinism test and the arena
+  combat test pass unchanged, proving equivalence. Also added a team-aware
+  friendly-fire filter: `fire_hitscan` gained an optional `friendly_team`
+  (default `kNoTeam` = FFA, so all existing callers are untouched); when set, the
+  ray shoots THROUGH teammates to strike the enemy behind them. To support that
+  cleanly, relocated the `Team` component from CombatBot.h to GameplayComponents.h
+  (its natural home — players + bots + the weapon filter share it; the
+  PSYNDER_COMPONENT id is the type-signature hash, so the move keeps the same id
+  and all ECS storage/tests are unaffected). Tests: new friendly-fire test
+  (FFA hits the nearer teammate; team-filtered shoots through to the enemy) +
+  the unchanged bot/arena suite validates the broadphase. Local: mac-debug ctest
+  **632/632** (+1), mac-release determinism+bots+arena 44/44 (golden pin intact),
+  server+crate smokes exit 0. Decision: per-tick grid build (matches the existing
+  per-tick combatant-gather allocation pattern); a scratch-reused zero-alloc pass
+  is a separate perf item. Follow-ups: the same broadphase for the agent
+  steering neighbour search; a true thousands-scale bot stress test. Next: **M —
+  visual BSP arena** (in-window) or the UDP transport binding, or a BF-light
+  heightfield (headless terrain groundwork).
 
 - (iter 15) **Match orchestration wired into the server — a real deterministic
   match end-to-end.** Composed the systems built over iters 11–14: `MatchSession`

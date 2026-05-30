@@ -7,17 +7,13 @@
 
 #include "ai/FlowField.h"
 
+#include "gameplay/GameplayComponents.h"  // Team (relocated here), Health, Weapon
+
 #include "scene/World.h"
 
 #include "core/Types.h"
 
 namespace psynder::gameplay {
-
-// Team affiliation; bots only target other teams.
-PSYNDER_COMPONENT(Team) {
-    u32 team;
-};
-static_assert(sizeof(Team) == 4, "Team layout frozen");
 
 // Marks an AI-controlled combatant.
 PSYNDER_COMPONENT(Bot) {

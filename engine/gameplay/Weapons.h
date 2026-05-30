@@ -21,14 +21,22 @@ namespace psynder::gameplay {
 
 inline constexpr f32 kProjectileHitRadius = 0.5f;  // proximity damage radius (m)
 
+// No-team sentinel for fire_hitscan's friendly_team parameter (free-for-all).
+inline constexpr i64 kNoTeam = -1;
+
 // Hitscan fire from `shooter` along `dir` from `origin`. If its Weapon is ready
 // (cooldown <= 0 and ammo != 0): spend a round + set the cooldown, ray-test the
 // nearest Health entity (within the weapon's hit_radius of the ray, excluding
 // the shooter), and apply the weapon damage to it. Returns the victim (an
 // invalid Entity on miss or if not ready). Deterministic (nearest by hit
 // distance, ties broken by lower entity id).
+//
+// `friendly_team` enables team-aware friendly fire: when >= 0, any candidate
+// carrying a Team component equal to it is skipped (a teammate in the line of
+// fire is shot through, not hit). kNoTeam (-1, the default) keeps the classic
+// free-for-all behaviour, so existing callers are unaffected.
 Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
-                    math::Vec3 dir) noexcept;
+                    math::Vec3 dir, i64 friendly_team = kNoTeam) noexcept;
 
 // Spawn a projectile from `shooter`'s Weapon (must be ready; spends a round +
 // sets the cooldown). The projectile flies at `speed_mps` along `dir`, carries

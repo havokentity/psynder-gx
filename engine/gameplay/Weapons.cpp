@@ -26,7 +26,7 @@ bool ready_and_spend(Weapon& wp) noexcept {
 }  // namespace
 
 Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
-                    math::Vec3 dir) noexcept {
+                    math::Vec3 dir, i64 friendly_team) noexcept {
     Weapon* wp = w.get<Weapon>(shooter);
     if (wp == nullptr || !ready_and_spend(*wp)) return Entity{};
 
@@ -41,6 +41,14 @@ Entity fire_hitscan(scene::World& w, Entity shooter, math::Vec3 origin,
         [&](usize n, const Entity* ents, Health*, scene::TransformWS* xf) {
             for (usize i = 0; i < n; ++i) {
                 if (ents[i].raw == shooter.raw) continue;
+                // Team-aware friendly fire: shoot through teammates.
+                if (friendly_team >= 0) {
+                    const Team* tm = w.get<Team>(ents[i]);
+                    if (tm != nullptr &&
+                        tm->team == static_cast<u32>(friendly_team)) {
+                        continue;
+                    }
+                }
                 const math::Vec3 c = translation_of(xf[i]);
                 const math::Vec3 oc{origin.x - c.x, origin.y - c.y, origin.z - c.z};
                 const f32 b = oc.x * d.x + oc.y * d.y + oc.z * d.z;
