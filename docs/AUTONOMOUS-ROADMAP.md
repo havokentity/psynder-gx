@@ -130,6 +130,52 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 28) **4-AGENT BATCH #6 — bot-combat-depth: four additive features across
+  four distinct lanes (G + A + M + P), all NEW files, ZERO edits to existing/hot/
+  golden code.** A coherent batch deepening the combat loop while staying fully
+  disjoint + headless. Agents forbidden from build/git/shared-or-other-lane files;
+  I serially integrated. Shipped:
+  1. **gameplay/WeaponLoadout** (item G) — the Quake3 arsenal as a deterministic
+     constexpr data table: `WeaponClass {Railgun, RocketLauncher, Shotgun,
+     MachineGun, Plasma}`, a `WeaponSpec` (damage / fire_interval / max_ammo /
+     hit_radius / hitscan / projectile_speed / FalloffProfile), `weapon_spec()`
+     (metric values, MachineGun fallback for out-of-range — no UB), and
+     `equip_weapon(Weapon&, class)` filling the shared Weapon POD + arming it
+     ready. Reuses iter-26's FalloffProfile so each archetype carries its falloff.
+     Numbers: Rail 80/1.5s/10 hitscan rifle-falloff; Rocket 100/0.8s/10 proj 30m/s;
+     Shotgun 60/1.0s/10 hitscan shotgun-falloff; MG 7/0.1s/100 hitscan pistol-
+     falloff; Plasma 20/0.1s/50 proj 40m/s.
+  2. **ai/Patrol** (item A) — a multi-point patrol sequencer over iter-27's
+     NavAgent: a `PatrolRoute` (ordered grid points + cursor + loop flag),
+     `start_patrol`, and `update_patrol` (squared-XZ arrival test against the
+     current point's cell centre -> advance cursor, wrap when looping or hold the
+     last point, set_goal only when the target actually changes to avoid replan
+     thrash -> delegate to NavAgent::update for the steer). Bots now walk routes.
+  3. **world/outdoor/TerrainVisibility** (item M / tactical AI) —
+     `terrain_line_of_sight(a, b, clearance)` + `terrain_los_clearance(a, b)`:
+     march the segment in ~one-texel steps and require each interior sample clear
+     the bilinear terrain_height; the min interior clearance backs both (LoS ==
+     clearance >= c by construction). Pure algebra over the heightfield, lockstep-
+     safe — the "can a bot at A see/shoot B over the hills" query.
+  4. **net/SnapshotMetrics** (item P) — bandwidth accounting tooling: a POD
+     `BandwidthMeter` (total/frames/peak) + `meter_record`/`reset`,
+     `mean_bytes_per_tick`/`bytes_per_second`/`bits_per_second`,
+     `compression_ratio`/`savings_fraction` (delta vs full), and
+     `full_snapshot_bytes` = packed_size. Guarded f64, measurement-only (documented
+     not-authoritative). Lets us measure the SnapshotStream/Delta saving.
+  Integration: tree had EXACTLY 12 new files, ZERO modified tracked files;
+  **compiled clean AND passed the full ctest on the first try — no fixes needed**
+  (cleanest batch alongside iter-26). Local: mac-debug ctest **796/796** (+29),
+  mac-release determinism 54/54 (golden flock digest #780 intact), perf_guardrails
+  OK, PsyServerGX --ticks=128 (real 2-frag match) + crate smokes exit 0. Six
+  4-agent batches now: **24 features across 6 CI cycles.** Follow-ups: equip bots/
+  players from WeaponLoadout + pass the spec's falloff into fire_hitscan; drive a
+  CombatBot off Patrol+NavAgent (patrol then engage on LoS); use TerrainVisibility
+  to gate bot target acquisition; surface SnapshotMetrics in PsyServerGX/a bench.
+  Next: a CombatBot integration tying Patrol+NavAgent+WeaponLoadout+TerrainVisibility
+  into a headless tactical-bot demo (gameplay, likely SOLO), or the determinism-
+  critical SnapshotStream->ReplicationSession threading / IR SIMD back-end (SOLO).
+
 - (iter 27) **4-AGENT BATCH #5 — the WIRING batch: land iter-26's building blocks
   into call sites, two backward-compatible wirings + two new streaming layers,
   four DISTINCT lanes.** Since three of the four iter-26 follow-ups target the
