@@ -130,6 +130,38 @@ macOS/Metal + Linux/Vulkan + Windows + determinism matrix. 583 unit tests green.
 > Append one entry per iteration: what shipped, decisions/assumptions, sources,
 > follow-ups, anything needing eventual human/in-window/PC-Vulkan check.
 
+- (iter 48) **4-AGENT BATCH (cron-driven; 3 agents recovered by hand) — four
+  additive features across four DISTINCT lanes, all NEW files, ZERO edits to
+  existing/hot/golden code.** Three of the four agents hit a socket-close error
+  mid-study and wrote nothing; one (StatusEffect) finished. I COMPLETED the other
+  three myself from the specs (the proven recovery pattern) rather than re-spawn.
+  A second cron fire during this in-flight iteration correctly no-op'd on the held
+  lock. Shipped:
+  1. **gameplay/StatusEffect** (agent) — damage-over-time effects: a StatusEffects
+     POD (per-kind time/dps/source for Burn/Poison/Bleed, 48 B), apply_status
+     (refresh-not-stack: max duration + max dps), tick_status (dps*dt via
+     damage_credited so a DoT kill credits the applier; clears on a corpse;
+     gather-then-mutate id-ordered). has_status.
+  2. **ai/Perception** (by hand) — FOV cone perception: can_perceive (range +
+     precomputed-cosine cone, no acos) + perception_strength (distance*angle
+     falloff in [0,1]) + fov_cos authoring helper + most_perceptible. The angular
+     complement to line_of_sight.
+  3. **net/LossModel** (by hand) — a DETERMINISTIC loss/reorder test channel:
+     drops (splitmix64 hash of seq+seed vs loss_rate) + extra_delay_ticks
+     (independent reorder stream) + measured_loss; no RNG state, perfectly
+     reproducible (a lossy link without flaky nondeterminism).
+  4. **world/outdoor/Water** (by hand) — a flat water plane: is_underwater /
+     submersion_depth / submersion_fraction (vertical body) + buoyancy_accel
+     (Archimedes) + water_drag (opposes velocity). Metric, deterministic.
+  Integration: tree had EXACTLY 12 new files, ZERO modified tracked files;
+  compiled clean AND passed the full ctest on the FIRST run (one hand-added
+  <cmath> for std::abs in the water test). Local: mac-debug ctest **1486/1486**
+  (+29), mac-release determinism 120/120 (golden pin intact), perf_guardrails OK,
+  PsyServerGX --ticks=128 + crate smokes exit 0. Total now: **110 features +
+  6 integrations.** Follow-ups: StatusEffect from fire/explosions; Perception
+  gating bot target acquisition; LossModel in a netcode robustness test of the
+  ReplicationPipeline; Water buoyancy on a DynamicBody in an outdoor map.
+
 - (iter 47) **4-AGENT BATCH (cron-driven) — four additive features across four
   DISTINCT lanes, all NEW files, ZERO edits to existing/hot/golden code.** The
   autonomous cron resumed the loop. Shipped:
