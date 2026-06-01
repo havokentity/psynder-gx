@@ -81,6 +81,24 @@ bool read_binary(const char* path, std::vector<uint8_t>& out)
     return ok;
 }
 
+// Absolute path to the slangc binary, baked in at configure time by
+// engine/shader/CMakeLists.txt (find_program → PSYNDER_SLANGC_PATH). Relying
+// on a bare "slangc" resolved through PATH breaks when the app is launched
+// outside a login shell (Finder, a launchd/systemd service, a CI step that
+// doesn't source the profile) where /usr/local/bin is not on PATH — configure
+// succeeds but every runtime shader compile then fails "slangc: not found".
+// Quoted so popen()'s shell tolerates a path containing spaces. Falls back to
+// a PATH lookup only on a build where the macro was never defined (slangc was
+// absent at configure, so shader compilation is stub-only there regardless).
+std::string slangc_invocation()
+{
+#if defined(PSYNDER_SLANGC_PATH)
+    return std::string("\"") + PSYNDER_SLANGC_PATH + "\" ";
+#else
+    return "slangc ";
+#endif
+}
+
 // Stage → slangc stage name string
 const char* stage_name_slang(Stage s)
 {
@@ -138,7 +156,7 @@ bool compile_to_spirv(
     // slangc -entry <ep> -stage <stage> -profile glsl_450 -target spirv-asm
     // Use -target spirv (binary SPIR-V words, not text asm)
     std::string cmd;
-    cmd  = "slangc ";
+    cmd  = slangc_invocation();
     cmd += "\"";
     cmd += slang_path;
     cmd += "\" ";
@@ -185,7 +203,7 @@ bool compile_to_metal_ir(
     // Step 1: slangc -> Metal source. Slang 2026.x accepts `metal` as a
     // target, but `metallib` is a target, not a valid profile name.
     std::string cmd1;
-    cmd1  = "slangc ";
+    cmd1  = slangc_invocation();
     cmd1 += "\""; cmd1 += slang_path; cmd1 += "\" ";
     cmd1 += "-entry "; cmd1 += entry_point; cmd1 += " ";
     cmd1 += "-stage "; cmd1 += stage_name_slang(stage); cmd1 += " ";

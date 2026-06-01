@@ -94,11 +94,13 @@ Sample assets (under `samples/*/assets/`): CC-BY-4.0.
 
 - Author's sister project **Psynder** (CPU engine) — `engine/*` foundation modules (math, jobs, ECS, audio, scripting, editor, platform) are vendored from there.
 - Author's sister project **DeMonT PathTracer** — console + early hardware-detection scaffolds.
-- **Jolt Physics** (MIT, vendored) for the physics core.
-- **Opus** (BSD, vendored) for voice chat.
-- **Slang** (MIT-ish, vendored) for shader compilation.
-- **RmlUi** (MIT, vendored) for player HUDs.
-- **FreeType** (FTL, vendored) for font rasterization.
+- **Jolt Physics** (MIT, FetchContent — pinned by SHA) for the physics core.
+- **Opus** (BSD, FetchContent — tag `v1.5.2`) for voice chat.
+- **Slang** (MIT-ish, system `slangc` located at configure) for shader compilation.
+- **RmlUi** (MIT, vcpkg) for player HUDs.
+- **FreeType** (FTL, vcpkg) for font rasterization.
+
+For exact pins and how each dependency is acquired, see [`docs/third-party-versions.md`](docs/third-party-versions.md).
 - **NVIDIA / AMD / Intel / Apple** vendor upscaler SDKs (DLSS / FSR / XeSS / MetalFX) are SDK-licensed and integrated as thin wrappers.
 
 ---

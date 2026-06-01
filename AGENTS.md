@@ -42,6 +42,19 @@ If a lane agent finds it needs a file outside its ownership, **STOP** and docume
 | 23-platform-win32     | `engine/platform/win32/`      | `lane/23-platform-win32`      | B |
 | 24-platform-linux     | `engine/platform/linux/`      | `lane/24-platform-linux`      | B |
 | 25-platform-macos     | `engine/platform/macos/`      | `lane/25-platform-macos`      | B |
+| 27-camera             | `engine/camera/`              | `lane/27-camera`              | C |
+| 28-ai                 | `engine/ai/`                  | `lane/28-ai`                  | C |
+| 29-gameplay           | `engine/gameplay/`            | `lane/29-gameplay`            | C |
+| 30-worldstate         | `engine/worldstate/`          | `lane/30-worldstate`          | C |
+| 31-match              | `engine/match/`               | `lane/31-match`               | C |
+
+**Wave C (lanes 27–31)** are the gameplay / simulation lanes added during the
+`nextgen/new-release` prototype push, after the Wave A/B engine bring-up. They
+build directly on the existing lanes — `engine/ai` is added before
+`engine/gameplay` (which links it), and `engine/match` links `net` + `gameplay`
+(root `CMakeLists.txt` adds them in that dependency order). They are full,
+owned lanes for merge-safety purposes: one directory per agent, same rules as
+the rest of the table.
 
 The shared `engine/platform/CMakeLists.txt` (top-level platform dispatch) is **orchestrator-owned**; each platform lane owns only its OS-specific subdir.
 

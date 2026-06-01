@@ -50,6 +50,16 @@ option(PSYNDER_GX_ENABLE_MESH_SHADERS "Enable mesh-shader pipeline (Turing+, RDN
 if(PSYNDER_GX_DEDICATED_SERVER)
     set(PSYNDER_GX_EDITOR        OFF CACHE BOOL "" FORCE)
     set(PSYNDER_GX_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+    # tests/unit is a single monolithic Catch2 target that links the full
+    # client lane set (psynder_gpu / psynder_render_* / psynder_audio /
+    # psynder_ui_imm) and globs every *.cpp suite, including the gpu/render/
+    # audio/ui ones. Those lanes are stripped above, so in a dedicated build
+    # the test link carries dangling `-lpsynder_gpu …` flags for targets that
+    # were never added — `linux-dedicated-*` configures clean but fails at
+    # link. The dedicated preset is a shipping-server artifact, not a test
+    # host (suites run under the normal linux/mac/win presets), so force tests
+    # off here to keep the headless build green. See ARCH review / codex P0.
+    set(PSYNDER_GX_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
 endif()
 
 # Back-compat aliases so vendored Psynder code (which uses PSYNDER_*) still works.
