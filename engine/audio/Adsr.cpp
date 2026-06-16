@@ -15,14 +15,18 @@ f32 adsr_gain(const AdsrParams& p, f32 time_since_on_s, bool released,
     f32 g;
     if (!released) {
         const f32 t = time_since_on_s > 0.0f ? time_since_on_s : 0.0f;
-        if (t < p.attack_s) {
-            // Attack ramp 0 -> 1. (t < attack_s implies attack_s > 0.)
-            g = t / p.attack_s;
+        const f32 attack_s = p.attack_s > 0.0f ? p.attack_s : 0.0f;
+        const f32 decay_s  = p.decay_s > 0.0f ? p.decay_s : 0.0f;
+        if (attack_s > 0.0f && t < attack_s) {
+            // Attack ramp 0 -> 1.
+            g = t / attack_s;
         } else {
-            const f32 td = t - p.attack_s;  // time into the decay/sustain region
-            if (td < p.decay_s) {
-                // Decay ramp 1 -> sustain. (td < decay_s implies decay_s > 0.)
-                g = 1.0f - (1.0f - sustain) * (td / p.decay_s);
+            const f32 td = t - attack_s;  // time into the decay/sustain region
+            if (td == 0.0f) {
+                g = 1.0f;  // attack peak, including a zero-length attack
+            } else if (decay_s > 0.0f && td < decay_s) {
+                // Decay ramp 1 -> sustain.
+                g = 1.0f - (1.0f - sustain) * (td / decay_s);
             } else {
                 g = sustain;  // held
             }
