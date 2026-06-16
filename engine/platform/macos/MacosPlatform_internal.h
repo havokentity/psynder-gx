@@ -32,6 +32,8 @@ struct RawMouseState {
     std::atomic<double> accum_dx{0.0};
     std::atomic<double> accum_dy{0.0};
     std::atomic<double> accum_wheel{0.0};
+    std::atomic<double> x{0.0};
+    std::atomic<double> y{0.0};
 
     // Pressed state is sticky between pumps (button-down across frames).
     std::atomic<bool> left_down{false};
@@ -52,6 +54,8 @@ struct RawMouseSnapshot {
     double dx          = 0.0;
     double dy          = 0.0;
     double wheel       = 0.0;
+    double x           = 0.0;
+    double y           = 0.0;
     bool   left_down   = false;
     bool   right_down  = false;
     bool   middle_down = false;

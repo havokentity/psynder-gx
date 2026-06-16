@@ -26,6 +26,7 @@ extern "C" {
 #endif
 
 #include "core/Log.h"
+#include "scene/GxComponents.h"
 #include "scene/World.h"
 
 #include <cstring>
@@ -90,6 +91,198 @@ u64 next_entity_id(lua_State* L) {
     lua_pushinteger(L, cur);
     lua_setfield(L, LUA_REGISTRYINDEX, kEntityCounter);
     return static_cast<u64>(cur);
+}
+
+bool field_number(lua_State* L, int table, const char* name, f32& out) {
+    lua_getfield(L, table, name);
+    const bool ok = lua_isnumber(L, -1);
+    if (ok) out = static_cast<f32>(lua_tonumber(L, -1));
+    lua_pop(L, 1);
+    return ok;
+}
+
+bool read_vec3(lua_State* L, int table, math::Vec3& out) {
+    bool any = false;
+    any = field_number(L, table, "x", out.x) || any;
+    any = field_number(L, table, "y", out.y) || any;
+    any = field_number(L, table, "z", out.z) || any;
+    if (any) return true;
+
+    lua_geti(L, table, 1);
+    lua_geti(L, table, 2);
+    lua_geti(L, table, 3);
+    const bool ok = lua_isnumber(L, -3) && lua_isnumber(L, -2) && lua_isnumber(L, -1);
+    if (ok) {
+        out.x = static_cast<f32>(lua_tonumber(L, -3));
+        out.y = static_cast<f32>(lua_tonumber(L, -2));
+        out.z = static_cast<f32>(lua_tonumber(L, -1));
+    }
+    lua_pop(L, 3);
+    return ok;
+}
+
+bool read_mat4(lua_State* L, int table, math::Mat4& out) {
+    lua_getfield(L, table, "mtw");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return false;
+    }
+    const int mtw = lua_absindex(L, -1);
+    for (int i = 0; i < 16; ++i) {
+        lua_geti(L, mtw, i + 1);
+        if (!lua_isnumber(L, -1)) {
+            lua_pop(L, 2);
+            return false;
+        }
+        out.m[i] = static_cast<f32>(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    return true;
+}
+
+scene::VisibleBit::Partition partition_from_lua(lua_State* L, int table) {
+    lua_getfield(L, table, "partition");
+    scene::VisibleBit::Partition out = scene::VisibleBit::Partition::WorldDynamic;
+    if (lua_isinteger(L, -1)) {
+        const lua_Integer v = lua_tointeger(L, -1);
+        if (v >= 0 && v <= 3) {
+            out = static_cast<scene::VisibleBit::Partition>(v);
+        }
+    } else if (lua_isstring(L, -1)) {
+        std::size_t len = 0;
+        const char* s = lua_tolstring(L, -1, &len);
+        const std::string_view name{s ? s : "", len};
+        if (name == "static" || name == "WorldStatic") {
+            out = scene::VisibleBit::Partition::WorldStatic;
+        } else if (name == "effects" || name == "Effects") {
+            out = scene::VisibleBit::Partition::Effects;
+        } else if (name == "ui" || name == "UI") {
+            out = scene::VisibleBit::Partition::UI;
+        }
+    }
+    lua_pop(L, 1);
+    return out;
+}
+
+bool is_engine_component_name(std::string_view name) noexcept {
+    return name == "TransformWS" || name == "VisibleBit" ||
+           name == "MeshRef" || name == "MaterialRef" ||
+           name == "LightPoint" || name == "LightDirectional";
+}
+
+bool add_engine_component(lua_State* L,
+                          int component_table,
+                          std::string_view name,
+                          Entity entity) {
+    if (!entity.valid()) return false;
+
+    if (name == "TransformWS") {
+        scene::TransformWS tr{};
+        tr.mtw = math::identity4();
+        if (!read_mat4(L, component_table, tr.mtw)) {
+            math::Vec3 p{};
+            lua_getfield(L, component_table, "position");
+            if (lua_istable(L, -1)) {
+                const int pos = lua_absindex(L, -1);
+                (void)read_vec3(L, pos, p);
+            }
+            lua_pop(L, 1);
+            (void)read_vec3(L, component_table, p);
+            tr.mtw = math::translate(p);
+        }
+        tr.prev_mtw = tr.mtw;
+        scene::World::Get().add(entity, tr);
+        return true;
+    }
+
+    if (name == "VisibleBit") {
+        const scene::VisibleBit vb{partition_from_lua(L, component_table), 0, 0};
+        scene::World::Get().add(entity, vb);
+        return true;
+    }
+
+    if (name == "MeshRef") {
+        scene::MeshRef mesh{};
+        lua_getfield(L, component_table, "mesh");
+        if (lua_isinteger(L, -1)) {
+            mesh.mesh.raw = static_cast<u32>(lua_tointeger(L, -1));
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, component_table, "lod_bias");
+        if (lua_isinteger(L, -1)) {
+            mesh.lod_bias = static_cast<u32>(lua_tointeger(L, -1));
+        }
+        lua_pop(L, 1);
+        scene::World::Get().add(entity, mesh);
+        return true;
+    }
+
+    if (name == "MaterialRef") {
+        scene::MaterialRef material{};
+        lua_getfield(L, component_table, "material");
+        if (lua_isinteger(L, -1)) {
+            material.material.raw = static_cast<u32>(lua_tointeger(L, -1));
+        }
+        lua_pop(L, 1);
+        scene::World::Get().add(entity, material);
+        return true;
+    }
+
+    if (name == "LightPoint") {
+        scene::LightPoint light{};
+        light.color = {1.0f, 1.0f, 1.0f};
+        light.radius = 4.0f;
+        light.intensity = 600.0f;
+        lua_getfield(L, component_table, "position");
+        if (lua_istable(L, -1)) {
+            const int pos = lua_absindex(L, -1);
+            (void)read_vec3(L, pos, light.position);
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, component_table, "color");
+        if (lua_istable(L, -1)) {
+            const int color = lua_absindex(L, -1);
+            (void)read_vec3(L, color, light.color);
+        }
+        lua_pop(L, 1);
+        (void)field_number(L, component_table, "radius", light.radius);
+        (void)field_number(L, component_table, "intensity", light.intensity);
+        scene::World::Get().add(entity, light);
+        return true;
+    }
+
+    if (name == "LightDirectional") {
+        scene::LightDirectional light{};
+        light.direction = {0.0f, -1.0f, 0.0f};
+        light.color = {1.0f, 1.0f, 1.0f};
+        light.intensity = 10000.0f;
+        light.cast_rt_shadow = 1u;
+        lua_getfield(L, component_table, "direction");
+        if (lua_istable(L, -1)) {
+            const int dir = lua_absindex(L, -1);
+            (void)read_vec3(L, dir, light.direction);
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, component_table, "color");
+        if (lua_istable(L, -1)) {
+            const int color = lua_absindex(L, -1);
+            (void)read_vec3(L, color, light.color);
+        }
+        lua_pop(L, 1);
+        (void)field_number(L, component_table, "intensity", light.intensity);
+        lua_getfield(L, component_table, "cast_rt_shadow");
+        if (lua_isboolean(L, -1)) {
+            light.cast_rt_shadow = lua_toboolean(L, -1) ? 1u : 0u;
+        } else if (lua_isinteger(L, -1)) {
+            light.cast_rt_shadow = lua_tointeger(L, -1) != 0 ? 1u : 0u;
+        }
+        lua_pop(L, 1);
+        scene::World::Get().add(entity, light);
+        return true;
+    }
+
+    return false;
 }
 
 // Helper: read the `reads` / `writes` list off a config table at index `t`.
@@ -189,6 +382,7 @@ int l_world_create_entity(lua_State* L) {
     }
 
     const u64 entity_id = next_entity_id(L);
+    Entity engine_entity{};
 
     // For each k,v in the components table: register the component name and
     // append {entity=entity_id, data=v} to the per-component array.
@@ -204,12 +398,23 @@ int l_world_create_entity(lua_State* L) {
         const char* name = lua_tolstring(L, -2, &len);
         scene::ComponentId cid = reg->register_or_get(
             std::string_view(name, len));
+        const std::string_view component_name{name, len};
+        const int component_value = lua_absindex(L, -1);
+        if (!engine_entity.valid() && is_engine_component_name(component_name)) {
+            engine_entity = scene::World::Get().create();
+        }
+        const bool engine_backed =
+            add_engine_component(L, component_value, component_name, engine_entity);
 
         push_component_array(L, cid);   // ..., key, value, arr
         // Build entry: {entity=entity_id, data=value (deep copied via ref)}
         lua_newtable(L);                // ..., key, value, arr, entry
         lua_pushinteger(L, lua_Integer(entity_id));
         lua_setfield(L, -2, "entity");
+        if (engine_backed) {
+            lua_pushinteger(L, lua_Integer(engine_entity.raw));
+            lua_setfield(L, -2, "engine_entity");
+        }
         lua_pushvalue(L, -3);           // copy value to top
         lua_setfield(L, -2, "data");
         lua_Integer n = luaL_len(L, -2);
@@ -220,6 +425,10 @@ int l_world_create_entity(lua_State* L) {
     }
 
     lua_pushinteger(L, lua_Integer(entity_id));
+    if (engine_entity.valid()) {
+        lua_pushinteger(L, lua_Integer(engine_entity.raw));
+        return 2;
+    }
     return 1;
 }
 

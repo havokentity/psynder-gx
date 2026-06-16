@@ -20,6 +20,7 @@
 
 #include "SnapshotDelta.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <utility>
@@ -34,6 +35,20 @@ PSY_FORCEINLINE std::FILE* as_file(void* p) noexcept {
 
 bool fwrite_all(std::FILE* f, const void* data, usize n) noexcept {
     return std::fwrite(data, 1, n, f) == n;
+}
+
+bool input_less(const PlayerInputEntry& a,
+                const PlayerInputEntry& b) noexcept {
+    if (a.entity_id != b.entity_id) return a.entity_id < b.entity_id;
+    if (a.aim_frac_u16 != b.aim_frac_u16) return a.aim_frac_u16 < b.aim_frac_u16;
+    if (a.button_mask != b.button_mask) return a.button_mask < b.button_mask;
+    if (a.pitch_delta != b.pitch_delta) return a.pitch_delta < b.pitch_delta;
+    if (a.yaw_delta != b.yaw_delta) return a.yaw_delta < b.yaw_delta;
+    if (a.weapon_slot != b.weapon_slot) return a.weapon_slot < b.weapon_slot;
+    for (usize i = 0; i < sizeof(a.reserved); ++i) {
+        if (a.reserved[i] != b.reserved[i]) return a.reserved[i] < b.reserved[i];
+    }
+    return false;
 }
 
 }  // namespace
@@ -54,6 +69,8 @@ DemoWriter::DemoWriter(DemoWriter&& o) noexcept
     , baseline_(std::move(o.baseline_))
     , toc_(std::move(o.toc_))
     , scratch_(std::move(o.scratch_))
+    , encoded_snapshot_(std::move(o.encoded_snapshot_))
+    , canonical_inputs_(std::move(o.canonical_inputs_))
 {
     o.file_              = nullptr;
     o.ticks_written_     = 0;
@@ -72,6 +89,8 @@ DemoWriter& DemoWriter::operator=(DemoWriter&& o) noexcept {
         baseline_          = std::move(o.baseline_);
         toc_               = std::move(o.toc_);
         scratch_           = std::move(o.scratch_);
+        encoded_snapshot_  = std::move(o.encoded_snapshot_);
+        canonical_inputs_  = std::move(o.canonical_inputs_);
         o.file_              = nullptr;
         o.ticks_written_     = 0;
         o.last_keyframe_tick_ = 0;
@@ -93,10 +112,9 @@ bool DemoWriter::open(const DemoWriterConfig& cfg) noexcept {
                   "DemoWriterConfig::roster must remain a 64-entry array; "
                   "update the bound check below if you change the size.");
     if (cfg.player_count > 64u) return false;
-    // tick_hz is encoded as u8 in DemoFileHeader.  Reject any tick rate
-    // that wouldn't round-trip — callers should only pass tick_config_64
-    // / tick_config_128 / tick_config_256, all of which fit.
-    if (cfg.tick_cfg.tick_hz > 255u) return false;
+    if (cfg.tick_cfg.tick_hz != 64u && cfg.tick_cfg.tick_hz != 128u) {
+        return false;
+    }
 
     // "wb+" so finalise() can fread() the header back to patch end_tick.
     // "wb" is write-only and the patch path would silently fail.
@@ -140,6 +158,8 @@ bool DemoWriter::open(const DemoWriterConfig& cfg) noexcept {
     baseline_.clear();
     toc_.clear();
     scratch_.clear();
+    encoded_snapshot_.clear();
+    canonical_inputs_.clear();
     return true;
 }
 
@@ -237,6 +257,52 @@ bool DemoWriter::write_inputs(u32                               tick,
         }
     }
     return true;
+}
+
+bool DemoWriter::write_snapshot_frame(const SnapshotFrame& snapshot,
+                                      u32 baseline_tick) noexcept {
+    if (!file_) return false;
+
+    const usize bytes_needed = encoded_snapshot_size(snapshot);
+    if (bytes_needed > 0xFFFFu - sizeof(DemoFrameRecordPreamble)) {
+        return false;
+    }
+    encoded_snapshot_.assign(bytes_needed, u8{0});
+    const usize written = encode_snapshot(
+        snapshot,
+        std::span<u8>(encoded_snapshot_.data(), encoded_snapshot_.size()));
+    if (written != bytes_needed) return false;
+
+    return write_frame(snapshot.tick,
+                       baseline_tick,
+                       std::span<const u8>(encoded_snapshot_.data(),
+                                           encoded_snapshot_.size()));
+}
+
+bool DemoWriter::write_input_commands(
+    u32                               tick,
+    std::span<const PlayerInputEntry> inputs) noexcept {
+    canonical_inputs_.assign(inputs.begin(), inputs.end());
+    // Zero the reserved padding so logically-identical input sets serialize to
+    // byte-identical demos regardless of what the caller left there. input_less
+    // also tiebreaks on reserved, so this keeps the canonical order stable too.
+    for (PlayerInputEntry& entry : canonical_inputs_) {
+        for (u8& byte : entry.reserved) {
+            byte = 0;
+        }
+    }
+    std::sort(canonical_inputs_.begin(), canonical_inputs_.end(), input_less);
+    return write_inputs(tick,
+                        std::span<const PlayerInputEntry>(canonical_inputs_.data(),
+                                                          canonical_inputs_.size()));
+}
+
+bool DemoWriter::write_replay_tick(
+    const SnapshotFrame&              snapshot,
+    u32                               baseline_tick,
+    std::span<const PlayerInputEntry> inputs) noexcept {
+    if (!write_snapshot_frame(snapshot, baseline_tick)) return false;
+    return write_input_commands(snapshot.tick, inputs);
 }
 
 void DemoWriter::finalise() noexcept {

@@ -18,11 +18,25 @@ extern "C" {
 namespace psynder::script::detail {
 
 namespace {
-// Component ids minted by the script lane start at 0x80000000 so they never
-// collide with engine-side ids (which start at 1, see scene/World.cpp).
-// When lane 06 lands a real "find by name" shim this can collapse down to a
-// single id space; the bit is the temporary boundary.
-inline constexpr scene::ComponentId kScriptIdBase = 0x80000000u;
+// Script-lane component ids set the top bit so they live in their own half of
+// the id space (0x80000000..0xFFFFFFFF), visibly distinct from engine-side ids.
+// Script ids never enter scene::World's component registry (engine-backed
+// components use the compile-time component_id<T>()); this id is only a key for
+// the script lane's own Lua-side component tables, so the two spaces never
+// actually share a lookup. When lane 06 lands a real "find by name" shim this
+// can collapse to a single id space.
+inline constexpr scene::ComponentId kScriptIdBit = 0x80000000u;
+
+// Stable id for a component NAME: the low 31 bits of the engine's FNV-1a-32
+// (scene::fnv1a32) with the script bit forced on. The id is a pure function of
+// the name — independent of registration / call order — so it is
+// bit-reproducible across runs, builds, and peers (the lockstep determinism
+// pillar; previously ids were minted by call order). Collision risk between two
+// distinct names is ~1/2^31, the same hash-trust the engine's component_id<T>()
+// already accepts.
+scene::ComponentId id_for_name(const std::string& name) noexcept {
+    return kScriptIdBit | (scene::fnv1a32(name.c_str()) & 0x7FFFFFFFu);
+}
 }  // namespace
 
 scene::ComponentId ScriptRegistry::register_or_get(std::string_view name) {
@@ -31,14 +45,9 @@ scene::ComponentId ScriptRegistry::register_or_get(std::string_view name) {
     if (it != names_.end()) {
         return it->second;
     }
-    if (names_by_id_.empty()) {
-        // Reserve slot 0 so a 0 id is reliably "invalid".
-        names_by_id_.emplace_back();
-    }
-    scene::ComponentId id = kScriptIdBase
-                          + static_cast<scene::ComponentId>(names_by_id_.size());
+    const scene::ComponentId id = id_for_name(key);
     names_.emplace(key, id);
-    names_by_id_.push_back(std::move(key));
+    ids_to_name_.emplace(id, std::move(key));
     return id;
 }
 
@@ -48,14 +57,8 @@ scene::ComponentId ScriptRegistry::find(std::string_view name) const {
 }
 
 std::string_view ScriptRegistry::name_of(scene::ComponentId id) const {
-    if (id < kScriptIdBase) {
-        return {};
-    }
-    const usize idx = id - kScriptIdBase;
-    if (idx == 0 || idx >= names_by_id_.size()) {
-        return {};
-    }
-    return names_by_id_[idx];
+    auto it = ids_to_name_.find(id);
+    return it == ids_to_name_.end() ? std::string_view{} : std::string_view{it->second};
 }
 
 usize ScriptRegistry::add_system(LuaSystem s) {

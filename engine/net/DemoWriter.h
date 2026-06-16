@@ -17,6 +17,7 @@
 #pragma once
 
 #include "DemoFormat.h"
+#include "Snapshot.h"
 #include "TickConfig.h"
 #include "core/Types.h"
 
@@ -79,6 +80,24 @@ public:
     bool write_inputs(u32                               tick,
                       std::span<const PlayerInputEntry> inputs) noexcept;
 
+    // Replay-spine convenience hook for integration samples: encode a
+    // SnapshotFrame and append it as this tick's frame record.
+    bool write_snapshot_frame(const SnapshotFrame& snapshot,
+                              u32 baseline_tick) noexcept;
+
+    // Replay-spine convenience hook for deterministic command streams:
+    // writes the same on-disk input record as write_inputs(), but first
+    // canonicalizes order by command content so replay does not depend on
+    // ECS traversal/container iteration order.
+    bool write_input_commands(u32                               tick,
+                              std::span<const PlayerInputEntry> inputs) noexcept;
+
+    // One-call tick hook used by local integration samples: snapshot first,
+    // then canonicalized commands for the same tick.
+    bool write_replay_tick(const SnapshotFrame&                 snapshot,
+                           u32                                  baseline_tick,
+                           std::span<const PlayerInputEntry>    inputs) noexcept;
+
     // Finalise the demo: serialise the TOC + footer, patch the header's
     // end_tick, and close the file. After this returns, is_open() == false.
     void finalise() noexcept;
@@ -102,6 +121,8 @@ private:
     std::vector<u8>             baseline_;       // last keyframe snapshot, raw
     std::vector<DemoTocEntry>   toc_;
     std::vector<u8>             scratch_;        // delta encode scratch
+    std::vector<u8>             encoded_snapshot_;
+    std::vector<PlayerInputEntry> canonical_inputs_;
 };
 
 }  // namespace psynder::net

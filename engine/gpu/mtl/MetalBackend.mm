@@ -48,7 +48,17 @@ namespace psynder::gpu {
 // released when the wrapper is destroyed. The destructors below are
 // invoked via the virtual ~RefCountedBase chain from `destroy_resource()`
 // (the Backend method that calls `delete` on the resource pointer).
-struct MtlBuffer  : Buffer  { id<MTLBuffer>       handle = nil; void* mapped = nullptr; };
+struct MtlBuffer  : Buffer  {
+    id<MTLBuffer> handle = nil;
+    void*         mapped = nullptr;
+    ~MtlBuffer() override {
+        if (handle) {
+            [handle release];
+            handle = nil;
+        }
+        mapped = nullptr;
+    }
+};
 struct MtlTexture : Texture {
     id<MTLTexture> handle = nil;
     ~MtlTexture() override {
@@ -58,7 +68,15 @@ struct MtlTexture : Texture {
         }
     }
 };
-struct MtlSampler : Sampler { id<MTLSamplerState> handle = nil; };
+struct MtlSampler : Sampler {
+    id<MTLSamplerState> handle = nil;
+    ~MtlSampler() override {
+        if (handle) {
+            [handle release];
+            handle = nil;
+        }
+    }
+};
 struct MtlCmdBuf  : CmdBuffer {
     id<MTLCommandBuffer>          cb               = nil;
     id<MTLRenderCommandEncoder>   encoder          = nil;
@@ -69,6 +87,10 @@ struct MtlCmdBuf  : CmdBuffer {
     id<MTLRenderPipelineState>    bound_render_pso = nil;
     id<MTLComputePipelineState>   bound_compute_pso = nil;
     MTLSize                       compute_tgs      = MTLSizeMake(1, 1, 1);
+    // Triangle fill mode for the bound render PSO. Metal carries fill mode
+    // as render-command-encoder state (not pipeline state), so bind_pipeline
+    // stashes the bound pipeline's mode here and replays it on encoder open.
+    MTLTriangleFillMode           bound_fill_mode  = MTLTriangleFillModeFill;
     // Cached index binding consumed by drawIndexedPrimitives.
     id<MTLBuffer>                 index_mtl        = nil;
     MTLIndexType                  index_mtl_type   = MTLIndexTypeUInt16;
@@ -132,6 +154,7 @@ private:
     id<MTLDevice>          mtl_device_   = nil;
     id<MTLCommandQueue>    queue_        = nil;
     CAMetalLayer*          layer_        = nil;
+    id<MTLDepthStencilState> depth_state_ = nil;
 
     // Per-frame transient state. Cleared at end_frame.
     FrameState frame_{};
@@ -159,6 +182,16 @@ bool MetalBackend::init(Device* dev) {
         queue_ = [mtl_device_ newCommandQueue];
         if (!queue_) {
             std::fputs("[psy::gpu::mtl] newCommandQueue returned nil\n", stderr);
+            return false;
+        }
+
+        MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+        dsd.depthCompareFunction = MTLCompareFunctionLessEqual;
+        dsd.depthWriteEnabled    = YES;
+        depth_state_ = [mtl_device_ newDepthStencilStateWithDescriptor:dsd];
+        [dsd release];
+        if (!depth_state_) {
+            std::fputs("[psy::gpu::mtl] newDepthStencilStateWithDescriptor returned nil\n", stderr);
             return false;
         }
 
@@ -215,6 +248,10 @@ bool MetalBackend::init(Device* dev) {
 
 void MetalBackend::shutdown(Device* /*dev*/) {
     @autoreleasepool {
+        if (depth_state_) {
+            [depth_state_ release];
+            depth_state_ = nil;
+        }
         if (queue_) {
             [queue_ release];
             queue_ = nil;
@@ -435,18 +472,40 @@ void MetalBackend::resize_swapchain(Device* dev, std::uint32_t w, std::uint32_t 
 
 // ─── Resource creation ──────────────────────────────────────────────────
 //
-// Buffers / samplers remain minimal M0-stubs. create_texture now grows the
-// M1 upload path: when TextureDesc::initial_data != nullptr we allocate a
-// real id<MTLTexture> with shader-read usage and replaceRegion: the bytes
-// in place. Apple Silicon's unified memory means no staging buffer is
-// needed; the texture's backing storage is host-visible by default
-// (MTLStorageModeShared on M-series).
-//
-// When initial_data is null we preserve the existing M0 behaviour (return
-// a bare MtlTexture wrapper with handle == nil) so render lanes that only
-// need a handle for ABI plumbing continue to compile + link.
-Buffer* MetalBackend::create_buffer(Device* /*dev*/, const BufferDesc& /*desc*/) {
-    return new (std::nothrow) MtlBuffer();
+// Buffers / samplers remain minimal M0-stubs. create_texture now backs
+// real Metal textures both for synchronous mip-0 uploads and for
+// uninitialized GPU-owned textures such as render targets and depth
+// attachments. Apple Silicon's unified memory keeps upload textures simple:
+// replaceRegion: writes directly into Shared storage without staging.
+Buffer* MetalBackend::create_buffer(Device* /*dev*/, const BufferDesc& desc) {
+    @autoreleasepool {
+        if (desc.size_bytes == 0) {
+            std::fputs("[psy::gpu::mtl] create_buffer: size_bytes is 0\n", stderr);
+            return nullptr;
+        }
+
+        auto* buf = new (std::nothrow) MtlBuffer();
+        if (!buf) return nullptr;
+
+        // Apple Silicon is unified memory, so Shared storage is the
+        // correct M1 path for DeviceLocal and HostVisible buffers alike.
+        // This happens during resource creation, not in the frame loop.
+        id<MTLBuffer> handle =
+            [mtl_device_ newBufferWithLength:(NSUInteger)desc.size_bytes
+                                     options:MTLResourceStorageModeShared];
+        if (!handle) {
+            std::fputs("[psy::gpu::mtl] create_buffer: newBufferWithLength returned nil\n", stderr);
+            delete buf;
+            return nullptr;
+        }
+        if (desc.debug_name) {
+            handle.label = [NSString stringWithUTF8String:desc.debug_name];
+        }
+
+        buf->handle = handle;
+        buf->mapped = [handle contents];
+        return buf;
+    }
 }
 
 // ─── Format → bytes_per_pixel + MTLPixelFormat helpers ──────────────────
@@ -482,6 +541,21 @@ inline MTLPixelFormat to_mtl_pixel_format_for_upload(Format f) {
     }
 }
 
+inline MTLPixelFormat to_mtl_pixel_format(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm:   return MTLPixelFormatRGBA8Unorm;
+        case Format::Rgba8Srgb:    return MTLPixelFormatRGBA8Unorm_sRGB;
+        case Format::Bgra8Unorm:   return MTLPixelFormatBGRA8Unorm;
+        case Format::Bgra8Srgb:    return MTLPixelFormatBGRA8Unorm_sRGB;
+        case Format::R8Unorm:      return MTLPixelFormatR8Unorm;
+        case Format::Rgba16Float:  return MTLPixelFormatRGBA16Float;
+        case Format::Rgba32Float:  return MTLPixelFormatRGBA32Float;
+        case Format::Depth32Float: return MTLPixelFormatDepth32Float;
+        case Format::R32Uint:      return MTLPixelFormatR32Uint;
+        default:                   return MTLPixelFormatInvalid;
+    }
+}
+
 } // anonymous
 
 Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) {
@@ -489,55 +563,78 @@ Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) 
         auto* tex = new (std::nothrow) MtlTexture();
         if (!tex) return nullptr;
 
-        // Fast path: caller didn't supply initial data → preserve the
-        // existing M0 stub behaviour (no MTLTexture allocation, handle nil).
-        if (desc.initial_data == nullptr) {
+        const bool has_initial_data = desc.initial_data != nullptr;
+        const bool has_any_usage    = desc.usage != 0;
+
+        // Preserve the old ABI-plumbing stub only for a truly empty
+        // descriptor. Any real usage bit now gets a real Metal texture at
+        // resource-creation time, never during begin_render.
+        if (!has_initial_data && !has_any_usage) {
             return tex;
+        }
+
+        if (desc.width == 0 || desc.height == 0) {
+            std::fputs("[psy::gpu::mtl] create_texture: width/height is 0\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+        if (desc.depth != 1 || desc.array_layers != 1) {
+            std::fputs("[psy::gpu::mtl] create_texture: only 2D single-layer textures are supported in Metal M1/M2\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+
+        const MTLPixelFormat texture_fmt = to_mtl_pixel_format(desc.format);
+        if (texture_fmt == MTLPixelFormatInvalid) {
+            std::fputs("[psy::gpu::mtl] create_texture: format has no Metal texture path yet\n", stderr);
+            delete tex;
+            return nullptr;
         }
 
         // Validate format. M1 supports a small allow-list; everything else
         // (SRGB, compressed, depth, float) goes through the M3 path.
-        const std::uint32_t bpp = bytes_per_pixel_for_upload(desc.format);
-        const MTLPixelFormat mtl_fmt = to_mtl_pixel_format_for_upload(desc.format);
-        if (bpp == 0 || mtl_fmt == MTLPixelFormatInvalid) {
-            std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Rgba8Srgb/Bgra8Unorm/Bgra8Srgb/R8Unorm)\n", stderr);
-            delete tex;
-            return nullptr;
+        std::uint32_t bpp = 0;
+        std::size_t expected = 0;
+        if (has_initial_data) {
+            bpp = bytes_per_pixel_for_upload(desc.format);
+            const MTLPixelFormat upload_fmt = to_mtl_pixel_format_for_upload(desc.format);
+            if (bpp == 0 || upload_fmt == MTLPixelFormatInvalid) {
+                std::fputs("[psy::gpu::mtl] create_texture: format has no initial_data path yet (M1 supports Rgba8Unorm/Rgba8Srgb/Bgra8Unorm/Bgra8Srgb/R8Unorm)\n", stderr);
+                delete tex;
+                return nullptr;
+            }
+            expected = static_cast<std::size_t>(desc.width)
+                     * static_cast<std::size_t>(desc.height)
+                     * static_cast<std::size_t>(bpp);
+            if (desc.initial_data_size != expected) {
+                std::fprintf(stderr,
+                    "[psy::gpu::mtl] create_texture: initial_data_size=%zu != expected %zu (%ux%u, %u bpp)\n",
+                    desc.initial_data_size, expected, desc.width, desc.height, bpp);
+                delete tex;
+                return nullptr;
+            }
         }
 
-        // Validate dimensions + buffer size. mip-0-only contract.
-        if (desc.width == 0 || desc.height == 0) {
-            std::fputs("[psy::gpu::mtl] create_texture: initial_data given but width/height is 0\n", stderr);
-            delete tex;
-            return nullptr;
-        }
-        const std::size_t expected = static_cast<std::size_t>(desc.width)
-                                   * static_cast<std::size_t>(desc.height)
-                                   * static_cast<std::size_t>(bpp);
-        if (desc.initial_data_size != expected) {
-            std::fprintf(stderr,
-                "[psy::gpu::mtl] create_texture: initial_data_size=%zu != expected %zu (%ux%u, %u bpp)\n",
-                desc.initial_data_size, expected, desc.width, desc.height, bpp);
-            delete tex;
-            return nullptr;
-        }
-
+        const std::uint32_t mip_count = desc.mips ? desc.mips : 1u;
         MTLTextureDescriptor* td = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:mtl_fmt
+            texture2DDescriptorWithPixelFormat:texture_fmt
                                          width:(NSUInteger)desc.width
                                         height:(NSUInteger)desc.height
-                                     mipmapped:NO];
-        // Default usage = ShaderRead. Promote when the user asks for more
-        // via TextureUsage bits; storage / RT need explicit opt-in so the
-        // Metal driver can pick the optimal backing layout.
-        MTLTextureUsage usage = MTLTextureUsageShaderRead;
+                                     mipmapped:(mip_count > 1u ? YES : NO)];
+        td.mipmapLevelCount = (NSUInteger)mip_count;
+
+        MTLTextureUsage usage = MTLTextureUsageUnknown;
+        if (has_initial_data || has_usage(desc.usage, TextureUsage::Sampled)) {
+            usage |= MTLTextureUsageShaderRead;
+        }
         if (has_usage(desc.usage, TextureUsage::Storage))      usage |= MTLTextureUsageShaderWrite;
         if (has_usage(desc.usage, TextureUsage::RenderTarget) ||
             has_usage(desc.usage, TextureUsage::DepthStencil)) usage |= MTLTextureUsageRenderTarget;
+        if (usage == MTLTextureUsageUnknown) usage = MTLTextureUsageShaderRead;
         td.usage = usage;
-        // Unified memory on Apple Silicon — replaceRegion: writes go
-        // straight to the texture's backing store, no staging buffer.
-        td.storageMode = MTLStorageModeShared;
+        td.storageMode = (has_initial_data || desc.heap == HeapKind::HostVisible)
+            ? MTLStorageModeShared
+            : MTLStorageModePrivate;
 
         id<MTLTexture> handle = [mtl_device_ newTextureWithDescriptor:td];
         if (!handle) {
@@ -545,16 +642,21 @@ Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) 
             delete tex;
             return nullptr;
         }
+        if (desc.debug_name) {
+            handle.label = [NSString stringWithUTF8String:desc.debug_name];
+        }
 
-        MTLRegion region = MTLRegionMake2D(0, 0,
-                                           (NSUInteger)desc.width,
-                                           (NSUInteger)desc.height);
-        const NSUInteger bytes_per_row =
-            (NSUInteger)desc.width * (NSUInteger)bpp;
-        [handle replaceRegion:region
-                  mipmapLevel:0
-                    withBytes:desc.initial_data
-                  bytesPerRow:bytes_per_row];
+        if (has_initial_data) {
+            MTLRegion region = MTLRegionMake2D(0, 0,
+                                               (NSUInteger)desc.width,
+                                               (NSUInteger)desc.height);
+            const NSUInteger bytes_per_row =
+                (NSUInteger)desc.width * (NSUInteger)bpp;
+            [handle replaceRegion:region
+                      mipmapLevel:0
+                        withBytes:desc.initial_data
+                      bytesPerRow:bytes_per_row];
+        }
 
         tex->handle = handle;
         return tex;
@@ -562,12 +664,34 @@ Texture* MetalBackend::create_texture(Device* /*dev*/, const TextureDesc& desc) 
 }
 
 Sampler* MetalBackend::create_sampler(Device* /*dev*/) {
-    return new (std::nothrow) MtlSampler();
+    @autoreleasepool {
+        auto* samp = new (std::nothrow) MtlSampler();
+        if (!samp) return nullptr;
+
+        MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+        sd.minFilter = MTLSamplerMinMagFilterLinear;
+        sd.magFilter = MTLSamplerMinMagFilterLinear;
+        sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+        sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        sd.rAddressMode = MTLSamplerAddressModeClampToEdge;
+
+        id<MTLSamplerState> handle = [mtl_device_ newSamplerStateWithDescriptor:sd];
+        [sd release];
+        if (!handle) {
+            std::fputs("[psy::gpu::mtl] create_sampler: newSamplerStateWithDescriptor returned nil\n", stderr);
+            delete samp;
+            return nullptr;
+        }
+
+        samp->handle = handle;
+        return samp;
+    }
 }
 
 void* MetalBackend::buffer_map(Buffer* b) {
     auto* mb = static_cast<MtlBuffer*>(b);
-    return mb->mapped; // nullptr at M0 — full impl at M1
+    return mb ? mb->mapped : nullptr;
 }
 void MetalBackend::buffer_unmap(Buffer* /*b*/) {
     // no-op stub
@@ -594,6 +718,17 @@ bool MetalBackend::texture_readback_mip0(Texture* base_tex,
 
     @autoreleasepool {
         id<MTLTexture> h = tex->handle;
+        // [MTLTexture getBytes:...] is only valid for CPU-readable storage
+        // (Shared / Managed). A GPU-private texture — e.g. a Sampled-only
+        // texture with no transfer usage, or how a paravirtualised CI GPU backs
+        // one — cannot be read directly; getBytes would trip Metal's validation
+        // and abort the process. Fail cleanly instead. (Apple Silicon unified
+        // memory usually makes textures Shared, so this path is hit mainly on
+        // virtualised CI runners, not on real hardware.)
+        if (h.storageMode == MTLStorageModePrivate ||
+            h.storageMode == MTLStorageModeMemoryless) {
+            return false;
+        }
         const NSUInteger w = h.width;
         const NSUInteger hh = h.height;
         // bpp inferred from the texture's MTLPixelFormat. We only handle
@@ -622,21 +757,17 @@ bool MetalBackend::texture_readback_mip0(Texture* base_tex,
 // ─── Render-encoder API (lane09-001 unblock) ────────────────────────────
 //
 // Cross-lane handshake: lane 08's psynder::shader::PipelineHandle is a
-// uint32_t id keyed in its local registry — it does NOT yet expose the
-// underlying MTLRenderPipelineState. Lane 07 maintains a small shim
-// registry of (PipelineHandle.id → id<MTLRenderPipelineState>) that
-// lane 08 populates once it grows the build step. Until lane 08 starts
-// publishing pipelines through psynder::gpu::mtl::register_render_pso()
-// (see header below), bind_pipeline is effectively a no-op — the encoder
-// still runs (set_viewport / draw etc. are valid against a nil PSO; they
-// won't render but won't crash either). Issue against lane 08 captures
-// the registration ABI.
+// uint32_t id keyed in its local registry. Lane 07 maintains a small shim
+// registry of (PipelineHandle.id -> id<MTLRenderPipelineState>) that
+// lane 08 populates after it builds a backend PSO. If a handle has not
+// been published yet, bind_pipeline is effectively a no-op: the encoder
+// still runs, but draw calls skip because no PSO is bound.
 
 namespace pipeline_shim {
 
-// Single-process registry, populated by lane 08 once it grows Metal PSO
-// emission. Keyed by PipelineHandle.id (uint32_t). Held in a flat array
-// because PipelineHandle ids are dense (lane 08 hands them out 1, 2, 3...).
+// Single-process registry populated by lane 08's Metal PSO emission.
+// Keyed by PipelineHandle.id (uint32_t). Held in a flat array because
+// PipelineHandle ids are dense (lane 08 hands them out 1, 2, 3...).
 // Max 64 entries is a generous M1/M2 ceiling — bumping is a one-line edit.
 //
 // Why plain `id` (not id<MTLRenderPipelineState>): Clang's Obj-C parser
@@ -652,6 +783,10 @@ struct Entry {
     id            render_pso  = nil;   // id<MTLRenderPipelineState>
     id            compute_pso = nil;   // id<MTLComputePipelineState>
     MTLSize       compute_tgs = MTLSizeMake(1, 1, 1);
+    // Triangle fill mode requested by the GraphicsPipelineDesc. Stored here
+    // (not on the PSO) because Metal applies fill mode at the encoder, not
+    // in MTLRenderPipelineState. bind_pipeline replays it onto the encoder.
+    bool          fill_lines  = false;
 };
 
 static Entry  g_entries[kMaxPipelines] = {};
@@ -671,13 +806,14 @@ static Entry* find_locked(std::uint32_t needle) {
 
 } // namespace pipeline_shim
 
-// Public-but-lane-internal hooks lane 08 will call once it ships Metal
-// pipeline-state emission. Declared `extern "C"` to keep the symbol
-// stable across lane builds without dragging mtl-specific headers into
-// lane 08's TU. Lane 08 declares the prototype locally + links.
+// Public-but-lane-internal hooks lane 08 calls after Metal pipeline-state
+// emission. Declared `extern "C"` to keep the symbol stable across lane
+// builds without dragging mtl-specific headers into lane 08's TU. Lane 08
+// declares the prototype locally + links.
 extern "C" {
 
-void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) {
+void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso,
+                                        bool fill_wireframe) {
     // ARC is OFF for this TU (per CMakeLists: -fno-objc-arc), so we can
     // bridge-cast a raw void* to a strong reference and assign without
     // ownership semantics getting in the way. The caller (lane 08) must
@@ -691,6 +827,7 @@ void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) 
     auto& cnt = pipeline_shim::g_count;
     if (auto* e = pipeline_shim::find_locked(handle_id)) {
         e->render_pso = pso;
+        e->fill_lines = fill_wireframe;
         return;
     }
     if (cnt >= pipeline_shim::kMaxPipelines) {
@@ -699,6 +836,7 @@ void psynder_gx_mtl_register_render_pso(std::uint32_t handle_id, void* mtl_pso) 
     }
     s[cnt].handle_id  = handle_id;
     s[cnt].render_pso = pso;
+    s[cnt].fill_lines = fill_wireframe;
     ++cnt;
 }
 
@@ -795,6 +933,7 @@ void MetalBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
                 a.clear_rgba[2], a.clear_rgba[3]);
         }
 
+        bool has_depth = false;
         if (desc.depth.target) {
             id<MTLTexture> dtex = static_cast<MtlTexture*>(desc.depth.target)->handle;
             if (dtex) {
@@ -802,6 +941,7 @@ void MetalBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
                 rpd.depthAttachment.loadAction  = to_mtl_load (desc.depth.load);
                 rpd.depthAttachment.storeAction = to_mtl_store(desc.depth.store);
                 rpd.depthAttachment.clearDepth  = desc.depth.clear_depth;
+                has_depth = true;
             }
         }
 
@@ -816,6 +956,13 @@ void MetalBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
         // for frame_.drawable / frame_.command_buffer above, ~L294/L300.)
         c->encoder = [[c->cb renderCommandEncoderWithDescriptor:rpd] retain];
         c->encoder.label = @"psy::gpu user pass";
+        if (c->bound_render_pso) {
+            [c->encoder setRenderPipelineState:c->bound_render_pso];
+            [c->encoder setTriangleFillMode:c->bound_fill_mode];
+        }
+        if (has_depth && depth_state_) {
+            [c->encoder setDepthStencilState:depth_state_];
+        }
         // Suppress the M0 auto-clear: cmd_submit's frame_.encoded_clear gate
         // is per-frame; flipping it here means subsequent cmd_submit
         // calls won't emit the default animated-clear pass.
@@ -834,6 +981,7 @@ void MetalBackend::end_render(CmdBuffer* cmd) {
         [c->encoder release];
         c->encoder = nil;
         c->bound_render_pso = nil;
+        c->bound_fill_mode  = MTLTriangleFillModeFill;
         c->index_mtl        = nil;
     }
 }
@@ -878,6 +1026,7 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     id  shim_render_pso  = nil;
     id  shim_compute_pso = nil;
     MTLSize shim_tgs     = MTLSizeMake(1, 1, 1);
+    bool shim_fill_lines = false;
     bool found = false;
     {
         std::lock_guard<std::mutex> _(pipeline_shim::g_mu);
@@ -885,15 +1034,15 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
             shim_render_pso  = entry->render_pso;
             shim_compute_pso = entry->compute_pso;
             shim_tgs         = entry->compute_tgs;
+            shim_fill_lines  = entry->fill_lines;
             found = true;
         }
     }
     if (!found) {
-        // Lane 08 hasn't published a Metal PSO for this handle yet. This
-        // is the expected state today: lane 08 only emits Metal IR blobs,
-        // not state objects. Render lanes that hit this path will see
-        // their pass run but produce no fragments. Logged once per
-        // unique id so the diagnostic isn't spammy.
+        // Lane 08 has not published a Metal PSO for this handle. Render
+        // lanes that hit this path will see their pass run but produce no
+        // fragments. Logged once per unique id so the diagnostic isn't
+        // spammy.
         static std::uint32_t s_last_warned_id = 0;
         if (h.id != s_last_warned_id) {
             std::fprintf(stderr,
@@ -914,9 +1063,17 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     id<MTLRenderPipelineState>  render_pso  = static_cast<id<MTLRenderPipelineState>>(shim_render_pso);
     id<MTLComputePipelineState> compute_pso = static_cast<id<MTLComputePipelineState>>(shim_compute_pso);
 
+    // Fill mode is encoder state, not pipeline state. Always resolve it for
+    // the bound pipeline so binding a Solid pipeline after a Wireframe one
+    // resets the encoder back to a filled raster (and vice-versa).
+    const MTLTriangleFillMode fill =
+        shim_fill_lines ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
+
     if (c->encoder && render_pso) {
         c->bound_render_pso = render_pso;
+        c->bound_fill_mode  = fill;
         [c->encoder setRenderPipelineState:render_pso];
+        [c->encoder setTriangleFillMode:fill];
     }
     if (c->compute_encoder && compute_pso) {
         c->bound_compute_pso = compute_pso;
@@ -926,6 +1083,7 @@ void MetalBackend::bind_pipeline(CmdBuffer* cmd, ::psynder::shader::PipelineHand
     // If neither encoder is open yet, stash for the next encode-open.
     if (!c->encoder && !c->compute_encoder) {
         c->bound_render_pso  = render_pso;
+        c->bound_fill_mode   = fill;
         c->bound_compute_pso = compute_pso;
         c->compute_tgs       = shim_tgs;
     }

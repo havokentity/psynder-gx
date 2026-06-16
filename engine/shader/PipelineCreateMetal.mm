@@ -44,7 +44,7 @@
 // ─── Lane-07 registration shims (extern "C" symbols defined in
 //     engine/gpu/mtl/MetalBackend.mm) ───────────────────────────────────
 extern "C" void psynder_gx_mtl_register_render_pso(
-    std::uint32_t handle_id, void* mtl_pso);
+    std::uint32_t handle_id, void* mtl_pso, bool fill_wireframe);
 
 extern "C" void psynder_gx_mtl_register_compute_pso(
     std::uint32_t handle_id, void* mtl_pso,
@@ -139,6 +139,18 @@ MTLVertexStepFunction to_mtl_step(VertexInputRate r) {
         : MTLVertexStepFunctionPerVertex;
 }
 
+MTLPixelFormat to_mtl_depth_format(std::uint8_t format) {
+    // Mirrors gpu::Format without depending on lane 07 headers here.
+    constexpr std::uint8_t kDepth32Float = 8;
+    constexpr std::uint8_t kDepth24UnormStencil8 = 9;
+    switch (format) {
+        case 0: return MTLPixelFormatInvalid;
+        case kDepth32Float: return MTLPixelFormatDepth32Float;
+        case kDepth24UnormStencil8: return MTLPixelFormatDepth24Unorm_Stencil8;
+    }
+    return MTLPixelFormatInvalid;
+}
+
 // Lane 07's MetalBackend.mm reserves Metal vertex-buffer slot 0 for
 // push-constants. Both the default and the user-supplied paths offset
 // caller slots by +1 so they sit at slot 1 (kVertexBufferSlot0) and up.
@@ -214,8 +226,14 @@ bool create_and_register_graphics_pso(
     const std::vector<std::uint8_t>&  fs_blob,
     const char*                       vs_entry,
     const char*                       fs_entry,
-    const VertexInputDesc&            vertex_input)
+    const VertexInputDesc&            vertex_input,
+    std::uint32_t                     color_format_count,
+    std::uint8_t                      depth_format,
+    bool                              enable_depth_write,
+    bool                              enable_blend,
+    bool                              fill_wireframe)
 {
+    (void)enable_depth_write; // Metal compare/write state is encoder-side.
     if (!ensure_device()) return false;
     if (vs_blob.empty() || fs_blob.empty()) return false;
 
@@ -249,17 +267,35 @@ bool create_and_register_graphics_pso(
         rpd.vertexFunction   = vs_fn;
         rpd.fragmentFunction = fs_fn;
 
-        // Color attachment 0 — must match lane 07's CAMetalLayer.pixelFormat
-        // verbatim or Metal validation triggers and rendering blanks.  Lane 07
-        // (engine/gpu/mtl/MetalBackend.mm, around line 260) configures the
-        // layer as MTLPixelFormatBGRA8Unorm — NOT the _sRGB variant.  Mirror
-        // that.  Switching to sRGB would require updating both sites and the
-        // sample shaders' gamma handling, which is M2 work.
-        rpd.colorAttachments[0].pixelFormat     = MTLPixelFormatBGRA8Unorm;
-        rpd.colorAttachments[0].blendingEnabled = NO;
+        if (color_format_count != 0) {
+            // Color attachment 0 — must match lane 07's CAMetalLayer.pixelFormat
+            // verbatim or Metal validation triggers and rendering blanks. Lane 07
+            // configures the layer as MTLPixelFormatBGRA8Unorm — NOT _sRGB.
+            rpd.colorAttachments[0].pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            rpd.colorAttachments[0].blendingEnabled = enable_blend ? YES : NO;
+            if (enable_blend) {
+                rpd.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+                rpd.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+                rpd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+                rpd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+                rpd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                rpd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            }
+        }
 
-        // No depth attachment for M1 forward-to-swapchain.
-        rpd.depthAttachmentPixelFormat   = MTLPixelFormatInvalid;
+        const MTLPixelFormat mtl_depth_format = to_mtl_depth_format(depth_format);
+        if (depth_format != 0 && mtl_depth_format == MTLPixelFormatInvalid) {
+            std::fprintf(stderr,
+                "[psy::shader::mtl] unsupported depth_format=%u for id=%u\n",
+                static_cast<unsigned>(depth_format), handle_id);
+            [rpd release];
+            if (vs_fn) [vs_fn release];
+            if (fs_fn) [fs_fn release];
+            [vs_lib release];
+            [fs_lib release];
+            return false;
+        }
+        rpd.depthAttachmentPixelFormat = mtl_depth_format;
         rpd.stencilAttachmentPixelFormat = MTLPixelFormatInvalid;
 
         // Vertex descriptor.
@@ -321,7 +357,10 @@ bool create_and_register_graphics_pso(
         // bridge-casts to id<MTLRenderPipelineState> on its side
         // (also -fno-objc-arc).  The lane-07 shim is itself mutex-guarded
         // (see psynder_gx_mtl_register_render_pso in MetalBackend.mm).
-        psynder_gx_mtl_register_render_pso(handle_id, (__bridge void*)pso);
+        // Triangle fill mode is render-command-encoder state in Metal (NOT
+        // part of the MTLRenderPipelineState), so the wireframe flag travels
+        // alongside the PSO into lane 07's shim and is applied at bind time.
+        psynder_gx_mtl_register_render_pso(handle_id, (__bridge void*)pso, fill_wireframe);
         return true;
     }
 }

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # psynder_editor_ipc — Lane 22. Owns: local HTTP + WebSocket server, msgpack protocol, IDL stub gen.
-psynder_add_lane(editor_ipc LINKS psynder_core psynder_scene psynder_editor_core)
+psynder_add_lane(editor_ipc LINKS psynder_core psynder_scene psynder_editor_core psynder_script)
 
 # Platform sockets. Server.cpp uses POSIX sockets on Mac+Linux and Winsock2
 # on Win32; `#pragma comment(lib, "Ws2_32.lib")` covers MSVC but clang-cl /

@@ -27,6 +27,8 @@
 #include <vector>
 #include <string>
 
+namespace psynder::scene { class World; }
+
 namespace psynder::render::pipeline {
 
 // ─── Vertex format for the M1 triangle / M2 PBR sphere path ─────────────
@@ -137,6 +139,26 @@ struct M1TriangleResources {
     std::uint32_t            index_count  = 0;
 };
 
+// ─── Builtin unit meshes (box / sphere / plane) ──────────────────────────
+//
+// Uploaded ONCE at create() (outside the frame loop — DESIGN §4.4 forbids
+// mid-frame GPU allocation). The ECS extract maps scene::Collider::kind to
+// one of these and lets the entity's TransformWS world matrix scale it.
+// Unit-sized so authored scale (baked into mtw) yields the right world
+// size: box spans ±0.5 on each axis, sphere has radius 0.5, plane is a
+// ±0.5 quad in the XZ plane (normal +Y). Index type is U16 throughout.
+struct BuiltinMesh {
+    gpu::Handle<gpu::Buffer> vertex_buffer;
+    gpu::Handle<gpu::Buffer> index_buffer;
+    std::uint32_t            vertex_count = 0;
+    std::uint32_t            index_count  = 0;
+};
+struct BuiltinMeshes {
+    BuiltinMesh box;
+    BuiltinMesh sphere;
+    BuiltinMesh plane;
+};
+
 // ─── View (per-frame camera + viewport + RT acceleration handle) ────────
 //
 // Public surface (PublicRenderPipeline.h) forward-declares this; we give
@@ -179,7 +201,16 @@ struct Pipeline {
     // M1 demo resources
     M1TriangleResources m1_triangle{};
 
+    // Builtin unit meshes the ECS extract draws scene props with.
+    BuiltinMeshes builtin_meshes{};
+
+    // The ECS world the extract walks. Defaults to scene::World::Get() at
+    // create(); the sample / tests can point it at an isolated world via
+    // set_extract_world(). Not owned.
+    scene::World* extract_world = nullptr;
+
     // Per-frame extracted draw list. extract() refills; render() consumes.
+    // Reserved once at create() so the steady-state walk never allocates.
     std::vector<Renderable> renderables;
 
     // Frame counter for diagnostics + animation
@@ -221,6 +252,10 @@ const Pipeline::PassStats& pipeline_stats(const Pipeline* p);
 bool upload_m1_triangle(Pipeline* p);
 void release_pipeline_resources(Pipeline* p);
 
+// BuiltinMeshes.cpp
+bool upload_builtin_meshes(Pipeline* p);
+void release_builtin_meshes(Pipeline* p);
+
 // LightCluster.cpp
 bool init_light_cluster(Pipeline* p);
 void encode_light_cluster_build(Pipeline* p, gpu::CmdBuffer* cmd, const View& view);
@@ -240,6 +275,13 @@ void encode_opaque(Pipeline* p, gpu::CmdBuffer* cmd, const View& view);
 
 // Extract.cpp
 void extract_renderables(Pipeline* p, const View& view);
+
+// Point the extract at a specific ECS world (defaults to scene::World::Get()).
+void set_extract_world(Pipeline* p, scene::World* world);
+
+// Estimated upper bound on renderables; renderables is reserved to this at
+// create() so the per-frame extract never grows the vector.
+constexpr std::size_t kRenderableReserve = 4096;
 
 // Returns the absolute filesystem path of a Slang source under
 // engine/render/pipeline/shaders/. The render-pipeline lane ships its

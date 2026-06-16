@@ -40,6 +40,7 @@ namespace psynder::ui::imm::detail {
 
 struct ImmVertex {
     f32 x, y;
+    f32 u, v;
     u32 rgba;    // packed 0xRRGGBBAA
 };
 
@@ -49,8 +50,8 @@ struct ImmVertex {
 // three gizmo rings + a handful of selection boxes + text labels.  The
 // underlying HostVisible buffer must be allocated with at least this size.
 
-inline constexpr u32 kImmMaxVertices = 8192;
-inline constexpr u32 kImmMaxIndices  = 24576;  // 3× vertices (worst case tris)
+inline constexpr u32 kImmMaxVertices = 65536;
+inline constexpr u32 kImmMaxIndices  = 196608;  // 3× vertices (worst case tris)
 
 // ─── GpuBatch ────────────────────────────────────────────────────────────
 
@@ -60,8 +61,14 @@ struct GpuBatch {
     psynder::shader::PipelineHandle pipeline{};          // copied; immutable once created
     psynder::gpu::Buffer*        vb         = nullptr;  // HostVisible vertex buffer
     psynder::gpu::Buffer*        ib         = nullptr;  // HostVisible index buffer
+    psynder::gpu::Texture*       texture    = nullptr;  // borrowed atlas/white texture
+    psynder::gpu::Sampler*       sampler    = nullptr;  // borrowed atlas sampler
     f32                          vp_width   = 1.0f;
     f32                          vp_height  = 1.0f;
+    f32                          shader_time_seconds = 0.0f;
+    f32                          shader_effect_strength = 0.0f;
+    f32                          white_u = 0.5f;
+    f32                          white_v = 0.5f;
 
     // ── Per-frame CPU scratch ─────────────────────────────────────────────
     std::array<ImmVertex, kImmMaxVertices> verts{};
@@ -83,8 +90,12 @@ struct GpuBatch {
         pipeline   = p;
         vb         = vertex_buf;
         ib         = index_buf;
+        texture    = nullptr;
+        sampler    = nullptr;
         vp_width   = (width  > 0.0f) ? width  : 1.0f;
         vp_height  = (height > 0.0f) ? height : 1.0f;
+        shader_time_seconds = 0.0f;
+        shader_effect_strength = 0.0f;
         vert_count  = 0;
         index_count = 0;
         frame_open  = true;
@@ -97,12 +108,18 @@ struct GpuBatch {
     }
 
     void push_quad(f32 x0, f32 y0, f32 x1, f32 y1, u32 colour) noexcept {
+        push_textured_quad(x0, y0, x1, y1, white_u, white_v, white_u, white_v, colour);
+    }
+
+    void push_textured_quad(f32 x0, f32 y0, f32 x1, f32 y1,
+                            f32 u0, f32 v0, f32 u1, f32 v1,
+                            u32 colour) noexcept {
         if (!reserve(4, 6)) return;
         const u32 base = vert_count;
-        verts[vert_count++] = {x0, y0, colour};
-        verts[vert_count++] = {x1, y0, colour};
-        verts[vert_count++] = {x1, y1, colour};
-        verts[vert_count++] = {x0, y1, colour};
+        verts[vert_count++] = {x0, y0, u0, v0, colour};
+        verts[vert_count++] = {x1, y0, u1, v0, colour};
+        verts[vert_count++] = {x1, y1, u1, v1, colour};
+        verts[vert_count++] = {x0, y1, u0, v1, colour};
         indices[index_count++] = base + 0;
         indices[index_count++] = base + 1;
         indices[index_count++] = base + 2;
@@ -163,17 +180,30 @@ inline void GpuBatch::flush() noexcept {
         }
     }
 
-    // TODO(lane-21): bind pipeline, set viewport-rcp push constant, and
-    // emit indexed draw call via cmd once the CmdBuffer API exposes
-    // bind_pipeline / push_constants / draw_indexed.  Those entry points
-    // land with lane 09 (render-pipeline).  Until then the geometry is
-    // uploaded but not drawn — smoke-test output is a transparent overlay,
-    // which is correct for M0 "no crash" acceptance.
-    //
-    // Cross-lane Issue: lane 09 must add draw_indexed + push_constants to
-    // CmdBuffer (or lane 07 must expose them on gpu::CmdBuffer directly).
-    // Filed as: "ui imm: wire bind_pipeline / draw_indexed once lane 09
-    // CmdBuffer API lands"
+    if (!pipeline.valid()) return;
+
+    struct PushConstants {
+        f32 viewport_rcp[2];
+        f32 time_seconds;
+        f32 effect_strength;
+    };
+    const PushConstants pc{
+        {2.0f / vp_width, 2.0f / vp_height},
+        shader_time_seconds,
+        shader_effect_strength,
+    };
+
+    psynder::gpu::bind_pipeline(cmd, pipeline);
+    if (texture && sampler) {
+        psynder::gpu::bind_texture(cmd, 0, texture, sampler);
+    }
+    psynder::gpu::push_constants(cmd,
+                                 &pc,
+                                 static_cast<u32>(sizeof(pc)),
+                                 psynder::gpu::ShaderStage::AllGfx);
+    psynder::gpu::bind_vertex_buffer(cmd, 0, vb, 0);
+    psynder::gpu::bind_index_buffer(cmd, ib, psynder::gpu::IndexType::U32, 0);
+    psynder::gpu::draw_indexed(cmd, index_count, 1, 0, 0, 0);
 }
 
 }  // namespace psynder::ui::imm::detail

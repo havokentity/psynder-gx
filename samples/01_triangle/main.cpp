@@ -28,38 +28,10 @@
 //   6. cmd_submit / end_frame present the result.
 //
 // What's gated on cross-lane handshakes still in flight:
-//   * The Metal PSO that bind_pipeline needs is registered into lane 07's
-//     pipeline_shim by lane 08 (see PublicGpu.h §"Render-encoder API"
-//     and mtl/MetalBackend.mm pipeline_shim). Until lane 08 ships that
-//     registration on main (the lane/08-pso-register branch hasn't
-//     merged yet), bind_pipeline against our PSO logs once and the
-//     draws never reach the rasterizer. sample01-002 tracks this.
-//   * Lane 07's M0/M1 create_buffer returns a stub MtlBuffer/VkBufferRes
-//     with no real backing memory and a nullptr from buffer_map; we
-//     attempt the upload, log the result, and continue. The CPU side of
-//     the M1 slice — window + device + pipeline compile + frame loop —
-//     all run regardless. sample01-001 tracks this.
-//   * Lane 07's MetalBackend.mm begin_render path autoreleases the
-//     MTLRenderCommandEncoder it stashes on the CmdBuffer wrapper
-//     without a [retain] (see mtl/MetalBackend.mm line ~615:
-//     `c->encoder = [c->cb renderCommandEncoderWithDescriptor:rpd]`).
-//     The pointer dangles after the @autoreleasepool drains at the
-//     end of begin_render, and Metal's runtime aborts the process on
-//     the eventual encoder dealloc with
-//       _MTLCommandEncoder dealloc: failed assertion `Command encoder
-//                                  released without endEncoding'
-//     Until lane 07 lands a fix (sample01-004 in INTEGRATION.txt),
-//     this sample DOES NOT call begin_render / set_viewport /
-//     bind_pipeline / push_constants / bind_vertex_buffer /
-//     bind_index_buffer / draw_indexed / end_render at all. It runs
-//     the bare cmd_open → cmd_submit pair instead, which lets the
-//     backend's M0 auto-clear (animated colour) encode + present, so
-//     the smoke-frame test exits 0 and the CPU walk through every
-//     other lane (jobs, math, gpu device, gpu buffer, gpu texture,
-//     gpu sampler, shader pipeline compile) still happens at startup.
-//     When sample01-004 lands the encoder calls drop straight in;
-//     the helper `encode_frame()` below is already written against
-//     the correct ABI surface and just needs to be re-enabled.
+//   * Nothing in the sample's primary draw loop. The earlier bring-up
+//     blockers for PSO registration, Metal buffer backing, and encoder
+//     lifetime are resolved on this integration branch, so CMake enables
+//     PSYNDER_GX_SAMPLE_01_USE_ENCODER for GPU builds.
 //
 // See samples/01_triangle/INTEGRATION.txt for the open issues this
 // sample defers to (sample01-001 .. sample01-004).
@@ -68,14 +40,18 @@
 //   --smoke-frames=N   Render N frames then exit 0 (for CI on Linux/Win
 //                      where there is no display). Mirrors sample_00_clear.
 //   --quiet            Suppress per-frame diagnostics.
+//   --console-open      Start with the engine-rendered console visible.
 //
 // Threading: every entry point is callable from the main thread only.
 
 #include "gpu/PublicGpu.h"
 #include "shader/PublicShader.h"
 
+#include "core/console/RuntimeConsole.h"
 #include "jobs/JobSystem.h"
 #include "math/Math.h"
+#include "platform/Platform.h"
+#include "ui/imm/RuntimeConsoleGpu.h"
 
 #if defined(PSYNDER_GX_PLATFORM_MACOS)
 #  include "platform/macos/PublicPlatformMacos.h"
@@ -90,6 +66,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <string_view>
 
 // ─── Sample-local types + constants ─────────────────────────────────────
 
@@ -98,6 +76,7 @@ namespace {
 struct Args {
     int  smoke_frames = 0;  // > 0 = run N frames then exit (CI mode)
     bool quiet        = false;
+    bool console_open = false;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -107,9 +86,28 @@ Args parse_args(int argc, char** argv) {
             a.smoke_frames = std::atoi(argv[i] + 15);
         } else if (std::strcmp(argv[i], "--quiet") == 0) {
             a.quiet = true;
+        } else if (std::strcmp(argv[i], "--console-open") == 0) {
+            a.console_open = true;
         }
     }
     return a;
+}
+
+std::string gpu_info_text(psynder::gpu::Device* dev, const char* backend) {
+    char buf[384]{};
+    std::snprintf(buf,
+                  sizeof(buf),
+                  "backend: %s\n"
+                  "device: %s\n"
+                  "unified_memory: %s\n"
+                  "raytracing: %s\n"
+                  "mesh_shaders: %s\n",
+                  backend,
+                  psynder::gpu::device_name(dev),
+                  psynder::gpu::device_is_unified_memory(dev) ? "yes" : "no",
+                  psynder::gpu::device_supports_rt(dev) ? "yes" : "no",
+                  psynder::gpu::device_supports_mesh_shaders(dev) ? "yes" : "no");
+    return std::string{buf};
 }
 
 // Vertex layout — matches engine/render/pipeline/Pipeline_internal::Vertex
@@ -198,9 +196,7 @@ static_assert(sizeof(PushConstants) == 128, "push-constant block must be 128 byt
 // the world-Y axis. Right-handed, column-major — matches lane 02's Math
 // conventions (look_at_rh + perspective_rh).
 //
-// [[maybe_unused]] because the only caller is encode_frame, which itself
-// is gated on PSYNDER_GX_SAMPLE_01_USE_ENCODER (sample01-004 fallback).
-[[maybe_unused]] static PushConstants compose_mvp(float angle_rad, float aspect) noexcept {
+static PushConstants compose_mvp(float angle_rad, float aspect) noexcept {
     namespace m = psynder::math;
     const m::Mat4 model = m::mul(
         m::translate({0.0f, 0.0f, 0.0f}),
@@ -399,14 +395,13 @@ void release_resources(SampleResources& r) {
 // caller drives begin_frame / cmd_open and the cmd_submit / end_frame
 // hand-off; we just fill the render pass.
 //
-// [[maybe_unused]] because the call site is currently gated on
-// PSYNDER_GX_SAMPLE_01_USE_ENCODER (see sample01-004 in INTEGRATION.txt).
-// When lane 07 ships the encoder retain fix, the call site re-enables
-// and the [[maybe_unused]] can come off in the same patch.
-[[maybe_unused]] void encode_frame(psynder::gpu::CmdBuffer* cb,
+void encode_frame(psynder::gpu::CmdBuffer* cb,
                                    const SampleResources&   r,
+                                   psynder::ui::imm::RuntimeConsoleGpu* console_overlay,
                                    std::uint32_t            width,
                                    std::uint32_t            height,
+                                   std::uint32_t            ui_width,
+                                   std::uint32_t            ui_height,
                                    float                    angle_rad)
 {
     namespace g = psynder::gpu;
@@ -472,6 +467,13 @@ void release_resources(SampleResources& r) {
                         /*first_index=*/0,
                         /*vertex_offset=*/0,
                         /*first_instance=*/0);
+    }
+
+    if (console_overlay) {
+        psynder::ui::imm::draw_runtime_console_gpu(cb,
+                                                   *console_overlay,
+                                                   static_cast<float>(ui_width),
+                                                   static_cast<float>(ui_height));
     }
 
     g::end_render(cb);
@@ -541,13 +543,127 @@ int main(int argc, char** argv) {
         psynder::jobs::JobSystem::Get().stop();
         return 1;
     }
+    psynder::ui::imm::RuntimeConsoleGpu console_overlay{};
+    const bool console_overlay_ok =
+        psynder::ui::imm::init_runtime_console_gpu(dev, console_overlay);
+    if (!console_overlay_ok && !args.quiet) {
+        std::fputs("[sample_01_triangle] runtime console overlay disabled\n", stderr);
+    }
 
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
-
     std::uint64_t frame_idx = 0;
+
+    psynder::console::init_runtime_console();
+    psynder::console::set_runtime_console_clipboard_setter([](std::string_view text) {
+        const std::string copy{text};
+        plat::set_clipboard_text(copy.c_str());
+    });
+    psynder::console::set_runtime_console_gpu_info_provider([dev] {
+        return gpu_info_text(dev, "Metal");
+    });
+    psynder::console::set_runtime_console_render_stats_provider(
+        [&frame_idx, &res, console_overlay_ok] {
+            char buf[256]{};
+            std::snprintf(buf,
+                          sizeof(buf),
+                          "frames: %llu\n"
+                          "pass: textured triangle\n"
+                          "pipeline: %s\n"
+                          "overlay: %s\n",
+                          static_cast<unsigned long long>(frame_idx),
+                          res.pipeline.valid() ? "valid" : "missing",
+                          console_overlay_ok ? "enabled" : "disabled");
+            return std::string{buf};
+        });
+    if (args.console_open) {
+        psynder::console::set_runtime_console_open(true);
+    }
+
     while (!plat::should_close(win)) {
         plat::pump_events();
+        auto* input = psynder::platform::input();
+        const bool toggle_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Tilde);
+        const bool escape_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Escape);
+        const bool enter_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Enter);
+        const bool backspace_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Backspace);
+        const bool history_prev_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Up);
+        const bool history_next_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Down);
+        const bool backspace_down =
+            input && input->key_down(psynder::platform::KeyCode::Backspace);
+        const bool history_prev_down =
+            input && input->key_down(psynder::platform::KeyCode::Up);
+        const bool history_next_down =
+            input && input->key_down(psynder::platform::KeyCode::Down);
+        const bool edit_left_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Left);
+        const bool edit_right_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Right);
+        const bool edit_left_down =
+            input && input->key_down(psynder::platform::KeyCode::Left);
+        const bool edit_right_down =
+            input && input->key_down(psynder::platform::KeyCode::Right);
+        const bool edit_home_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Home);
+        const bool edit_end_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::End);
+        const bool edit_delete_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Delete);
+        const bool shift_down =
+            input && (input->key_down(psynder::platform::KeyCode::LeftShift) ||
+                      input->key_down(psynder::platform::KeyCode::RightShift));
+        const bool tab_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Tab);
+        const psynder::platform::MouseState mouse =
+            input ? input->mouse() : psynder::platform::MouseState{};
+        const float console_scroll = mouse.wheel;
+        char console_text[128]{};
+        const std::size_t console_text_len =
+            plat::text_input_utf8(console_text, sizeof(console_text));
+        const auto console_shortcuts = plat::consume_console_shortcuts();
+        psynder::console::update_runtime_console(
+            psynder::console::RuntimeConsoleInput{
+                toggle_pressed,
+                escape_pressed,
+                enter_pressed,
+                backspace_pressed,
+                history_prev_pressed,
+                history_next_pressed,
+                backspace_down,
+                history_prev_down,
+                history_next_down,
+                edit_left_pressed,
+                edit_right_pressed,
+                edit_left_down,
+                edit_right_down,
+                edit_home_pressed,
+                edit_end_pressed,
+                edit_delete_pressed,
+                shift_down,
+                console_shortcuts.copy,
+                console_shortcuts.cut,
+                console_shortcuts.paste,
+                console_shortcuts.select_all,
+                tab_pressed,
+                console_scroll,
+                mouse.x,
+                mouse.y,
+                mouse.left,
+                static_cast<float>(plat::point_width(win)),
+                static_cast<float>(plat::point_height(win)),
+                std::string_view{console_shortcuts.paste_text ?
+                                     console_shortcuts.paste_text : ""},
+                std::string_view{console_text, console_text_len}});
+        psynder::console::pump_runtime_console();
+        if (psynder::console::consume_runtime_console_quit_requested()) {
+            plat::request_close(win);
+        }
         if (!psynder::gpu::begin_frame(dev)) {
             psynder::gpu::resize_swapchain(dev,
                 plat::drawable_width(win),
@@ -560,17 +676,15 @@ int main(int argc, char** argv) {
             const float angle = t * 1.2f; // ~69 deg/s, smooth rotation
             encode_frame(cb,
                          res,
+                         console_overlay_ok ? &console_overlay : nullptr,
                          plat::drawable_width(win),
                          plat::drawable_height(win),
+                         plat::point_width(win),
+                         plat::point_height(win),
                          angle);
 #else
-            // sample01-004 fallback: lane 07's begin_render leaks the
-            // MTLRenderCommandEncoder without [retain], so issuing any
-            // encoder call from this sample aborts the process. Until
-            // the lane-07 fix lands we just open + submit a CmdBuffer
-            // and let the backend's M0 auto-clear (animated colour)
-            // encode the frame. See INTEGRATION.txt sample01-004 and
-            // the t0 reference below kept alive by the unused-attribute.
+            // Fallback for non-CMake or stripped smoke builds that do not
+            // define the sample's draw-path macro.
             (void)t0;
 #endif
             psynder::gpu::cmd_submit(dev, cb);
@@ -589,6 +703,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    psynder::ui::imm::shutdown_runtime_console_gpu(console_overlay);
+    psynder::console::set_runtime_console_clipboard_setter({});
+    psynder::console::set_runtime_console_gpu_info_provider({});
+    psynder::console::set_runtime_console_render_stats_provider({});
     release_resources(res);
     psynder::gpu::destroy_device(dev);
     plat::destroy_window(win);
@@ -684,14 +802,15 @@ int main(int argc, char** argv) {
             const float angle = t * 1.2f;
             encode_frame(cb,
                          res,
+                         nullptr,
+                         win->window_width(),
+                         win->window_height(),
                          win->window_width(),
                          win->window_height(),
                          angle);
 #else
-            // sample01-004 fallback — see the macOS branch above for the
-            // full explanation. Same lane-07 encoder retain bug applies
-            // on Vulkan; the safe path is to skip the encoder API
-            // entirely until lane 07 ships the fix.
+            // Fallback for non-CMake or stripped smoke builds that do not
+            // define the sample's draw-path macro.
             (void)t0;
 #endif
             psynder::gpu::cmd_submit(dev, cb);

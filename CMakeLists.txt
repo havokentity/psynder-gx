@@ -22,6 +22,7 @@ endif()
 option(PSYNDER_GX_EDITOR              "Build editor / sandbox mode + IPC server + React panels"  ON)
 option(PSYNDER_GX_DEDICATED_SERVER    "Build headless dedicated server (strips render/audio/editor)" OFF)
 option(PSYNDER_GX_BUILD_TOOLS         "Build offline tools (lm_pak, lm_cook_gx, lm_qbsp, lm_bake_gx)" ON)
+option(PSYNDER_GX_BUILD_PLAYER        "Build the PsyArcadeGX player executable"                      ON)
 option(PSYNDER_GX_BUILD_SAMPLES       "Build sample programs under samples/"                     ON)
 option(PSYNDER_GX_BUILD_TESTS         "Build unit / golden / netcode / bench tests"              ON)
 option(PSYNDER_GX_ENABLE_TRACY        "Enable Tracy profiler integration (debug builds default)" OFF)
@@ -49,12 +50,23 @@ option(PSYNDER_GX_ENABLE_MESH_SHADERS "Enable mesh-shader pipeline (Turing+, RDN
 if(PSYNDER_GX_DEDICATED_SERVER)
     set(PSYNDER_GX_EDITOR        OFF CACHE BOOL "" FORCE)
     set(PSYNDER_GX_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+    # tests/unit is a single monolithic Catch2 target that links the full
+    # client lane set (psynder_gpu / psynder_render_* / psynder_audio /
+    # psynder_ui_imm) and globs every *.cpp suite, including the gpu/render/
+    # audio/ui ones. Those lanes are stripped above, so in a dedicated build
+    # the test link carries dangling `-lpsynder_gpu …` flags for targets that
+    # were never added — `linux-dedicated-*` configures clean but fails at
+    # link. The dedicated preset is a shipping-server artifact, not a test
+    # host (suites run under the normal linux/mac/win presets), so force tests
+    # off here to keep the headless build green. See ARCH review / codex P0.
+    set(PSYNDER_GX_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
 endif()
 
 # Back-compat aliases so vendored Psynder code (which uses PSYNDER_*) still works.
 # Lane agents should write new code against PSYNDER_GX_*.
 set(PSYNDER_EDITOR            ${PSYNDER_GX_EDITOR})
 set(PSYNDER_BUILD_TOOLS       ${PSYNDER_GX_BUILD_TOOLS})
+set(PSYNDER_BUILD_PLAYER      ${PSYNDER_GX_BUILD_PLAYER})
 set(PSYNDER_BUILD_SAMPLES     ${PSYNDER_GX_BUILD_SAMPLES})
 set(PSYNDER_BUILD_TESTS       ${PSYNDER_GX_BUILD_TESTS})
 set(PSYNDER_ENABLE_TRACY      ${PSYNDER_GX_ENABLE_TRACY})
@@ -85,6 +97,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 # ─── Compiler warnings & sanitizers ───────────────────────────────────────
 include(CompilerWarnings)
 include(Sanitizers)
+include(HotLane)
 include(Dependencies)
 include(Lanes)
 include(Goldens)
@@ -178,6 +191,8 @@ add_subdirectory(engine/simd)
 add_subdirectory(engine/jobs)
 add_subdirectory(engine/asset)
 add_subdirectory(engine/scene)
+add_subdirectory(engine/ai)        # DOTS combat AI (flow-field pathing) — before gameplay (links it)
+add_subdirectory(engine/gameplay)  # FPS gameplay systems (health/damage/respawn, weapons, bots)
 # camera depends only on core+math; safe to add this early so dependent
 # lanes (samples, render) can `target_link_libraries(... psynder_camera)`.
 add_subdirectory(engine/camera)
@@ -198,6 +213,7 @@ if(NOT PSYNDER_GX_DEDICATED_SERVER)
 endif()
 
 add_subdirectory(engine/net)
+add_subdirectory(engine/match)  # server-authoritative match loop — links net + gameplay (after both)
 add_subdirectory(engine/script)
 
 if(NOT PSYNDER_GX_DEDICATED_SERVER)
@@ -211,6 +227,12 @@ if(PSYNDER_GX_EDITOR)
 endif()
 
 # ─── Tools / samples / tests ──────────────────────────────────────────────
+# apps/ holds both the GPU player (PsyArcadeGX, normal builds) and the headless
+# dedicated server (PsyServerGX, normal + dedicated builds); apps/CMakeLists.txt
+# gates each. Add it whenever we build runnable artifacts in either mode.
+if(PSYNDER_GX_BUILD_PLAYER OR PSYNDER_GX_DEDICATED_SERVER)
+    add_subdirectory(apps)
+endif()
 if(PSYNDER_GX_BUILD_TOOLS)
     add_subdirectory(tools)
 endif()
@@ -230,6 +252,7 @@ message(STATUS "  Dedicated server:   ${PSYNDER_GX_DEDICATED_SERVER}")
 message(STATUS "  Hardware RT:        ${PSYNDER_GX_ENABLE_RT}")
 message(STATUS "  Mesh shaders:       ${PSYNDER_GX_ENABLE_MESH_SHADERS}")
 message(STATUS "  Tools:              ${PSYNDER_GX_BUILD_TOOLS}")
+message(STATUS "  Player:             ${PSYNDER_GX_BUILD_PLAYER}")
 message(STATUS "  Samples:            ${PSYNDER_GX_BUILD_SAMPLES}")
 message(STATUS "  Tests:              ${PSYNDER_GX_BUILD_TESTS}")
 message(STATUS "  Tracy:              ${PSYNDER_GX_ENABLE_TRACY}")

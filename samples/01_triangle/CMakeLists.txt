@@ -21,15 +21,9 @@
 
 add_executable(sample_01_triangle main.cpp)
 
-# Enable the real M1 draw path (begin_render -> bind_pipeline -> draw_indexed)
-# on Vulkan targets. The sample defaults to the M0 clear-only fallback to dodge
-# a macOS-only Metal encoder-retain crash (sample01-004) -- that bug does not
-# exist on the Vulkan backend, and the PSO registration the draw needs is
-# provided by lane 08's pipeline_shim (lane/08-pso-register). Keep the fallback
-# on Apple until the Metal retain fix (lane/07-mtl-encoder-retain) lands.
-if(NOT APPLE)
-    target_compile_definitions(sample_01_triangle PRIVATE PSYNDER_GX_SAMPLE_01_USE_ENCODER)
-endif()
+# Enable the real M1 draw path:
+# begin_render -> bind_pipeline -> push_constants -> draw_indexed.
+target_compile_definitions(sample_01_triangle PRIVATE PSYNDER_GX_SAMPLE_01_USE_ENCODER)
 
 # Bake the shader's absolute source path so the runtime slangc compile (lane 08)
 # resolves it regardless of the process working directory. The path was
@@ -39,6 +33,8 @@ endif()
 # CMAKE_CURRENT_SOURCE_DIR uses forward slashes — slangc-friendly on Windows.
 target_compile_definitions(sample_01_triangle PRIVATE
     "PSYNDER_GX_SAMPLE_01_SHADER_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_textured.slang\"")
+target_compile_definitions(sample_01_triangle PRIVATE
+    "PSYNDER_GX_UI_IMM_SHADER_PATH=\"${CMAKE_SOURCE_DIR}/engine/ui/imm/shaders/imm_overlay.slang\"")
 
 target_link_libraries(sample_01_triangle PRIVATE
     psynder_common
@@ -60,6 +56,9 @@ if(TARGET psynder_gpu)
 endif()
 if(TARGET psynder_shader)
     target_link_libraries(sample_01_triangle PRIVATE psynder_shader)
+endif()
+if(TARGET psynder_ui_imm)
+    target_link_libraries(sample_01_triangle PRIVATE psynder_ui_imm)
 endif()
 
 # Make the shader source visible in IDE project trees so the slang file is

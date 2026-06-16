@@ -756,6 +756,21 @@ bool VulkanBackend::create_logical_device_(Device* dev) {
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
 
+    // Enable fillModeNonSolid when the GPU advertises it. This is the
+    // prerequisite for VK_POLYGON_MODE_LINE (wireframe debug draws). The
+    // pipeline lane (PipelineCreateVulkan.cpp) makes the identical query
+    // against the same VkPhysicalDevice and only emits LINE polygon mode
+    // when this feature is present, so the two stay in lockstep. We do NOT
+    // request wideLines — wireframe stays at lineWidth 1.0.
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(phys_, &supported);
+    VkPhysicalDeviceFeatures enabled{};
+    enabled.fillModeNonSolid = supported.fillModeNonSolid;
+    if (!supported.fillModeNonSolid) {
+        std::fputs("[psy::gpu::vk] fillModeNonSolid unsupported; wireframe fill "
+                   "mode will fall back to solid\n", stderr);
+    }
+
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.pNext                   = &f13;
@@ -763,6 +778,7 @@ bool VulkanBackend::create_logical_device_(Device* dev) {
     dci.pQueueCreateInfos       = &qci;
     dci.enabledExtensionCount   = static_cast<std::uint32_t>(dexts.size());
     dci.ppEnabledExtensionNames = dexts.data();
+    dci.pEnabledFeatures        = &enabled;
 
     VK_CHECK(vkCreateDevice(phys_, &dci, nullptr, &device_));
     volkLoadDevice(device_);
@@ -1002,6 +1018,56 @@ void barrier_to_color_attachment(VkCommandBuffer cb, VkImage img) {
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         0, 0, nullptr, 0, nullptr, 1, &b);
+}
+
+void barrier_to_depth_attachment(VkCommandBuffer cb, VkTextureRes* tex) {
+    if (!tex || tex->handle == VK_NULL_HANDLE) return;
+    if (tex->current_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL) return;
+
+    VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkAccessFlags        src_access = 0;
+    switch (tex->current_layout) {
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            src_stage  = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                       | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            src_access = VK_ACCESS_SHADER_READ_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            src_stage  = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            src_stage  = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            src_access = VK_ACCESS_TRANSFER_READ_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+            src_stage  = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                       | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                       | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            break;
+        default:
+            break;
+    }
+
+    VkImageMemoryBarrier b{};
+    b.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.srcAccessMask    = src_access;
+    b.dstAccessMask    = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                       | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    b.oldLayout        = tex->current_layout;
+    b.newLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    b.image            = tex->handle;
+    b.subresourceRange = {tex->aspect_mask ? tex->aspect_mask : VK_IMAGE_ASPECT_DEPTH_BIT,
+                          0, 1, 0, 1};
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    vkCmdPipelineBarrier(cb,
+        src_stage,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+            | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &b);
+    tex->current_layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 }
 
 void barrier_to_present(VkCommandBuffer cb, VkImage img) {
@@ -1255,6 +1321,50 @@ inline VkFormat to_vk_format_for_upload(Format f) {
     }
 }
 
+inline VkFormat to_vk_format_for_texture(Format f) {
+    switch (f) {
+        case Format::Rgba8Unorm:          return VK_FORMAT_R8G8B8A8_UNORM;
+        case Format::Rgba8Srgb:           return VK_FORMAT_R8G8B8A8_SRGB;
+        case Format::Bgra8Unorm:          return VK_FORMAT_B8G8R8A8_UNORM;
+        case Format::Bgra8Srgb:           return VK_FORMAT_B8G8R8A8_SRGB;
+        case Format::R8Unorm:             return VK_FORMAT_R8_UNORM;
+        case Format::Rgba16Float:         return VK_FORMAT_R16G16B16A16_SFLOAT;
+        case Format::Rgba32Float:         return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case Format::Depth32Float:        return VK_FORMAT_D32_SFLOAT;
+        case Format::Depth24UnormStencil8: return VK_FORMAT_D24_UNORM_S8_UINT;
+        case Format::R32Uint:             return VK_FORMAT_R32_UINT;
+        default:                          return VK_FORMAT_UNDEFINED;
+    }
+}
+
+inline bool is_depth_format(Format f) {
+    return f == Format::Depth32Float || f == Format::Depth24UnormStencil8;
+}
+
+inline VkImageAspectFlags attachment_aspect_for_format(Format f) {
+    return is_depth_format(f) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
+inline VkImageUsageFlags image_usage_for_texture(const TextureDesc& desc,
+                                                 bool has_initial_data) {
+    VkImageUsageFlags usage = 0;
+    if (has_initial_data || has_usage(desc.usage, TextureUsage::TransferDst))
+        usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (has_usage(desc.usage, TextureUsage::TransferSrc))
+        usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (has_usage(desc.usage, TextureUsage::Sampled) || has_initial_data)
+        usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (has_usage(desc.usage, TextureUsage::Storage))
+        usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (has_usage(desc.usage, TextureUsage::RenderTarget))
+        usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (has_usage(desc.usage, TextureUsage::DepthStencil) || is_depth_format(desc.format))
+        usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (usage == 0)
+        usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    return usage;
+}
+
 // Look up a memory type whose properties include every flag in `want`.
 // Returns UINT32_MAX when no matching type exists in the type_bits mask.
 inline std::uint32_t find_memory_type(VkPhysicalDevice phys,
@@ -1357,9 +1467,111 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
     auto* tex = new (std::nothrow) VkTextureRes();
     if (!tex) return nullptr;
 
-    // Fast path: no initial_data → preserve the M0 stub behaviour
-    // (handle / view / mem remain VK_NULL_HANDLE).
+    // Fast path: no initial_data still preserves the M0 stub behaviour for
+    // sampled/color textures, but depth attachments need real VkImage backing
+    // so dynamic rendering can bind them through RenderPassDesc.depth.target.
     if (desc.initial_data == nullptr) {
+        const bool wants_depth = has_usage(desc.usage, TextureUsage::DepthStencil)
+                              || is_depth_format(desc.format);
+        if (!wants_depth) {
+            return tex;
+        }
+        if (!is_depth_format(desc.format)) {
+            std::fputs("[psy::gpu::vk] create_texture: DepthStencil usage requires a depth format\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+        const VkFormat vk_fmt = to_vk_format_for_texture(desc.format);
+        if (vk_fmt == VK_FORMAT_UNDEFINED) {
+            std::fputs("[psy::gpu::vk] create_texture: unsupported depth format\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+        if (desc.width == 0 || desc.height == 0) {
+            std::fputs("[psy::gpu::vk] create_texture: depth texture width/height is 0\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+        if (device_ == VK_NULL_HANDLE || phys_ == VK_NULL_HANDLE) {
+            return tex;
+        }
+
+        VkImageCreateInfo ici{};
+        ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType     = VK_IMAGE_TYPE_2D;
+        ici.format        = vk_fmt;
+        ici.extent        = {desc.width, desc.height, 1u};
+        ici.mipLevels     = 1u;
+        ici.arrayLayers   = 1u;
+        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage         = image_usage_for_texture(desc, false);
+        ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkImage image = VK_NULL_HANDLE;
+        if (vkCreateImage(device_, &ici, nullptr, &image) != VK_SUCCESS) {
+            std::fputs("[psy::gpu::vk] create_texture: vkCreateImage(depth) failed\n", stderr);
+            delete tex;
+            return nullptr;
+        }
+
+        VkMemoryRequirements img_req{};
+        vkGetImageMemoryRequirements(device_, image, &img_req);
+        const std::uint32_t img_mt = find_memory_type(phys_, img_req.memoryTypeBits,
+                                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (img_mt == UINT32_MAX) {
+            std::fputs("[psy::gpu::vk] create_texture: no DEVICE_LOCAL memory type for depth image\n", stderr);
+            vkDestroyImage(device_, image, nullptr);
+            delete tex;
+            return nullptr;
+        }
+
+        VkMemoryAllocateInfo img_mai{};
+        img_mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        img_mai.allocationSize  = img_req.size;
+        img_mai.memoryTypeIndex = img_mt;
+        VkDeviceMemory img_mem = VK_NULL_HANDLE;
+        if (vkAllocateMemory(device_, &img_mai, nullptr, &img_mem) != VK_SUCCESS) {
+            std::fputs("[psy::gpu::vk] create_texture: vkAllocateMemory(depth image) failed\n", stderr);
+            vkDestroyImage(device_, image, nullptr);
+            delete tex;
+            return nullptr;
+        }
+        if (vkBindImageMemory(device_, image, img_mem, 0) != VK_SUCCESS) {
+            std::fputs("[psy::gpu::vk] create_texture: vkBindImageMemory(depth) failed\n", stderr);
+            vkFreeMemory(device_, img_mem, nullptr);
+            vkDestroyImage(device_, image, nullptr);
+            delete tex;
+            return nullptr;
+        }
+
+        VkImageViewCreateInfo vci{};
+        vci.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image            = image;
+        vci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format           = vk_fmt;
+        vci.components       = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+        vci.subresourceRange = {attachment_aspect_for_format(desc.format), 0, 1, 0, 1};
+
+        VkImageView view = VK_NULL_HANDLE;
+        if (vkCreateImageView(device_, &vci, nullptr, &view) != VK_SUCCESS) {
+            std::fputs("[psy::gpu::vk] create_texture: vkCreateImageView(depth) failed\n", stderr);
+            vkFreeMemory(device_, img_mem, nullptr);
+            vkDestroyImage(device_, image, nullptr);
+            delete tex;
+            return nullptr;
+        }
+
+        tex->handle             = image;
+        tex->view               = view;
+        tex->mem                = img_mem;
+        tex->device_for_destroy = device_;
+        tex->format             = vk_fmt;
+        tex->aspect_mask        = attachment_aspect_for_format(desc.format);
+        tex->current_layout     = VK_IMAGE_LAYOUT_UNDEFINED;
+        (void)dev;
         return tex;
     }
 
@@ -1404,10 +1616,7 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
     ici.arrayLayers   = 1u;
     ici.samples       = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (has_usage(desc.usage, TextureUsage::Storage))     ici.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-    if (has_usage(desc.usage, TextureUsage::RenderTarget))ici.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    if (has_usage(desc.usage, TextureUsage::TransferSrc)) ici.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ici.usage         = image_usage_for_texture(desc, true);
     ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -1656,6 +1865,9 @@ Texture* VulkanBackend::create_texture(Device* dev, const TextureDesc& desc) {
     tex->view               = view;
     tex->mem                = img_mem;
     tex->device_for_destroy = device_;
+    tex->format             = vk_fmt;
+    tex->aspect_mask        = VK_IMAGE_ASPECT_COLOR_BIT;
+    tex->current_layout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     (void)dev;
     return tex;
 }
@@ -2080,9 +2292,11 @@ void VulkanBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
 
     VkRenderingAttachmentInfo depth_info = {};
     bool                      has_depth = false;
+    VkTextureRes*             depth_tex = nullptr;
     if (desc.depth.target) {
         auto* dt = static_cast<VkTextureRes*>(desc.depth.target);
         if (dt->view != VK_NULL_HANDLE) {
+            depth_tex               = dt;
             depth_info.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
             depth_info.imageView   = dt->view;
             depth_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
@@ -2097,6 +2311,12 @@ void VulkanBackend::begin_render(CmdBuffer* cmd, const RenderPassDesc& desc) {
     // Swapchain image needs layout transition before we render into it.
     if (to_swapchain_image && sc_image != VK_NULL_HANDLE) {
         barrier_to_color_attachment(w->cb, sc_image);
+    }
+    if (has_depth) {
+        barrier_to_depth_attachment(w->cb, depth_tex);
+        if (!to_swapchain_image && color_count == 0) {
+            extent = {depth_tex->desc.width, depth_tex->desc.height};
+        }
     }
 
     VkRenderingInfo ri{};

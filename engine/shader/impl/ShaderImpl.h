@@ -52,6 +52,13 @@ struct CachedPipeline {
     // Hot-reload re-passes this so the rebuilt PSO keeps the same vertex
     // descriptor (attr_count == 0 == default-layout fallback). POD-by-value.
     VertexInputDesc      vertex_input{};
+    std::uint32_t        color_format_count = 1;
+    std::uint8_t         depth_format = 0;
+    bool                 enable_depth_write = true;
+    bool                 enable_blend = false;
+    // Wireframe polygon fill (GraphicsPipelineDesc::fill_mode == Wireframe).
+    // Cached so hot-reload rebuilds the PSO with the same rasterization mode.
+    bool                 fill_wireframe = false;
 };
 
 // ─── Registry (global singleton for this translation unit) ────────────────

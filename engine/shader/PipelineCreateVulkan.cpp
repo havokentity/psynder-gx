@@ -96,6 +96,14 @@ struct DeferredGfx {
     std::vector<std::uint8_t>  fs;
     std::string                vs_entry;
     std::string                fs_entry;
+    std::uint32_t              color_format_count = 1;
+    std::uint8_t               depth_format = 0;
+    bool                       enable_depth_write = true;
+    bool                       enable_blend = false;
+    // Wireframe polygon fill (GraphicsPipelineDesc::fill_mode == Wireframe).
+    // Maps to VK_POLYGON_MODE_LINE when fillModeNonSolid is supported, else
+    // falls back to VK_POLYGON_MODE_FILL (logged once).
+    bool                       fill_wireframe = false;
     // Vertex input layout (lane 09 / sample01-003).  attr_count == 0
     // signals "use DefaultVertexLayout".  Stored by value because
     // VertexInputDesc is POD with fixed-size arrays (no heap).
@@ -136,6 +144,18 @@ VkVertexInputRate to_vk_input_rate(VertexInputRate r) {
     return (r == VertexInputRate::Instance)
         ? VK_VERTEX_INPUT_RATE_INSTANCE
         : VK_VERTEX_INPUT_RATE_VERTEX;
+}
+
+VkFormat to_vk_depth_format(std::uint8_t format) {
+    // Mirrors gpu::Format without depending on lane 07 headers.
+    constexpr std::uint8_t kDepth32Float = 8;
+    constexpr std::uint8_t kDepth24UnormStencil8 = 9;
+    switch (format) {
+        case 0: return VK_FORMAT_UNDEFINED;
+        case kDepth32Float: return VK_FORMAT_D32_SFLOAT;
+        case kDepth24UnormStencil8: return VK_FORMAT_D24_UNORM_S8_UINT;
+    }
+    return VK_FORMAT_UNDEFINED;
 }
 
 VkShaderModule make_module(const std::vector<std::uint8_t>& spirv) {
@@ -324,27 +344,72 @@ bool build_gfx_now(const DeferredGfx& d) {
     rs.polygonMode  = VK_POLYGON_MODE_FILL;
     rs.cullMode     = VK_CULL_MODE_NONE;  // M1: no culling, deferred to M2
     rs.frontFace    = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // lineWidth stays 1.0 — wider strokes need the wideLines feature which
+    // we deliberately do not require. VK_POLYGON_MODE_LINE only needs the
+    // fillModeNonSolid feature, which VulkanBackend.cpp enables when the
+    // GPU advertises it. We query the SAME physical-device feature here so
+    // the polygon mode matches what the device was actually created with;
+    // when unsupported we fall back to FILL (logged once, no crash).
     rs.lineWidth    = 1.0f;
+    if (d.fill_wireframe) {
+        VkPhysicalDeviceFeatures feats{};
+        if (g_ctx.phys != VK_NULL_HANDLE) {
+            vkGetPhysicalDeviceFeatures(g_ctx.phys, &feats);
+        }
+        if (feats.fillModeNonSolid) {
+            rs.polygonMode = VK_POLYGON_MODE_LINE;
+        } else {
+            static bool s_warned = false;
+            if (!s_warned) {
+                std::fprintf(stderr,
+                    "[psy::shader::vk] fillModeNonSolid unsupported — wireframe "
+                    "pipeline (id=%u) falls back to solid fill\n", d.id);
+                s_warned = true;
+            }
+        }
+    }
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+    const VkFormat depth_format = to_vk_depth_format(d.depth_format);
+    if (d.depth_format != 0 && depth_format == VK_FORMAT_UNDEFINED) {
+        std::fprintf(stderr,
+            "[psy::shader::vk] unsupported depth_format=%u for id=%u\n",
+            static_cast<unsigned>(d.depth_format), d.id);
+        vkDestroyShaderModule(g_ctx.device, vs_mod, nullptr);
+        vkDestroyShaderModule(g_ctx.device, fs_mod, nullptr);
+        vkDestroyPipelineLayout(g_ctx.device, layout, nullptr);
+        return false;
+    }
+    const bool has_depth = depth_format != VK_FORMAT_UNDEFINED;
+
     VkPipelineDepthStencilStateCreateInfo dss{};
     dss.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    dss.depthTestEnable  = VK_FALSE;   // M1 forward pass to swapchain has no depth attachment
-    dss.depthWriteEnable = VK_FALSE;
+    dss.depthTestEnable  = has_depth ? VK_TRUE : VK_FALSE;
+    dss.depthWriteEnable = (has_depth && d.enable_depth_write) ? VK_TRUE : VK_FALSE;
     dss.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    const std::uint32_t color_count = d.color_format_count == 0 ? 0u : 1u;
 
     VkPipelineColorBlendAttachmentState att{};
     att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
                        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    att.blendEnable = VK_FALSE;
+    att.blendEnable = d.enable_blend ? VK_TRUE : VK_FALSE;
+    if (d.enable_blend) {
+        att.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        att.colorBlendOp = VK_BLEND_OP_ADD;
+        att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        att.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
 
     VkPipelineColorBlendStateCreateInfo cbs{};
     cbs.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cbs.attachmentCount = 1;
-    cbs.pAttachments    = &att;
+    cbs.attachmentCount = color_count;
+    cbs.pAttachments    = color_count ? &att : nullptr;
 
     VkDynamicState dyn_states[2] = {
         VK_DYNAMIC_STATE_VIEWPORT,
@@ -361,9 +426,9 @@ bool build_gfx_now(const DeferredGfx& d) {
     VkFormat color_fmts[1] = { g_ctx.swapchain_color_fmt };
     VkPipelineRenderingCreateInfo prc{};
     prc.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    prc.colorAttachmentCount    = 1;
-    prc.pColorAttachmentFormats = color_fmts;
-    prc.depthAttachmentFormat   = VK_FORMAT_UNDEFINED; // no depth for M1 swapchain
+    prc.colorAttachmentCount    = color_count;
+    prc.pColorAttachmentFormats = color_count ? color_fmts : nullptr;
+    prc.depthAttachmentFormat   = depth_format;
 
     VkGraphicsPipelineCreateInfo gpi{};
     gpi.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -472,7 +537,12 @@ bool create_and_register_graphics_pso(
     const std::vector<std::uint8_t>&  fs_blob,
     const char*                       vs_entry,
     const char*                       fs_entry,
-    const VertexInputDesc&            vertex_input)
+    const VertexInputDesc&            vertex_input,
+    std::uint32_t                     color_format_count,
+    std::uint8_t                      depth_format,
+    bool                              enable_depth_write,
+    bool                              enable_blend,
+    bool                              fill_wireframe)
 {
     if (vs_blob.empty() || fs_blob.empty()) return false;
     std::lock_guard<std::mutex> lock(g_ctx_mu);
@@ -485,6 +555,11 @@ bool create_and_register_graphics_pso(
         d.fs       = fs_blob;
         d.vs_entry = vs_entry ? vs_entry : "vs_main";
         d.fs_entry = fs_entry ? fs_entry : "fs_main";
+        d.color_format_count = color_format_count;
+        d.depth_format = depth_format;
+        d.enable_depth_write = enable_depth_write;
+        d.enable_blend = enable_blend;
+        d.fill_wireframe = fill_wireframe;
         d.vi       = vertex_input;
         g_deferred_gfx.push_back(std::move(d));
         return true; // not failed — just pending
@@ -496,6 +571,11 @@ bool create_and_register_graphics_pso(
     d.fs       = fs_blob;
     d.vs_entry = vs_entry ? vs_entry : "vs_main";
     d.fs_entry = fs_entry ? fs_entry : "fs_main";
+    d.color_format_count = color_format_count;
+    d.depth_format = depth_format;
+    d.enable_depth_write = enable_depth_write;
+    d.enable_blend = enable_blend;
+    d.fill_wireframe = fill_wireframe;
     d.vi       = vertex_input;
     return build_gfx_now(d);
 }

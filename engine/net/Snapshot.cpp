@@ -38,7 +38,7 @@ PSY_FORCEINLINE f32 read_f32_le(const u8* p) noexcept {
 }  // namespace
 
 usize encode_snapshot(const SnapshotFrame& f, std::span<u8> out) noexcept {
-    const usize need = kSnapshotHeaderBytes + f.entities.size() * kSnapshotEntityBytes;
+    const usize need = encoded_snapshot_size(f);
     if (out.size() < need) return 0;
     u8* p = out.data();
     write_u32_le(p + 0, f.tick);

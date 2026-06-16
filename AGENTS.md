@@ -2,6 +2,10 @@
 
 When multiple agents work on Psynder-GX in parallel (the standard mode of operation — see [PLAN.md](PLAN.md) and the 25-lane carve-up), strict ownership prevents merge hell. This file is the load-bearing reference.
 
+## Base branch & lane flow (current — read first)
+
+**`nextgen/new-release` is the integration trunk.** Cut every lane branch **from `nextgen/new-release`** (not from `main`), and **merge it back into `nextgen/new-release`** when the lane's work is done and green. `nextgen/new-release` was cut from `codex/miniwave-dots-crate` — the de-facto main carrying the scene-on-ECS + Jolt hybrid-physics + roadmap work; `origin/main` is stale behind it. When the prototype is good enough, `nextgen/new-release` is promoted to `main` via a **single PR**. Lanes do **not** target `main` directly, and do not open PRs against `main`. The `Branch` column in the lane table below names each lane's branch; all of them base off `nextgen/new-release`.
+
 ## File ownership per lane
 
 Every parallel agent owns ONE directory plus its subdirectory `CMakeLists.txt`. **The agent never touches files outside its owned set.** Cross-cutting edits (top-level `CMakeLists.txt`, `CMakePresets.json`, `vcpkg.json`, root `cmake/*.cmake`, `.github/`, `.clang-*`, `LICENSE-*`, `README.md`, `DESIGN-PSYNDER-GX.md`, `AGENTS.md`, `PLAN.md`) are reserved for the orchestrator and are not in any lane.
@@ -29,6 +33,7 @@ If a lane agent finds it needs a file outside its ownership, **STOP** and docume
 | 15-physics-core       | `engine/physics/core/`        | `lane/15-physics-core`        | B |
 | 16-physics-vehicle    | `engine/physics/vehicle/`     | `lane/16-physics-vehicle`     | B |
 | 17-physics-destruction| `engine/physics/destruction/` | `lane/17-physics-destruction` | B |
+| 26-physics-agents     | `engine/physics/agents/`      | `lane/26-physics-agents`      | B |
 | 18-net                | `engine/net/` (excl. voice/)  | `lane/18-net`                 | B |
 | 19-net-voice          | `engine/net/voice/`           | `lane/19-net-voice`           | B |
 | 20-script             | `engine/script/`              | `lane/20-script`              | B |
@@ -37,6 +42,19 @@ If a lane agent finds it needs a file outside its ownership, **STOP** and docume
 | 23-platform-win32     | `engine/platform/win32/`      | `lane/23-platform-win32`      | B |
 | 24-platform-linux     | `engine/platform/linux/`      | `lane/24-platform-linux`      | B |
 | 25-platform-macos     | `engine/platform/macos/`      | `lane/25-platform-macos`      | B |
+| 27-camera             | `engine/camera/`              | `lane/27-camera`              | C |
+| 28-ai                 | `engine/ai/`                  | `lane/28-ai`                  | C |
+| 29-gameplay           | `engine/gameplay/`            | `lane/29-gameplay`            | C |
+| 30-worldstate         | `engine/worldstate/`          | `lane/30-worldstate`          | C |
+| 31-match              | `engine/match/`               | `lane/31-match`               | C |
+
+**Wave C (lanes 27–31)** are the gameplay / simulation lanes added during the
+`nextgen/new-release` prototype push, after the Wave A/B engine bring-up. They
+build directly on the existing lanes — `engine/ai` is added before
+`engine/gameplay` (which links it), and `engine/match` links `net` + `gameplay`
+(root `CMakeLists.txt` adds them in that dependency order). They are full,
+owned lanes for merge-safety purposes: one directory per agent, same rules as
+the rest of the table.
 
 The shared `engine/platform/CMakeLists.txt` (top-level platform dispatch) is **orchestrator-owned**; each platform lane owns only its OS-specific subdir.
 
@@ -89,7 +107,7 @@ You may freely edit internal headers (anything `_internal.h`, `Impl/*.h`, or `.c
 
 ## Integration branch
 
-The orchestrator maintains `integration/wave-N` as a periodically-rebased branch carrying every in-flight lane PR, for live user testing. Lane PRs target `main`; the orchestrator merges your branch into the integration branch as you push. You don't need to interact with it.
+`nextgen/new-release` is the integration branch for the current prototype push (see "Base branch & lane flow" at the top). Lane branches are cut from it and **merged back into it** as each agent finishes; the orchestrator promotes it to `main` via one PR when the prototype is ready. The older `integration/wave-N` branches are historical.
 
 ## Mac vs Win/Linux validation
 

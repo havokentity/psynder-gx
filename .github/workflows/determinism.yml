@@ -1,0 +1,143 @@
+name: determinism
+
+# Determinism is the engine's #1 pillar (DESIGN §14, ADR-019) and now rides on
+# Jolt, pinned by exact commit SHA in engine/physics/core/CMakeLists.txt. This
+# workflow exercises the golden / determinism / replay / lockstep test subset
+# on a platform matrix so cross-platform divergence (arm64 vs x86_64 FP, SIMD
+# code paths, STL hash ordering) surfaces in CI rather than in a live match.
+# Mirrors the job style of ci.yml. See ARCH-review B3 / GH #39.
+
+on:
+  push:
+    branches: [main, "nextgen/**", "integration/**", "lane/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: determinism-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Engine libs + tests only — no editor (Node/pnpm) or tools, no GPU samples
+  # are needed to prove deterministic ticking.
+  PSY_CMAKE_FLAGS: >-
+    -DPSYNDER_GX_BUILD_TOOLS=OFF
+    -DPSYNDER_GX_EDITOR=OFF
+    -DPSYNDER_GX_BUILD_SAMPLES=OFF
+    -DPSYNDER_GX_BUILD_TESTS=ON
+  # The golden/determinism/replay/lockstep ctest subset. Keep in sync with the
+  # [determinism] / [golden] Catch tags. CTest errors if 0 tests match, so a
+  # rename that drops the whole subset fails loud instead of silently skipping.
+  PSY_DETERMINISM_TESTS: "golden|determinism|deterministic|replay|lockstep"
+
+jobs:
+  # ── Authoritative platform: builds with the pinned Jolt SHA and runs the
+  #    deterministic test subset. This job is required to stay green. ──────────
+  mac:
+    name: macOS · Metal · arm64 · determinism
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Ninja
+        run: brew install ninja
+      - name: Configure (pinned Jolt SHA)
+        run: cmake --preset mac-release $PSY_CMAKE_FLAGS
+      - name: Build
+        run: cmake --build --preset mac-release
+      - name: Determinism / golden / replay tests
+        run: >-
+          ctest --preset mac-release
+          -R "$PSY_DETERMINISM_TESTS"
+          --output-on-failure
+
+  # ── Cross-platform divergence check — NOW REQUIRED. x86_64 Linux exercises
+  #    the SSE/AVX2 Jolt path + libstdc++ against the arm64 NEON / libc++ macOS
+  #    job above. Promoted off continue-on-error once the sim path (math + scene
+  #    broadphase, on top of physics/agents/ai/gameplay) was fully strict-FP and
+  #    this job had held green across consecutive pushes (ROADMAP item P). A
+  #    cross-platform divergence now fails the branch instead of being masked. ──
+  linux:
+    name: Linux · Vulkan · x86_64 · determinism
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install toolchain + Vulkan SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-17 ninja-build pkg-config \
+            libwayland-dev libwayland-bin wayland-protocols \
+            libx11-dev libxkbcommon-dev \
+            libxcb1-dev libxcb-randr0-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev libgl1-mesa-dev libpipewire-0.3-dev \
+            libpulse-dev libasound2-dev libudev-dev libevdev-dev \
+            libxcb-icccm4-dev libxcb-keysyms1-dev libxcb-xfixes0-dev
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+      - name: Configure (pinned Jolt SHA)
+        run: cmake --preset linux-release $PSY_CMAKE_FLAGS
+      - name: Build
+        run: cmake --build --preset linux-release
+      - name: Determinism / golden / replay tests
+        run: >-
+          ctest --preset linux-release
+          -R "$PSY_DETERMINISM_TESTS"
+          --output-on-failure
+
+  # ── Windows / MSVC STL divergence check — NOW REQUIRED. The MSVC STL orders
+  #    unordered containers differently from libc++ and /fp:strict differs from
+  #    Clang's model, classic cross-platform non-determinism. Promoted off
+  #    continue-on-error once the Vulkan SDK install unblocked configure and the
+  #    job held green across consecutive pushes (ROADMAP item P). An MSVC
+  #    divergence now fails the branch instead of being masked. ────────────────
+  windows:
+    name: Windows · x86_64 · determinism
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Ninja
+        run: choco install ninja -y
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          # The determinism build configures the full engine (incl. the gpu
+          # lane, which does find_package(Vulkan REQUIRED)), so the SDK must be
+          # present even though no determinism test touches the GPU. Mirror the
+          # silent LunarG install ci.yml uses — pin the same SDK version as the
+          # Linux apt source + DESIGN §2.2. Without this the Windows job failed
+          # at configure ("Could NOT find Vulkan") and was masked by
+          # continue-on-error; this unblocks it so the MSVC-STL divergence check
+          # can actually run.
+          $version = "1.3.296.0"
+          $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+          Invoke-WebRequest -Uri $url -OutFile vulkan-sdk.exe -UseBasicParsing
+          Start-Process -Wait -FilePath vulkan-sdk.exe -ArgumentList @(
+            "--accept-licenses",
+            "--default-answer",
+            "--confirm-command", "install"
+          )
+          "VULKAN_SDK=C:\VulkanSDK\$version"     | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "C:\VulkanSDK\$version\Bin"             | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Configure (pinned Jolt SHA)
+        shell: cmd
+        run: cmake --preset win-release %PSY_CMAKE_FLAGS%
+      - name: Build
+        shell: cmd
+        run: cmake --build --preset win-release
+      - name: Determinism / golden / replay tests
+        shell: cmd
+        run: ctest --preset win-release -R "%PSY_DETERMINISM_TESTS%" --output-on-failure

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Psynder-GX — WebSocket IPC server. Implements `Ipc.h`'s `Server` singleton:
-// 127.0.0.1:7654 (loopback only), RFC 6455 framing, msgpack payload (opaque
+// 127.0.0.1:7655 (loopback only), RFC 6455 framing, msgpack payload (opaque
 // bytes — this lane just moves them), one-directional engine→panel broadcast +
 // command-RPC pump.
 //
@@ -184,6 +184,23 @@ void set_nonblocking(socket_t s) {
 #else
     int flags = fcntl(s, F_GETFL, 0);
     if (flags >= 0) fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+void set_close_on_exec(socket_t s) {
+#if !defined(_WIN32)
+    int flags = fcntl(s, F_GETFD, 0);
+    if (flags >= 0) fcntl(s, F_SETFD, flags | FD_CLOEXEC);
+#else
+    (void)s;
+#endif
+}
+
+bool socket_error_is_addr_in_use(int err) {
+#if defined(_WIN32)
+    return err == WSAEADDRINUSE;
+#else
+    return err == EADDRINUSE;
 #endif
 }
 
@@ -427,6 +444,7 @@ void io_loop(ServerImpl& s) {
             PSY_SOCKLEN alen = sizeof(addr);
             socket_t c = ::accept(s.listen_sock, reinterpret_cast<sockaddr*>(&addr), &alen);
             if (c != kInvalidSocket) {
+                set_close_on_exec(c);
                 set_nonblocking(c);
                 int one = 1;
                 ::setsockopt(c, IPPROTO_TCP, TCP_NODELAY,
@@ -600,6 +618,7 @@ bool Server::start(const ServerDesc& desc) {
 
     s.listen_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s.listen_sock == kInvalidSocket) return false;
+    set_close_on_exec(s.listen_sock);
 
     int one = 1;
     ::setsockopt(s.listen_sock, SOL_SOCKET, SO_REUSEADDR,
@@ -614,9 +633,30 @@ bool Server::start(const ServerDesc& desc) {
                     &addr.sin_addr) != 1) {
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     }
-    if (::bind(s.listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    int bind_err = 0;
+    bool bound = false;
+    constexpr int kBindRetryCount = 80;
+    for (int attempt = 0; attempt < kBindRetryCount; ++attempt) {
+        if (::bind(s.listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            bound = true;
+            break;
+        }
+        bind_err = PSY_SOCK_LAST_ERR;
+        if (!socket_error_is_addr_in_use(bind_err)) {
+            break;
+        }
+        if (attempt == 0) {
+            std::fprintf(stderr,
+                         "[editor-ipc] bind waiting on %s:%u (err=%d)\n",
+                         desc.bind_host,
+                         unsigned(desc.port),
+                         bind_err);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!bound) {
         std::fprintf(stderr, "[editor-ipc] bind failed on %s:%u (err=%d)\n",
-                     desc.bind_host, unsigned(desc.port), PSY_SOCK_LAST_ERR);
+                     desc.bind_host, unsigned(desc.port), bind_err);
         PSY_CLOSESOCK(s.listen_sock);
         s.listen_sock = kInvalidSocket;
         return false;

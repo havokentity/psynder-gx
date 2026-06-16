@@ -60,6 +60,14 @@ endif()
 
 psynder_add_lane(script LINKS psynder_core psynder_scene psynder_lua)
 
+# Determinism: this lane hosts the behavior execution layer (behavior/
+# BehaviorSpine + BehaviorIR) that runs gameplay on the authoritative lockstep
+# tick. Strict FP keeps the IR interpreter (pure algebra + compares) bitwise
+# identical across arm64 / x86_64 / MSVC (DESIGN §14, ADR-018), matching the
+# other sim lanes. The Lua sources build as a separate target (psynder_lua) and
+# are unaffected.
+psynder_determinism_fp(psynder_script)
+
 # ─── Hook psynder_script onto the shared unit-test binary ────────────────
 # The shared `psynder_unit` target is created later in the build by lane 25
 # (tests/unit/CMakeLists.txt), so we cannot reference it at parse time of

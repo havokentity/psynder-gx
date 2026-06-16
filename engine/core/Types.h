@@ -34,14 +34,18 @@ inline constexpr usize kPage        = 4096;
 inline constexpr usize kHugePage    = 2 * 1024 * 1024;
 
 // ─── ECS handle types ────────────────────────────────────────────────────
-// An Entity is an opaque 32-bit handle. Top 8 bits are a generation counter
-// (to detect stale references); bottom 24 bits index the entity table.
-// See engine/scene/World.h for the full ECS contract.
+// An Entity is an opaque 64-bit handle. High 32 bits are a generation counter
+// (to detect stale references); low 32 bits index the entity table. The
+// 32-bit generation makes handle ABA effectively impossible even under heavy
+// slot recycling over a long match — the previous 8-bit counter aliased a
+// stale handle onto a live entity after only 256 recycles of a slot, a real
+// hazard for high-churn entities (bullets, effects) and a correctness/
+// determinism risk for lockstep netcode. See engine/scene/World.h.
 struct Entity {
-    u32 raw = 0;
+    u64 raw = 0;
     constexpr bool valid() const noexcept { return raw != 0; }
-    constexpr u32  index() const noexcept { return raw & 0x00FFFFFFu; }
-    constexpr u32  gen()   const noexcept { return raw >> 24; }
+    constexpr u32  index() const noexcept { return static_cast<u32>(raw & 0xFFFF'FFFFull); }
+    constexpr u32  gen()   const noexcept { return static_cast<u32>(raw >> 32); }
     constexpr bool operator==(const Entity& o) const noexcept = default;
 };
 inline constexpr Entity kInvalidEntity{};

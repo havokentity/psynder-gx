@@ -67,13 +67,19 @@ public:
     void release_refs(lua_State* L);
 
 private:
-    // Component name → id. We do NOT call scene::register_component here
+    // Component name <-> id. We do NOT call scene::register_component here
     // because doing so from script-land would race with the engine's POD
     // registration. Lane 06 will eventually expose a "look up by name"
     // shim; until then, scripts that need a component declare it via
     // `world:component('Position')` and we mint an id off our own table.
-    std::unordered_map<std::string, scene::ComponentId> names_;
-    std::vector<std::string>                            names_by_id_; // 0 unused
+    //
+    // The id is a STABLE function of the name (a name hash, see Registry.cpp),
+    // not the registration order, so it is bit-reproducible across runs / peers
+    // — required if script-defined components ever ride the lockstep snapshot
+    // path. Because ids are name-hashes (not 0,1,2,...) the reverse map is a
+    // hash table, not an index into a vector.
+    std::unordered_map<std::string, scene::ComponentId> names_;       // name -> id
+    std::unordered_map<scene::ComponentId, std::string> ids_to_name_; // id -> name
     std::vector<LuaSystem>                              systems_;
 };
 

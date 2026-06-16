@@ -1,0 +1,2 @@
+# Psynder-GX loose project manifest
+startup_scene = "game:/scenes/startup.scene.bin"

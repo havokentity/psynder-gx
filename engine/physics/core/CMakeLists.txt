@@ -6,9 +6,11 @@
 # See DESIGN-PSYNDER-GX.md §10.1.
 
 # ─── Vendor Jolt Physics (MIT) via FetchContent ──────────────────────────
-# Pin a stable release tag, not main. Sources land under
-# third_party/jolt/ so multiple build directories share one checkout and
-# the tree mirrors the layout PLAN §10.1 documents.
+# Pin an exact commit SHA (see FetchContent_Declare below), not a mutable
+# tag or main, so builds stay reproducible — determinism is the engine's #1
+# pillar and now rides on Jolt (ADR-019). Sources land under third_party/jolt/
+# so multiple build directories share one checkout and the tree mirrors the
+# layout PLAN §10.1 documents.
 #
 # Jolt's top-level CMake lives in its Build/ subdir; consumers point
 # FetchContent at SOURCE_SUBDIR Build to skip the rest of the upstream
@@ -111,10 +113,23 @@ if(PSYNDER_GX_VENDOR_JOLT AND NOT TARGET Jolt)
     # for the bootstrap. If the orchestrator later adds an ignore rule,
     # we can switch back to SOURCE_DIR third_party/jolt to dedupe across
     # build dirs.
+    # Determinism is the engine's #1 pillar and now rides on Jolt (ADR-019).
+    # Pin the EXACT upstream commit, not the mutable v5.5.0 tag — a tag can be
+    # force-moved or re-cut upstream, which would silently change physics
+    # behaviour and break bitwise lockstep replay. 23dadd0e is the commit that
+    # the v5.5.0 tag pointed at when this pin was made (verified via
+    # `git ls-remote --tags https://github.com/jrouwe/JoltPhysics.git v5.5.0`).
+    # Same source, same behaviour — just reproducible. Bump this SHA (and the
+    # comment) deliberately when upgrading Jolt, re-running the golden/
+    # determinism suite afterwards (ARCH-review B3, GH #39).
+    #
+    # GIT_SHALLOW is OFF here on purpose: a shallow fetch keyed on a raw SHA
+    # relies on the server honouring `fetch <sha>`, which is not universally
+    # supported and can fail mid-CI. A full fetch always resolves the SHA.
     FetchContent_Declare(JoltPhysics
         GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
-        GIT_TAG        v5.5.0
-        GIT_SHALLOW    TRUE
+        GIT_TAG        23dadd0e603f1b321142d4c74df07fce85064989 # v5.5.0
+        GIT_SHALLOW    FALSE
         SOURCE_SUBDIR  Build
     )
     # Jolt's Build/CMakeLists.txt calls check_ipo_supported() at configure
@@ -166,15 +181,12 @@ if(TARGET Jolt)
     target_compile_definitions(psynder_physics_core PRIVATE PSYNDER_GX_HAS_JOLT=1)
 endif()
 
-# ─── Determinism: physics TUs compiled without fast-math (DESIGN §14) ───
-# Combined with Jolt's CROSS_PLATFORM_DETERMINISTIC, this gives us bitwise
-# reproducible ticks across arm64 / x86_64 — required for lockstep replay.
-if(NOT MSVC)
-    target_compile_options(psynder_physics_core PRIVATE
-        -fno-fast-math
-        -ffp-contract=off
-    )
-endif()
+# ─── Determinism: physics TUs compiled with strict FP (DESIGN §14) ──────
+# Combined with Jolt's CROSS_PLATFORM_DETERMINISTIC, this gives bitwise
+# reproducible ticks across arm64 / x86_64 / MSVC — required for lockstep
+# replay. Centralized in cmake/HotLane.cmake so the MSVC `/fp:strict` branch
+# is never missed (it previously was, here, while the net lane had it).
+psynder_determinism_fp(psynder_physics_core)
 
 # ─── Hook this lane onto the shared unit-test binary ────────────────────
 # tests/unit/CMakeLists.txt is owned by lane 25 (tests) and built only

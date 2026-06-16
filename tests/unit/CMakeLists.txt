@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Unit tests. Catch2-based.
+#
+# Suites are globbed (CONFIGURE_DEPENDS) below + Catch2's catch_discover_tests,
+# so a new *.cpp is auto-registered on the next configure. Header-only suites
+# (e.g. shader_smoke_field.cpp, ADR-022/#44) need no extra link — psynder_math's
+# PUBLIC engine/ include resolves their headers transitively. Roadmap suites in
+# this directory:
+#   physics_lagcomp     (ADR-020 / #42: hitbox-history rewind / lag comp),
+#   destruction_fracture (ADR-021 / #45: deterministic precomputed fracture),
+#   shader_smoke_field  (ADR-022 / #44: VolumetricSmokeField),
+#   scene_replay, net_core, world_pvs, audio_positional_mix.
 file(GLOB SRC CONFIGURE_DEPENDS *.cpp)
 if(NOT SRC)
     set(STUB "${CMAKE_CURRENT_BINARY_DIR}/_stub.cpp")
@@ -20,6 +30,11 @@ if(TARGET Catch2::Catch2WithMain)
         psynder_gpu
         psynder_camera
         psynder_worldstate
+        psynder_physics_destruction
+        psynder_physics_agents
+        psynder_gameplay
+        psynder_ai
+        psynder_match
     )
     # psynder_editor_core is only built when the editor is enabled.
     if(TARGET psynder_editor_core)

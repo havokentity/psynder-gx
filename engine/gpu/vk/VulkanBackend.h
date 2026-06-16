@@ -35,6 +35,9 @@ struct VkTextureRes : Texture {
     VkImageView    view               = VK_NULL_HANDLE;
     VkDeviceMemory mem                = VK_NULL_HANDLE;
     VkDevice       device_for_destroy = VK_NULL_HANDLE;
+    VkFormat       format             = VK_FORMAT_UNDEFINED;
+    VkImageAspectFlags aspect_mask     = 0;
+    VkImageLayout  current_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
     ~VkTextureRes() override;
 };
 struct VkSamplerRes : Sampler {

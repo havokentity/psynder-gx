@@ -178,6 +178,15 @@ constexpr std::uint16_t effective_binding_stride(const VertexInputDesc& d,
     return static_cast<std::uint16_t>(s);
 }
 
+// Polygon rasterization mode. Solid is the default; Wireframe renders
+// triangle edges as lines (debug-draw outlines). On Metal this is
+// render-command-encoder state (setTriangleFillMode), applied at bind
+// time; on Vulkan it is VkPipelineRasterizationStateCreateInfo::polygonMode
+// (VK_POLYGON_MODE_LINE), which requires the fillModeNonSolid device
+// feature — the backend enables it when available and falls back to a
+// solid fill (logged once) when it is not.
+enum class FillMode { Solid, Wireframe };
+
 struct GraphicsPipelineDesc {
     const char* slang_path        = nullptr; // e.g. "shaders/forward.slang"
     const char* entry_point_vs    = "vs_main";
@@ -188,6 +197,7 @@ struct GraphicsPipelineDesc {
     std::uint8_t  depth_format       = 0; // Format::Depth32Float etc.
     bool          enable_depth_write = true;
     bool          enable_blend       = false;
+    FillMode      fill_mode          = FillMode::Solid;
     // Vertex input layout. Optional — when `vertex_input.attr_count == 0`
     // the backend builders fall back to the lane 08 default layout
     // (float3 pos + float3 normal + float2 uv, single buffer slot 0,

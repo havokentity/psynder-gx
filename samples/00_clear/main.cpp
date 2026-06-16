@@ -23,8 +23,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <string_view>
 
+#include "core/console/RuntimeConsole.h"
 #include "gpu/PublicGpu.h"
+#include "platform/Platform.h"
+#include "ui/imm/RuntimeConsoleGpu.h"
 
 #if defined(PSYNDER_GX_PLATFORM_MACOS)
 #  include "platform/macos/PublicPlatformMacos.h"
@@ -53,6 +58,60 @@ Args parse(int argc, char** argv) {
         }
     }
     return a;
+}
+
+std::string gpu_info_text(psynder::gpu::Device* dev, const char* backend) {
+    char buf[384]{};
+    std::snprintf(buf,
+                  sizeof(buf),
+                  "backend: %s\n"
+                  "device: %s\n"
+                  "unified_memory: %s\n"
+                  "raytracing: %s\n"
+                  "mesh_shaders: %s\n",
+                  backend,
+                  psynder::gpu::device_name(dev),
+                  psynder::gpu::device_is_unified_memory(dev) ? "yes" : "no",
+                  psynder::gpu::device_supports_rt(dev) ? "yes" : "no",
+                  psynder::gpu::device_supports_mesh_shaders(dev) ? "yes" : "no");
+    return std::string{buf};
+}
+
+void encode_console_overlay_clear(psynder::gpu::CmdBuffer* cmd,
+                                  psynder::ui::imm::RuntimeConsoleGpu& overlay,
+                                  std::uint32_t drawable_width,
+                                  std::uint32_t drawable_height,
+                                  std::uint32_t point_width,
+                                  std::uint32_t point_height) {
+    namespace g = psynder::gpu;
+    g::RenderPassDesc pass{};
+    pass.color_count = 1;
+    pass.colors[0].target = nullptr;
+    pass.colors[0].load = g::LoadOp::Clear;
+    pass.colors[0].store = g::StoreOp::Store;
+    pass.colors[0].clear_rgba[0] = 0.05f;
+    pass.colors[0].clear_rgba[1] = 0.07f;
+    pass.colors[0].clear_rgba[2] = 0.10f;
+    pass.colors[0].clear_rgba[3] = 1.0f;
+    pass.depth.target = nullptr;
+    pass.swapchain = true;
+
+    g::begin_render(cmd, pass);
+    g::set_viewport(cmd, g::Viewport{
+        0.0f, 0.0f,
+        static_cast<float>(drawable_width),
+        static_cast<float>(drawable_height),
+        0.0f, 1.0f});
+    g::set_scissor(cmd, g::Scissor{
+        0,
+        0,
+        drawable_width,
+        drawable_height});
+    psynder::ui::imm::draw_runtime_console_gpu(cmd,
+                                               overlay,
+                                               static_cast<float>(point_width),
+                                               static_cast<float>(point_height));
+    g::end_render(cmd);
 }
 
 } // namespace
@@ -102,8 +161,111 @@ int main(int argc, char** argv) {
     }
 
     std::uint64_t frame_idx = 0;
+    psynder::console::init_runtime_console();
+    psynder::console::set_runtime_console_clipboard_setter([](std::string_view text) {
+        const std::string copy{text};
+        plat::set_clipboard_text(copy.c_str());
+    });
+    psynder::console::set_runtime_console_gpu_info_provider([dev] {
+        return gpu_info_text(dev, "Metal");
+    });
+    psynder::console::set_runtime_console_render_stats_provider([&frame_idx] {
+        char buf[128]{};
+        std::snprintf(buf, sizeof(buf), "frames: %llu\npass: clear\n",
+                      static_cast<unsigned long long>(frame_idx));
+        return std::string{buf};
+    });
+    psynder::ui::imm::RuntimeConsoleGpu console_overlay{};
+    const bool console_overlay_ok =
+        psynder::ui::imm::init_runtime_console_gpu(dev, console_overlay);
+    if (!console_overlay_ok && !args.quiet) {
+        std::fputs("[sample_00_clear] runtime console overlay disabled\n", stderr);
+    }
+
     while (!plat::should_close(win)) {
         plat::pump_events();
+        auto* input = psynder::platform::input();
+        const bool toggle_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Tilde);
+        const bool escape_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Escape);
+        const bool enter_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Enter);
+        const bool backspace_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Backspace);
+        const bool history_prev_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Up);
+        const bool history_next_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Down);
+        const bool backspace_down =
+            input && input->key_down(psynder::platform::KeyCode::Backspace);
+        const bool history_prev_down =
+            input && input->key_down(psynder::platform::KeyCode::Up);
+        const bool history_next_down =
+            input && input->key_down(psynder::platform::KeyCode::Down);
+        const bool edit_left_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Left);
+        const bool edit_right_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Right);
+        const bool edit_left_down =
+            input && input->key_down(psynder::platform::KeyCode::Left);
+        const bool edit_right_down =
+            input && input->key_down(psynder::platform::KeyCode::Right);
+        const bool edit_home_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Home);
+        const bool edit_end_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::End);
+        const bool edit_delete_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Delete);
+        const bool shift_down =
+            input && (input->key_down(psynder::platform::KeyCode::LeftShift) ||
+                      input->key_down(psynder::platform::KeyCode::RightShift));
+        const bool tab_pressed =
+            input && input->key_pressed(psynder::platform::KeyCode::Tab);
+        const psynder::platform::MouseState mouse =
+            input ? input->mouse() : psynder::platform::MouseState{};
+        const float console_scroll = mouse.wheel;
+        char console_text[128]{};
+        const std::size_t console_text_len =
+            plat::text_input_utf8(console_text, sizeof(console_text));
+        const auto console_shortcuts = plat::consume_console_shortcuts();
+        psynder::console::update_runtime_console(
+            psynder::console::RuntimeConsoleInput{
+                toggle_pressed,
+                escape_pressed,
+                enter_pressed,
+                backspace_pressed,
+                history_prev_pressed,
+                history_next_pressed,
+                backspace_down,
+                history_prev_down,
+                history_next_down,
+                edit_left_pressed,
+                edit_right_pressed,
+                edit_left_down,
+                edit_right_down,
+                edit_home_pressed,
+                edit_end_pressed,
+                edit_delete_pressed,
+                shift_down,
+                console_shortcuts.copy,
+                console_shortcuts.cut,
+                console_shortcuts.paste,
+                console_shortcuts.select_all,
+                tab_pressed,
+                console_scroll,
+                mouse.x,
+                mouse.y,
+                mouse.left,
+                static_cast<float>(plat::point_width(win)),
+                static_cast<float>(plat::point_height(win)),
+                std::string_view{console_shortcuts.paste_text ?
+                                     console_shortcuts.paste_text : ""},
+                std::string_view{console_text, console_text_len}});
+        psynder::console::pump_runtime_console();
+        if (psynder::console::consume_runtime_console_quit_requested()) {
+            plat::request_close(win);
+        }
         if (!psynder::gpu::begin_frame(dev)) {
             // begin_frame can fail on OUT_OF_DATE_KHR / similar Metal surface
             // events (window resize, display change). Drive a swapchain
@@ -115,6 +277,15 @@ int main(int argc, char** argv) {
             continue;
         }
         if (auto* cmd = psynder::gpu::cmd_open(dev)) {
+            if (console_overlay_ok &&
+                psynder::ui::imm::runtime_console_gpu_wants_draw(console_overlay)) {
+                encode_console_overlay_clear(cmd,
+                                             console_overlay,
+                                             plat::drawable_width(win),
+                                             plat::drawable_height(win),
+                                             plat::point_width(win),
+                                             plat::point_height(win));
+            }
             psynder::gpu::cmd_submit(dev, cmd);
         }
         psynder::gpu::end_frame(dev);
@@ -131,6 +302,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    psynder::ui::imm::shutdown_runtime_console_gpu(console_overlay);
+    psynder::console::set_runtime_console_clipboard_setter({});
+    psynder::console::set_runtime_console_gpu_info_provider({});
+    psynder::console::set_runtime_console_render_stats_provider({});
     psynder::gpu::destroy_device(dev);
     plat::destroy_window(win);
     return 0;

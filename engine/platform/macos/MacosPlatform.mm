@@ -33,6 +33,7 @@
 #import <CoreAudio/CoreAudio.h>
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hid/IOHIDKeys.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 #include "MacosPlatform_internal.h"
 #include "MacosKeyMap.h"
@@ -55,8 +56,19 @@ RawMouseState& raw_mouse_state() {
     return s;
 }
 
+// FPS mouse-capture flag. When true the OS cursor is hidden + locked (see
+// set_mouse_captured): the IOKit HID X/Y accumulation is suppressed and the
+// relative deltas come from NSEvent.deltaX/deltaY instead, which keep flowing
+// while the cursor position is frozen and need no Input Monitoring grant.
+// Read from the IOKit callback thread, so it's atomic.
+static std::atomic<bool> g_mouse_captured{false};
+
 // ─── Keyboard state (main-thread-only) ──────────────────────────────────
 static KeyboardState g_keyboard_state;
+static char g_text_input[512];
+static std::size_t g_text_input_size = 0;
+static ConsoleShortcuts g_console_shortcuts;
+static std::string g_console_paste_text;
 
 const KeyboardState& keyboard_state() {
     return g_keyboard_state;
@@ -66,6 +78,9 @@ void keyboard_begin_frame() {
     // Clear the edge-triggered pressed[] array so only transitions THIS
     // frame come through. Called at the top of pump_events().
     __builtin_memset(g_keyboard_state.pressed, 0, sizeof(g_keyboard_state.pressed));
+    g_text_input_size = 0;
+    g_console_shortcuts = {};
+    g_console_paste_text.clear();
 }
 
 void keyboard_event(psynder::platform::KeyCode key, bool is_down) {
@@ -76,6 +91,51 @@ void keyboard_event(psynder::platform::KeyCode key, bool is_down) {
         g_keyboard_state.pressed[idx] = true;
     }
     g_keyboard_state.down[idx] = is_down;
+}
+
+void append_text_input(NSString* text) {
+    if (!text) return;
+    const char* utf8 = [text UTF8String];
+    if (!utf8) return;
+    while (*utf8 && g_text_input_size + 1u < sizeof(g_text_input)) {
+        const unsigned char c = static_cast<unsigned char>(*utf8++);
+        if (c >= 0x20u && c != 0x7Fu) {
+            g_text_input[g_text_input_size++] = static_cast<char>(c);
+        }
+    }
+}
+
+void capture_command_shortcut(NSEvent* event) {
+    if (event.type != NSEventTypeKeyDown) {
+        return;
+    }
+    NSString* chars = event.charactersIgnoringModifiers;
+    if (!chars || chars.length == 0) {
+        return;
+    }
+    const unichar c = [[chars lowercaseString] characterAtIndex:0];
+    switch (c) {
+        case 'c':
+            g_console_shortcuts.copy = true;
+            break;
+        case 'x':
+            g_console_shortcuts.cut = true;
+            break;
+        case 'a':
+            g_console_shortcuts.select_all = true;
+            break;
+        case 'v': {
+            NSPasteboard* pb = [NSPasteboard generalPasteboard];
+            NSString* s = [pb stringForType:NSPasteboardTypeString];
+            g_console_paste_text =
+                s ? std::string{[s UTF8String]} : std::string{};
+            g_console_shortcuts.paste = true;
+            g_console_shortcuts.paste_text = g_console_paste_text.c_str();
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 // ─── NSApp lazy bootstrap ───────────────────────────────────────────────
@@ -117,8 +177,13 @@ void iokit_input_value_cb(void* /*context*/, IOReturn /*result*/,
     auto& st = raw_mouse_state();
 
     if (usage_page == kHIDPage_GenericDesktop) {
+        // While the cursor is captured, NSEvent relative deltas are the single
+        // source of X/Y motion (see pump_events) — skip the IOKit X/Y path so
+        // the two don't double-count.
+        const bool captured = g_mouse_captured.load(std::memory_order_relaxed);
         switch (usage) {
             case kHIDUsage_GD_X: {
+                if (captured) break;
                 // Atomic accumulation. fetch_add isn't defined on double in
                 // C++20 atomics by default for all stdlib versions; do CAS.
                 double cur = st.accum_dx.load(std::memory_order_relaxed);
@@ -128,6 +193,7 @@ void iokit_input_value_cb(void* /*context*/, IOReturn /*result*/,
                 break;
             }
             case kHIDUsage_GD_Y: {
+                if (captured) break;
                 double cur = st.accum_dy.load(std::memory_order_relaxed);
                 while (!st.accum_dy.compare_exchange_weak(
                            cur, cur + static_cast<double>(raw),
@@ -165,6 +231,12 @@ CFDictionaryRef make_match_dict(uint32_t usage_page, uint32_t usage) {
     CFRelease(pageNum);
     CFRelease(useNum);
     return d;
+}
+
+void add_atomic_double(std::atomic<double>& target, double delta) {
+    double cur = target.load(std::memory_order_relaxed);
+    while (!target.compare_exchange_weak(
+               cur, cur + delta, std::memory_order_relaxed)) { /* retry */ }
 }
 
 } // namespace
@@ -213,6 +285,8 @@ RawMouseSnapshot raw_mouse_snapshot_and_reset() {
     out.dx          = st.accum_dx.exchange(0.0, std::memory_order_acq_rel);
     out.dy          = st.accum_dy.exchange(0.0, std::memory_order_acq_rel);
     out.wheel       = st.accum_wheel.exchange(0.0, std::memory_order_acq_rel);
+    out.x           = st.x.load(std::memory_order_relaxed);
+    out.y           = st.y.load(std::memory_order_relaxed);
     out.left_down   = st.left_down.load(std::memory_order_relaxed);
     out.right_down  = st.right_down.load(std::memory_order_relaxed);
     out.middle_down = st.middle_down.load(std::memory_order_relaxed);
@@ -442,6 +516,20 @@ void request_close(Window* w) {
     if (w) w->should_close.store(true, std::memory_order_relaxed);
 }
 
+void update_mouse_position_from_event(NSEvent* event) {
+    NSWindow* window = event.window;
+    if (!window) return;
+    NSView* view = window.contentView;
+    if (!view) return;
+
+    NSPoint p = [view convertPoint:event.locationInWindow fromView:nil];
+    const CGFloat h = view.bounds.size.height;
+    auto& st = raw_mouse_state();
+    st.x.store(static_cast<double>(p.x), std::memory_order_relaxed);
+    st.y.store(static_cast<double>(std::max<CGFloat>(0.0, h - p.y)),
+               std::memory_order_relaxed);
+}
+
 // Active window pointer for Esc → request_close. Set by run_loop; apps that
 // drive their own event loop should call set_esc_close_target() after
 // create_window if they want keyboard-Esc to dismiss the window.
@@ -451,6 +539,23 @@ Window* set_esc_close_target(Window* w) {
     Window* prev = g_esc_close_target;
     g_esc_close_target = w;
     return prev;
+}
+
+// FPS mouse capture. Hides the OS cursor and decouples it from the physical
+// mouse (CGAssociateMouseAndMouseCursorPosition(false)) so the pointer never
+// drifts off-window or hits a screen edge. While captured, relative motion is
+// sourced from NSEvent.deltaX/deltaY (see pump_events) since the cursor
+// position is frozen. Idempotent; pass false to restore.
+void set_mouse_captured(bool captured) {
+    if (captured == g_mouse_captured.load(std::memory_order_relaxed)) return;
+    g_mouse_captured.store(captured, std::memory_order_relaxed);
+    if (captured) {
+        CGDisplayHideCursor(kCGDirectMainDisplay);
+        CGAssociateMouseAndMouseCursorPosition(false);
+    } else {
+        CGAssociateMouseAndMouseCursorPosition(true);
+        CGDisplayShowCursor(kCGDirectMainDisplay);
+    }
 }
 
 void pump_events() {
@@ -468,6 +573,7 @@ void pump_events() {
             if (!event) break;
 
             const NSEventType type = event.type;
+            bool handled_by_engine = false;
 
             if (type == NSEventTypeKeyDown || type == NSEventTypeKeyUp) {
                 // keyCode is a uint16_t virtual keycode (HIToolbox constants).
@@ -475,10 +581,25 @@ void pump_events() {
                 const platform::KeyCode kc = vk_to_keycode(raw_vk);
                 const bool is_down = (type == NSEventTypeKeyDown);
                 keyboard_event(kc, is_down);
+                const bool command_modified =
+                    (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+                if (is_down && !command_modified) {
+                    append_text_input(event.characters);
+                } else if (is_down && command_modified) {
+                    capture_command_shortcut(event);
+                }
                 // Esc: signal the active window to close.
                 if (is_down && kc == platform::KeyCode::Escape && g_esc_close_target) {
                     request_close(g_esc_close_target);
                 }
+                // Game/text input is consumed by the engine. Forwarding plain
+                // keyDown events into AppKit makes NSWindow beep because the
+                // CAMetalLayer view has no native text responder.
+                handled_by_engine = !command_modified ||
+                    g_console_shortcuts.copy ||
+                    g_console_shortcuts.cut ||
+                    g_console_shortcuts.paste ||
+                    g_console_shortcuts.select_all;
             } else if (type == NSEventTypeFlagsChanged) {
                 // Modifier keys use FlagsChanged instead of KeyDown/KeyUp.
                 // Determine down/up by testing the relevant modifier flag.
@@ -497,12 +618,86 @@ void pump_events() {
                     default: break;
                 }
                 keyboard_event(kc, is_down);
+                handled_by_engine = true;
+            } else if (type == NSEventTypeScrollWheel) {
+                update_mouse_position_from_event(event);
+                add_atomic_double(raw_mouse_state().accum_wheel,
+                                  static_cast<double>(event.scrollingDeltaY));
+                handled_by_engine = true;
+            } else if (type == NSEventTypeMouseMoved ||
+                       type == NSEventTypeLeftMouseDragged ||
+                       type == NSEventTypeRightMouseDragged ||
+                       type == NSEventTypeOtherMouseDragged) {
+                update_mouse_position_from_event(event);
+                // While captured, the cursor position is frozen
+                // (CGAssociateMouseAndMouseCursorPosition(false)), so derive
+                // the relative motion from NSEvent's hardware deltas instead.
+                // Same sign convention as the IOKit HID path (right/down
+                // positive) and the same point scale as the cursor-position
+                // fallback, so aim sensitivity is unchanged.
+                if (g_mouse_captured.load(std::memory_order_relaxed)) {
+                    add_atomic_double(raw_mouse_state().accum_dx,
+                                      static_cast<double>(event.deltaX));
+                    add_atomic_double(raw_mouse_state().accum_dy,
+                                      static_cast<double>(event.deltaY));
+                }
+                handled_by_engine = true;
+            } else if (type == NSEventTypeLeftMouseDown ||
+                       type == NSEventTypeLeftMouseUp ||
+                       type == NSEventTypeRightMouseDown ||
+                       type == NSEventTypeRightMouseUp ||
+                       type == NSEventTypeOtherMouseDown ||
+                       type == NSEventTypeOtherMouseUp) {
+                update_mouse_position_from_event(event);
+                auto& st = raw_mouse_state();
+                if (type == NSEventTypeLeftMouseDown) {
+                    st.left_down.store(true, std::memory_order_relaxed);
+                } else if (type == NSEventTypeLeftMouseUp) {
+                    st.left_down.store(false, std::memory_order_relaxed);
+                } else if (type == NSEventTypeRightMouseDown) {
+                    st.right_down.store(true, std::memory_order_relaxed);
+                } else if (type == NSEventTypeRightMouseUp) {
+                    st.right_down.store(false, std::memory_order_relaxed);
+                } else if (type == NSEventTypeOtherMouseDown) {
+                    st.middle_down.store(true, std::memory_order_relaxed);
+                } else if (type == NSEventTypeOtherMouseUp) {
+                    st.middle_down.store(false, std::memory_order_relaxed);
+                }
+                handled_by_engine = true;
             }
 
-            [NSApp sendEvent:event];
+            if (!handled_by_engine) {
+                [NSApp sendEvent:event];
+            }
         } while (true);
         [NSApp updateWindows];
     }
+}
+
+std::size_t text_input_utf8(char* dst, std::size_t capacity) {
+    if (!dst || capacity == 0) {
+        return 0;
+    }
+    const std::size_t n = std::min(g_text_input_size, capacity - 1u);
+    if (n > 0) {
+        std::memcpy(dst, g_text_input, n);
+    }
+    dst[n] = '\0';
+    return n;
+}
+
+ConsoleShortcuts consume_console_shortcuts() {
+    g_console_shortcuts.paste_text = g_console_paste_text.c_str();
+    ConsoleShortcuts out = g_console_shortcuts;
+    g_console_shortcuts = {};
+    return out;
+}
+
+void set_clipboard_text(const char* text) {
+    NSPasteboard* pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    NSString* s = [NSString stringWithUTF8String:(text ? text : "")];
+    [pb setString:s forType:NSPasteboardTypeString];
 }
 
 std::uint64_t run_loop(Window* window, FrameCallback frame, void* frame_user) {
@@ -535,6 +730,8 @@ MouseDelta mouse_delta_raw() {
     out.dx          = s.dx;
     out.dy          = s.dy;
     out.wheel       = s.wheel;
+    out.x           = s.x;
+    out.y           = s.y;
     out.left_down   = s.left_down;
     out.right_down  = s.right_down;
     out.middle_down = s.middle_down;

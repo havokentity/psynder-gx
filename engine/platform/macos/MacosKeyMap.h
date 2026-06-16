@@ -72,6 +72,9 @@ namespace vk {
     static constexpr uint8_t kBackspace = 0x33;
     static constexpr uint8_t kEscape    = 0x35;
     static constexpr uint8_t kGrave     = 0x32;   // ` / ~ (tilde)
+    static constexpr uint8_t kHome      = 0x73;
+    static constexpr uint8_t kDelete    = 0x75;   // Forward delete
+    static constexpr uint8_t kEnd       = 0x77;
     // Modifiers (reported by FlagsChanged events)
     static constexpr uint8_t kLeftShift  = 0x38;
     static constexpr uint8_t kRightShift = 0x3C;
@@ -124,6 +127,9 @@ inline constexpr std::array<KeyCode, kVKTableSize> make_vk_table() {
     t[vk::kBackspace] = K::Backspace;
     t[vk::kEscape]    = K::Escape;
     t[vk::kGrave]     = K::Tilde;
+    t[vk::kDelete]    = K::Delete;
+    t[vk::kHome]      = K::Home;
+    t[vk::kEnd]       = K::End;
 
     t[vk::kLeftShift]  = K::LeftShift;
     t[vk::kRightShift] = K::RightShift;

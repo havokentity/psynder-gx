@@ -39,6 +39,9 @@ inline KeyCode vk_to_keycode(u32 vk, u32 lparam_flags) noexcept {
         case VK_SPACE:    return KeyCode::Space;
         case VK_TAB:      return KeyCode::Tab;
         case VK_BACK:     return KeyCode::Backspace;
+        case VK_DELETE:   return KeyCode::Delete;
+        case VK_HOME:     return KeyCode::Home;
+        case VK_END:      return KeyCode::End;
         case VK_LEFT:     return KeyCode::Left;
         case VK_RIGHT:    return KeyCode::Right;
         case VK_UP:       return KeyCode::Up;
