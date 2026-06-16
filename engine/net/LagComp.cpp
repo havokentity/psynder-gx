@@ -10,13 +10,11 @@
 // linear interpolation. Snapshots arrive in monotonic tick order; the head
 // is the newest.
 //
-// Interpolation model: byte-wise linear interp is meaningless for the
-// underlying physics state (it'd interpolate raw memory). Until lane 17
-// settles the WorldState layout we treat the bytes as opaque and snap to
-// the OLDER bracket snapshot when the sub-tick fraction is < 0.5, and to
-// the NEWER snapshot otherwise. Once lane 17 publishes the concrete type
-// (filed as a follow-up Issue per the task spec) this function will pivot
-// to a structure-aware lerp of per-entity transforms.
+// Interpolation model: lane 17 now publishes a typed destruction WorldState
+// byte contract, but lane 18 deliberately does not link destruction/worldstate
+// interpolation code yet. Until that handshake lands, rewind snaps to the
+// OLDER bracket snapshot when the sub-tick fraction is < 0.5, and to the
+// NEWER snapshot otherwise.
 
 #include "LagComp.h"
 
@@ -35,8 +33,7 @@ PSY_FORCEINLINE u32 wrap_index(u32 idx, u32 cap) noexcept {
 
 // ─── LagCompContext ───────────────────────────────────────────────────────
 
-LagCompContext::LagCompContext(const TickConfig& cfg) noexcept
-    : cfg_(cfg) {
+LagCompContext::LagCompContext(const TickConfig& cfg) noexcept : cfg_(cfg) {
     // Capacity = lag_comp_ticks + 1 so we can hold the oldest legal rewind
     // target AND the most recent post-tick snapshot simultaneously.
     capacity_ = cfg.lag_comp_ticks + 1u;
@@ -45,21 +42,26 @@ LagCompContext::LagCompContext(const TickConfig& cfg) noexcept
 
 LagCompContext::~LagCompContext() noexcept = default;
 
-u32 LagCompContext::stored_count() const noexcept { return count_; }
+u32 LagCompContext::stored_count() const noexcept {
+    return count_;
+}
 
 u32 LagCompContext::oldest_tick() const noexcept {
-    if (count_ == 0 || capacity_ == 0) return 0;
+    if (count_ == 0 || capacity_ == 0)
+        return 0;
     const u32 oldest_idx = wrap_index(head_ + capacity_ - count_ + 1u, capacity_);
     return ring_[oldest_idx].tick;
 }
 
 u32 LagCompContext::newest_tick() const noexcept {
-    if (count_ == 0) return 0;
+    if (count_ == 0)
+        return 0;
     return ring_[head_].tick;
 }
 
-void LagCompContext::push_internal_(u32 tick, const OpaqueWorldState& state) noexcept {
-    if (capacity_ == 0) return;
+void LagCompContext::push_internal_(u32 tick, const DestructionWorldState& state) noexcept {
+    if (capacity_ == 0)
+        return;
 
     // Advance head. If we've filled the ring, the oldest entry is evicted
     // by being overwritten.
@@ -68,7 +70,8 @@ void LagCompContext::push_internal_(u32 tick, const OpaqueWorldState& state) noe
         count_ = 1;
     } else {
         head_ = wrap_index(head_ + 1u, capacity_);
-        if (count_ < capacity_) ++count_;
+        if (count_ < capacity_)
+            ++count_;
     }
     Slot& s = ring_[head_];
     s.tick = tick;
@@ -80,13 +83,14 @@ void LagCompContext::push_internal_(u32 tick, const OpaqueWorldState& state) noe
     }
 }
 
-bool LagCompContext::bracket_internal_(
-    u32 target_tick,
-    const u8*& out_older_bytes, u32& out_older_tick,
-    const u8*& out_newer_bytes, u32& out_newer_tick,
-    usize& out_state_size) const noexcept
-{
-    if (count_ == 0 || capacity_ == 0) return false;
+bool LagCompContext::bracket_internal_(u32 target_tick,
+                                       const u8*& out_older_bytes,
+                                       u32& out_older_tick,
+                                       const u8*& out_newer_bytes,
+                                       u32& out_newer_tick,
+                                       usize& out_state_size) const noexcept {
+    if (count_ == 0 || capacity_ == 0)
+        return false;
 
     // Walk slots from oldest to newest.
     const u32 oldest_idx = wrap_index(head_ + capacity_ - count_ + 1u, capacity_);
@@ -108,10 +112,10 @@ bool LagCompContext::bracket_internal_(
         // target is older than every stored entry — caller will clamp.
         const u32 idx = oldest_idx;
         out_older_bytes = ring_[idx].bytes.data();
-        out_older_tick  = ring_[idx].tick;
+        out_older_tick = ring_[idx].tick;
         out_newer_bytes = out_older_bytes;
-        out_newer_tick  = out_older_tick;
-        out_state_size  = ring_[idx].bytes.size();
+        out_newer_tick = out_older_tick;
+        out_state_size = ring_[idx].bytes.size();
         return true;
     }
     if (!newer) {
@@ -120,37 +124,39 @@ bool LagCompContext::bracket_internal_(
     // Both bracket snapshots MUST have the same byte size or the later
     // memcpy in rewind_world_to would read past the end of `newer` when
     // it gets selected for the lerp fallback.  This is the invariant
-    // push_world_snapshot relies on (every push is OpaqueWorldState.size
+    // push_world_snapshot relies on (every push is DestructionWorldState.size
     // bytes), but we double-check here because a future push_internal_
     // could regress it — Copilot's PR #10 review caught the missing
     // assertion.
-    if (older->bytes.size() != newer->bytes.size()) return false;
+    if (older->bytes.size() != newer->bytes.size())
+        return false;
     out_older_bytes = older->bytes.data();
-    out_older_tick  = older->tick;
+    out_older_tick = older->tick;
     out_newer_bytes = newer->bytes.data();
-    out_newer_tick  = newer->tick;
-    out_state_size  = older->bytes.size();
+    out_newer_tick = newer->tick;
+    out_state_size = older->bytes.size();
     return true;
 }
 
 // ─── Free functions ───────────────────────────────────────────────────────
 
-void push_world_snapshot(LagCompContext&         ctx,
-                         const OpaqueWorldState& state,
-                         u32                     tick) noexcept {
+void push_world_snapshot(LagCompContext& ctx, const DestructionWorldState& state, u32 tick) noexcept {
     ctx.push_internal_(tick, state);
 }
 
-RewindResult rewind_world_to(LagCompContext&   ctx,
-                             OpaqueWorldState& out_state,
-                             f64               client_view_time_ms,
-                             u32               current_tick,
-                             u16               sub_tick_frac_u16) noexcept {
-    if (ctx.stored_count() == 0) return RewindResult::Unavailable;
-    if (!out_state.data || out_state.size == 0) return RewindResult::Unavailable;
+RewindResult rewind_world_to(LagCompContext& ctx,
+                             DestructionWorldState& out_state,
+                             f64 client_view_time_ms,
+                             u32 current_tick,
+                             u16 sub_tick_frac_u16) noexcept {
+    if (ctx.stored_count() == 0)
+        return RewindResult::Unavailable;
+    if (!out_state.data || out_state.size == 0)
+        return RewindResult::Unavailable;
 
     const TickConfig& cfg = ctx.tick_config();
-    if (cfg.frame_ms <= 0.0) return RewindResult::Unavailable;
+    if (cfg.frame_ms <= 0.0)
+        return RewindResult::Unavailable;
 
     // Server timeline anchor: current_tick * frame_ms is "now" in the same
     // base as client_view_time_ms.
@@ -162,16 +168,16 @@ RewindResult rewind_world_to(LagCompContext&   ctx,
     const f64 floor_ms = now_ms - static_cast<f64>(TickConfig::kMaxLagCompWindowMs);
     if (desired_ms < floor_ms) {
         desired_ms = floor_ms;
-        clamped    = true;
+        clamped = true;
     }
     if (desired_ms > now_ms) {
         desired_ms = now_ms;
-        clamped    = true;
+        clamped = true;
     }
 
     // Target tick + fraction.
     const f64 target_tick_f = desired_ms / cfg.frame_ms;
-    u32       target_tick   = static_cast<u32>(target_tick_f);
+    u32 target_tick = static_cast<u32>(target_tick_f);
     // The 16-bit sub-tick fraction lives in [0, 0xFFFF].  Divide by
     // 65536.0 (NOT 0xFFFF) so the maximum encoded value 0xFFFF maps to
     // just under 1.0 (≈ 0.99998) instead of exactly 1.0.  Earlier
@@ -179,22 +185,22 @@ RewindResult rewind_world_to(LagCompContext&   ctx,
     // exactly on a tick boundary, push `target_tick` forward by one in
     // the normalisation loop below, and break the clamping/bracketing
     // contract.  Copilot's PR #10 review caught it.
-    const f64 subtick_frac = static_cast<f64>(sub_tick_frac_u16)
-                             / 65536.0;
+    const f64 subtick_frac = static_cast<f64>(sub_tick_frac_u16) / 65536.0;
     f64 frac = (target_tick_f - static_cast<f64>(target_tick)) + subtick_frac;
-    while (frac >= 1.0) { ++target_tick; frac -= 1.0; }
-    if (frac < 0.0) frac = 0.0;
+    while (frac >= 1.0) {
+        ++target_tick;
+        frac -= 1.0;
+    }
+    if (frac < 0.0)
+        frac = 0.0;
 
     // Bracket.
     const u8* older = nullptr;
     const u8* newer = nullptr;
-    u32       older_tick = 0;
-    u32       newer_tick = 0;
-    usize     state_size = 0;
-    if (!ctx.bracket_internal_(target_tick,
-                               older, older_tick,
-                               newer, newer_tick,
-                               state_size)) {
+    u32 older_tick = 0;
+    u32 newer_tick = 0;
+    usize state_size = 0;
+    if (!ctx.bracket_internal_(target_tick, older, older_tick, newer, newer_tick, state_size)) {
         return RewindResult::Unavailable;
     }
 
@@ -213,8 +219,10 @@ RewindResult rewind_world_to(LagCompContext&   ctx,
         // Position of target_tick + frac inside [older_tick, newer_tick].
         const f64 pos = static_cast<f64>(target_tick - older_tick) + frac;
         w = pos / static_cast<f64>(span);
-        if (w < 0.0) w = 0.0;
-        if (w > 1.0) w = 1.0;
+        if (w < 0.0)
+            w = 0.0;
+        if (w > 1.0)
+            w = 1.0;
     }
     const u8* chosen = (w < 0.5) ? older : newer;
     std::memcpy(out_state.data, chosen, state_size);

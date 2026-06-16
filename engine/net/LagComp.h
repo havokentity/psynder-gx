@@ -26,22 +26,27 @@
 
 #pragma once
 
+#include <vector>
+
 #include "TickConfig.h"
 #include "core/Types.h"
-
-#include <vector>
+#include "physics/destruction/PublicDestruction.h"
 
 namespace psynder::net {
 
 // ──────────────────────────────────────────────────────────────────────────────
-// WorldState — opaque to the net layer. Game/physics defines the real type;
-// until M6 / lane 17 settles the contract, we carry it as a void pointer
-// paired with a size. Real hitreg code will cast to a concrete type.
+// DestructionWorldState — typed lane-17 world-state bytes.
+//
+// Lane 17 owns the concrete wire layout in
+// physics/destruction/PublicDestruction.h. The net layer still stores a deep
+// copy of the bytes, but call sites now name the real producer contract instead
+// of passing an anonymous void pointer payload.
 // ──────────────────────────────────────────────────────────────────────────────
-struct OpaqueWorldState {
-    void*  data     = nullptr;
-    usize  size     = 0;
-};
+using DestructionWorldState = ::psynder::physics::destruction::WorldState;
+
+// Compatibility for older call sites. New code should use
+// DestructionWorldState so the lane-17 ownership is visible in the type name.
+using OpaqueWorldState [[deprecated("use DestructionWorldState")]] = DestructionWorldState;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // RewindResult — returned by rewind_world_to() to communicate the quality of
@@ -49,10 +54,10 @@ struct OpaqueWorldState {
 // unavailable (e.g. server just started, no history yet).
 // ──────────────────────────────────────────────────────────────────────────────
 enum class RewindResult : u8 {
-    Ok         = 0,  // Exact or interpolated rewind; safe to validate hit.
-    Clamped    = 1,  // Requested time older than the rewind buffer; state at
-                     // buffer head returned instead. Fire with caution.
-    Unavailable = 2, // No history in buffer at all; caller should reject hit.
+    Ok = 0,           // Exact or interpolated rewind; safe to validate hit.
+    Clamped = 1,      // Requested time older than the rewind buffer; state at
+                      // buffer head returned instead. Fire with caution.
+    Unavailable = 2,  // No history in buffer at all; caller should reject hit.
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -63,17 +68,16 @@ enum class RewindResult : u8 {
 // a deep copy of the bytes passed to `push_world_snapshot`. Older entries
 // are evicted automatically as new ticks arrive.
 //
-// The WorldState payload is opaque to the net layer (see OpaqueWorldState
-// above). Lane 17 (physics-destruction) will eventually settle the concrete
-// layout via a follow-up Issue. For now the buffer stores `(tick, bytes)`
-// pairs and lets the hitreg layer cast the bytes back to its real type.
+// The WorldState payload is owned by lane 17 (physics-destruction). The buffer
+// stores `(tick, bytes)` pairs and returns the same typed byte contract on
+// rewind.
 // ──────────────────────────────────────────────────────────────────────────────
 class LagCompContext {
-public:
+   public:
     explicit LagCompContext(const TickConfig& cfg) noexcept;
     ~LagCompContext() noexcept;
 
-    LagCompContext(const LagCompContext&)            = delete;
+    LagCompContext(const LagCompContext&) = delete;
     LagCompContext& operator=(const LagCompContext&) = delete;
 
     // Returns the depth of the rewind buffer in ticks (= cfg_.lag_comp_ticks).
@@ -91,26 +95,28 @@ public:
 
     // Internal: append a snapshot. Public so the free function
     // push_world_snapshot() can delegate; not part of the documented API.
-    void push_internal_(u32 tick, const OpaqueWorldState& state) noexcept;
+    void push_internal_(u32 tick, const DestructionWorldState& state) noexcept;
 
     // Internal: locate the snapshot bracketing `target_tick` (older + newer)
     // for linear interpolation. Returns false if buffer is empty.
     bool bracket_internal_(u32 target_tick,
-                           const u8*& out_older_bytes, u32& out_older_tick,
-                           const u8*& out_newer_bytes, u32& out_newer_tick,
+                           const u8*& out_older_bytes,
+                           u32& out_older_tick,
+                           const u8*& out_newer_bytes,
+                           u32& out_newer_tick,
                            usize& out_state_size) const noexcept;
 
-private:
+   private:
     struct Slot {
-        u32              tick = 0;
-        std::vector<u8>  bytes;
+        u32 tick = 0;
+        std::vector<u8> bytes;
     };
 
-    TickConfig         cfg_;
-    std::vector<Slot>  ring_;
-    u32                head_  = 0;  // index of newest entry
-    u32                count_ = 0;
-    u32                capacity_ = 0;
+    TickConfig cfg_;
+    std::vector<Slot> ring_;
+    u32 head_ = 0;  // index of newest entry
+    u32 count_ = 0;
+    u32 capacity_ = 0;
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -136,12 +142,11 @@ private:
 // optionally interpolated) world state. If the stored snapshot size doesn't
 // match `out_state.size`, the call returns Unavailable.
 // ──────────────────────────────────────────────────────────────────────────────
-RewindResult rewind_world_to(
-    LagCompContext&   ctx,
-    OpaqueWorldState& out_state,
-    f64               client_view_time_ms,
-    u32               current_tick,
-    u16               sub_tick_frac_u16) noexcept;
+RewindResult rewind_world_to(LagCompContext& ctx,
+                             DestructionWorldState& out_state,
+                             f64 client_view_time_ms,
+                             u32 current_tick,
+                             u16 sub_tick_frac_u16) noexcept;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // push_world_snapshot — record the current world state into the lag-comp
@@ -149,9 +154,6 @@ RewindResult rewind_world_to(
 // The bytes pointed at by `state.data` are deep-copied; the caller is free
 // to mutate the buffer immediately after this returns.
 // ──────────────────────────────────────────────────────────────────────────────
-void push_world_snapshot(
-    LagCompContext&         ctx,
-    const OpaqueWorldState& state,
-    u32                     tick) noexcept;
+void push_world_snapshot(LagCompContext& ctx, const DestructionWorldState& state, u32 tick) noexcept;
 
 }  // namespace psynder::net
